@@ -33,8 +33,8 @@ class AgentEvent(BaseModel):
 
 class LLMResponse(BaseModel):
   """llm_tool_call is function name which llm called"""
-  llm_answer : str
-  llm_reasoning_content : str
+  llm_answer : str | None = None
+  llm_reasoning_content : str | None = None
   events : list[AgentEvent] = Field(default_factory=list) 
 
 class SystemPrompt(BaseModel):
@@ -62,15 +62,53 @@ def save_history_chat(messages:list[dict]):
   with open("chat_history.json",mode="w",encoding="utf-8") as f:
     json.dump(messages,f,indent=2,ensure_ascii=False,)
 
+#工具函数------------------
 def get_food()->Any:
-  return "其实啥也没有喵-v-"
+  return "其实啥也没有-v-"
 
 def send_popup_to_user(content:str):
   return f"成功向用户发一个弹窗，弹窗的内容是{content}"
 
+
+#测试工具------------------
+def dict_result_test()->dict:
+  return {
+    "name":"小明",
+    "content":"Hello"
+  }
+
+def raise_error_func():
+  raise ValueError("执行时异常")
+#---------------------
+
 """解析LLM调用工具时传入的参数"""
-def parse_tool_arguments():
+def parse_tool_arguments(raw_arguments:str | None)->dict:
+  try :
+    result = json.loads(raw_arguments or "{}")
+  except (json.JSONDecodeError,TypeError) as exc:
+    raise ValueError("工具参数解析失败")
   
+  if not isinstance(result,dict):
+    raise ValueError("工具参数解析失败，参数必须是JSON Object")
+
+  return result
+
+"""
+构造错误返回
+"""
+def build_error_result(tool_call_id,error_message : str)->dict:
+  return {
+    "role":"tool",
+    "tool_call_id":tool_call_id,
+    "content":json.dumps(
+      {
+        "OK":False,
+        "error":error_message,
+      },ensure_ascii=False,default=str
+    )
+  }
+
+
 
 def run_one_turn(messages : list[dict], on_event : Callable[[AgentEvent],None])->LLMResponse:
   events : list[AgentEvent] = []
@@ -144,32 +182,19 @@ def run_one_turn(messages : list[dict], on_event : Callable[[AgentEvent],None])-
     for tool_call in response.choices[0].message.tool_calls:
       func_name = tool_call.function.name
       try :
-        func_arguments = json.loads(tool_call.function.arguments or "{}")
-        if not isinstance(func_arguments,dict):
-          raise ValueError("工具参数必须是JSON Object")
-      except (json.JSONDecodeError,ValueError) as exc:
+        func_arguments = parse_tool_arguments(tool_call.function.arguments)
+      except ValueError as exc:
         error_message = f"工具参数解析失败"
         emit(
           AgentEvent(
             type="tool_call.failed",
             tool_call_id=tool_call.id,
             tool_call_name=func_name,
-            tool_call_arguments="错误参数",
+            tool_call_arguments={},
             error=error_message
           )
         )
-        messages.append(
-          {
-            "role":"tool",
-            "tool_call_id":tool_call.id,
-            "content":json.dumps(
-              {
-                "ok":False,
-                "error":error_message,
-              },ensure_ascii=False,default=str
-            )
-          }
-        )
+        messages.append(build_error_result(tool_call_id=tool_call.id,error_message=error_message))
         continue
       emit(
         AgentEvent(
@@ -180,7 +205,7 @@ def run_one_turn(messages : list[dict], on_event : Callable[[AgentEvent],None])-
         )
       )
 
-      func = function_map[func_name]
+      func = function_map.get(func_name)
       #tool is not avaliable
       if func is None:
         error_message = f"未注册的工具"
@@ -189,23 +214,11 @@ def run_one_turn(messages : list[dict], on_event : Callable[[AgentEvent],None])-
             type="tool_call.failed",
             tool_call_id=tool_call.id,
             tool_call_name=func_name,
-            tool_call_arguments=func_arguments
+            tool_call_arguments=func_arguments,
+            error=error_message
           )
         )
-        func_result = json.dumps(
-          {
-            "OK":False,
-            "content":error_message,
-          },
-          ensure_ascii=False
-        )
-        messages.append(
-          {
-            "role":"tool",
-            "tool_call_id":tool_call.id,
-            "content":func_result,
-          }
-        )
+        messages.append(build_error_result(tool_call_id=tool_call.id,error_message=error_message))
         continue
 
       #tool is avaliable
@@ -222,16 +235,6 @@ def run_one_turn(messages : list[dict], on_event : Callable[[AgentEvent],None])-
       try:
         func_result = func(**func_arguments)
         duration_ms = (time.perf_counter()-start_at)*1000
-        emit(
-          AgentEvent(
-            type="tool_call.completed",
-            tool_call_id=tool_call.id,
-            tool_call_name=func_name,
-            tool_call_arguments=func_arguments,
-            result=func_result,
-            duration_ms=duration_ms
-          )
-        )
       except Exception as exc:
         error_message = f"{type(exc).__name__}:{exc}"
         duration_ms = (time.perf_counter()-start_at)*1000
@@ -244,25 +247,34 @@ def run_one_turn(messages : list[dict], on_event : Callable[[AgentEvent],None])-
           duration_ms=duration_ms
           )
         )
-        func_result = json.dumps(
-          {
-            "OK":False,
-            "error":error_message,
-          },
-          ensure_ascii=False
-        )
+        messages.append(build_error_result(tool_call_id=tool_call.id,error_message=error_message))
+        continue
+      
+      #工具执行成功，下面打印的内容为调试信息
       print(f"tool_call: {func_name},result:{func_result}")
-      messages.append(
-        {
-          "role":"tool",
-          "tool_call_id":tool_call.id,
-          "content":func_result
-        }
+      #执行工具没有抛出异常，工具正常执行，添加事件，将消息append进入messages
+      emit(
+        AgentEvent(
+          type="tool_call.completed",
+          tool_call_id=tool_call.id,
+          tool_call_name=func_name,
+          tool_call_arguments=func_arguments,
+          result=func_result,
+          duration_ms=duration_ms
+        )
       )
+      messages.append({
+        "role":"tool",
+        "tool_call_id":tool_call.id,
+        "content":stringify_tool_result(func_result)
+      })
+      
 
 function_map = {
   "get_food":get_food,
-  "send_popup_to_user":send_popup_to_user
+  "send_popup_to_user":send_popup_to_user,
+  "dict_result_test":dict_result_test,
+  "raise_error_func":raise_error_func,
 }
 
 tools = [
@@ -289,7 +301,30 @@ tools = [
             "type":"string",
             "description":"弹窗中的消息内容，.e.g 你在干什么呀为什么不理我"
           }
-        }
+        },
+        "required":["content"],
+      }
+    }
+  },
+  {
+    "type":"function",
+    "function":{
+      "name":"dict_result_test",
+      "description":"这是一个测试工具，用来测试返回字典的工具结果能否被合法的转成字符串",
+      "parameters":{
+        "type":"object",
+        "properties":{}
+      }
+    }
+  },
+  {
+    "type":"function",
+    "function":{
+      "name":"raise_error_func",
+      "description":"这是一个测试工具，用来测试工具执行时发生异常能否正常处理",
+      "parameters":{
+        "type":"object",
+        "properties":{}
       }
     }
   }
