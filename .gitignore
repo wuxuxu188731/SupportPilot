@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 aaa.py
 .superpowers/
+.pytest_cache/
