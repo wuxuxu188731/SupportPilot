@@ -9,3 +9,6 @@ def create_llm_client()-> OpenAI:
     api_key=os.environ["DEEPSEEK_API_KEY"],
     base_url="https://api.deepseek.com"
   )
+
+def get_chat_db_path()->str:
+  return os.getenv("CHAT_DB_PATH","chat_history.db")

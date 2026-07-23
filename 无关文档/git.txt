@@ -1,0 +1,5 @@
+git init  //初始化仓库
+git add  {file_name}    //将文件添加到缓存区
+git add .gitignore
+git add .  //将所有文件加入缓冲区
+git commit -m"提交信息"

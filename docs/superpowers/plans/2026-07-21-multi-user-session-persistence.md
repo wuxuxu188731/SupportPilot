@@ -944,6 +944,7 @@ from app.sessions.base import Conversation, ConversationNotFoundError
 
 
 class FakeChatService:
+    
     def __init__(self):
         self.calls = []
 

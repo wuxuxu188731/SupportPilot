@@ -1,0 +1,89 @@
+1.学会了python里面SQlite的使用
+2.了解了一个类里面静态方法和普通方法的区别：普通方法默认会传self参数，而静态方法不会
+3.加深对事务的理解
+4.了解并执行了一次TDD(测试驱动开发)的全流程：先写调用功能的测试代码，然后跑测试红灯，接着
+只写最少、最简单的业务代码，让刚才失败的测试全部通过，不用优化，只求功能跑通。
+最后在所有测试保持通过的前提下，优化代码结构、消除重复、提升可读性，不新增功能逻辑。
+5.踩坑写CRUD的时候填写参数替换占位符"？",错误方式：(args)，正确方式：(args,)
+6.写CRUD前一定要先校验，传进来的参数是不是符合预期，可不可能未NONE或者非法格式，在进行数据库操作的时候，例如增加CREATE、
+更新UPDATE，和删除DELETE，一定要判断待修改入库的数据是否是符合业务场景的(是否需要先去数据库查询对应的数据校验数据的准确性)，
+是否需要放进一个事务里面，一步修改全部修改，一步失误全部回退
+7.学会了写上下文管理器：
+场景1：连接数据库的时候，通过上下文管理器@Contextmanager进行connection的资源释放,相关代码如下：
+@contextmanager
+  def _connection(self)->Iterator[sqlite3.Connection]:
+    connection = self._connect()
+    try:
+      with connection:
+        yield connection
+    finally:
+      connection.close()
+使用时： with _connection() as connection:
+          ... #这里对应的也就是yield connection
+
+场景2：在使用锁的时候，首先需要创建一个字典对象dict[str,Lock](也就是锁注册表),其中str为conversation_id，表示每个会话都持
+有一把锁，所有读写一个conversation的操作只能有一个线程，同时锁注册表本身也会被多个线程进行读写，需要另一把锁来保证同一时间内
+只有一个线程对"锁注册表"进行读写操作，相关代码如下：
+@contextmanager
+  def acquire(self, conversation_id : str)->Iterator[None]:
+    with self._registry_guard :
+      conversation_lock = self._locks.setdefault(
+        conversation_id,
+        Lock(),
+      )
+
+      with conversation_lock :
+        yield
+
+8.了解了python里面的多线程编程
+9.学会在写测试的时候临时设置一个仅作用于当前函数范围的环境变量monkeypatch.setenv("DEEPSEEK_API_KEY","test-only-key")
+10.学会了nonlocal的使用，表示这个变量从外层函数里面找：
+def test_same_conversation_requests_are_serialized(tmp_path):
+  first_entered = Event()
+  release_first = Event()
+  second_entered = Event()
+  call_guard = Lock()
+  call_count = 0
+
+  #这个函数的作用是模拟run_one_turn,不去调用真实的LLM
+  def controlled_runner(*, messages):
+    nonlocal call_count #告诉python解释器call_count这个变量是外层函数里面的call_count = 0这个变量，不用重新创建变量
+    with call_guard:
+      call_count += 1
+      current_call = call_count
+    if current_call == 1:  #我是第一个进入的请求
+      first_entered.set()   #True
+      assert release_first.wait(timeout=2)#阻塞，两秒内当有release_first.set()执行后返回True,超过两秒自动返回False
+    else:  #我是第二个进入的请求
+      second_entered.set()
+    messages.append({"role": "assistant", "content": "answer"})
+    return LLMResponse(llm_answer="answer")
+
+  service, _ = build_service(tmp_path, controlled_runner)
+  conversation = service.create_conversation(user_id="user-a")
+
+  def ask(question):
+    service.chat(
+      user_id="user-a",
+      conversation_id=conversation.conversation_id,
+      question=question,
+    )
+
+  first = Thread(target=ask, args=("first",))  #线程1
+  second = Thread(target=ask, args=("second",))   
+  first.start()   #线程1启动，进去后阻塞2s
+  assert first_entered.wait(timeout=2)
+  second.start()  #线程2启动
+  assert not second_entered.wait(timeout=0.1)
+  release_first.set() #放行
+  first.join(timeout=2) #放行，等待线程1跑完
+  second.join(timeout=2) #放行，等待线程2跑完
+
+  assert second_entered.is_set()
+
+
+11. 对线程、锁的使用有了更深一步的理解：在ConversationLockRegistry里面，一个字典锁：用来表示每个会话都应该配一把锁，
+不同的线程不能同时操作同一个会话，同时，给字典锁也加一个锁，防止有两个线程同时访问这个字典获取同一个会话的锁，
+给字典加锁：只覆盖读取字典的流程，不覆盖chat的全过程
+给会话加锁：只覆盖chat的全过程，保证同一时间内只有一个线程能够访问同一个session
+12

@@ -9,9 +9,20 @@ class LLMResponse(BaseModel):
   events : list[AgentEvent] = Field(default_factory=list) 
 
 
-class SystemPrompt(BaseModel):
-  prompt : str
+class CreateConversationRequest(BaseModel):
+  user_id : str = Field(min_length=1)
+  system_prompt : str | None = None 
 
+class ConversationCreated(BaseModel):
+  conversation_id : str
 
-class UserQuestion(BaseModel):
-  question : str
+class ChatRequest(BaseModel):
+  user_id : str = Field(min_length=1)
+  question : str = Field(min_length=1)
+
+class UpdateSystemPromptRequest(BaseModel):
+  user_id : str = Field(min_length=1)
+  system_prompt : str = Field(min_length=1)
+
+class SystemPromptUpdated(BaseModel):
+  updated : bool
