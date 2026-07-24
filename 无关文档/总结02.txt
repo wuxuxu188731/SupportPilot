@@ -86,4 +86,7 @@ def test_same_conversation_requests_are_serialized(tmp_path):
 不同的线程不能同时操作同一个会话，同时，给字典锁也加一个锁，防止有两个线程同时访问这个字典获取同一个会话的锁，
 给字典加锁：只覆盖读取字典的流程，不覆盖chat的全过程
 给会话加锁：只覆盖chat的全过程，保证同一时间内只有一个线程能够访问同一个session
-12
+12.了解迭代的全过程：
+增加base.py : 增加实体类，可能的异常类(继承异常)，访问数据库的抽象接口类protocol
+新增对应protocal的实现类：实现protocol里面的所有方法，写对应的init()，数据库访问_connection()
+新增protocal实现类的测试：测试实现的抽象方法是否符合预期
