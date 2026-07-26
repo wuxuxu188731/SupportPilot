@@ -1,4 +1,4 @@
-from pydantic import BaseModel,Field
+from pydantic import BaseModel,Field,ConfigDict
 
 from app.agent.events import AgentEvent
 
@@ -10,18 +10,18 @@ class LLMResponse(BaseModel):
 
 
 class CreateConversationRequest(BaseModel):
-  user_id : str = Field(min_length=1)
+  model_config = ConfigDict({"extra":"forbid"})
   system_prompt : str | None = None 
 
 class ConversationCreated(BaseModel):
   conversation_id : str
 
 class ChatRequest(BaseModel):
-  user_id : str = Field(min_length=1)
+  model_config = ConfigDict({"extra":"forbid"})
   question : str = Field(min_length=1)
 
 class UpdateSystemPromptRequest(BaseModel):
-  user_id : str = Field(min_length=1)
+  model_config = ConfigDict({"extra":"forbid"})
   system_prompt : str = Field(min_length=1)
 
 class SystemPromptUpdated(BaseModel):

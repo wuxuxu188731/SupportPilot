@@ -124,3 +124,15 @@ def test_message_ownership_is_enforced(tmp_path):
           conversation_id = conversation.conversation_id,
           user_id = "user-b"
         )
+
+
+def test_update_system_prompt_hides_wrong_owner(tmp_path):
+    store = SQLiteSessionStore(tmp_path / "chat.db")
+    conversation = store.create_conversation(user_id="user-a")
+
+    with pytest.raises(ConversationNotFoundError):
+      store.update_system_prompt(
+        user_id="user-b",
+        conversation_id=conversation.conversation_id,
+        system_prompt="not allowed",
+      )

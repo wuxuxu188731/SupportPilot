@@ -141,6 +141,11 @@ class SQLiteSessionStore:
     system_prompt : str,
     )->None:
     with self._connection() as connection:
+      self._get_owned_row(
+        connection=connection,
+        user_id=user_id,
+        conversation_id=conversation_id
+      )
       connection.execute(
         """
         UPDATE conversations 

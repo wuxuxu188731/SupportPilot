@@ -90,3 +90,22 @@ def test_same_conversation_requests_are_serialized(tmp_path):
 增加base.py : 增加实体类，可能的异常类(继承异常)，访问数据库的抽象接口类protocol
 新增对应protocal的实现类：实现protocol里面的所有方法，写对应的init()，数据库访问_connection()
 新增protocal实现类的测试：测试实现的抽象方法是否符合预期
+新增对应的service类：写对应的实体类，异常类，Service类，在service类里面调用对应的sqlite_store里面写好的操作数据库方法，
+同时对接口调用service所传进来的参数进行校验
+
+
+13. @dataclass(frozen=True)表示创建对应的类实体后，这个实体的属性不能被修改，只能读取
+14. 抛出异常时，一般都抛出自定义的异常类，然后from ... 例如：
+except jwt.InvalidTokenError as exc:
+  raise InvalidAccessTokenError("invalid access token") from exc
+
+15. monkeypatch的用法：
+.delenv(name="",raising=False)  函数作用域内删除环境变量里面key=name的键值对,
+                                raising=True的时候表示，当删除键值对时找不到对应的name的时候抛出一个异常
+.setenv(name="",value="")   函数作用域内添向环境变量里面添加键值对name:value
+
+16.HTTPException(..., headers=...) 里的 headers，表示随错误响应一起返回给客户端的 HTTP 响应头。
+以下情况抛出异常需要填写：
+HTTP 规范要求或建议返回某个响应头。
+客户端需要这个响应头决定下一步怎么处理。
+错误响应需要携带正文之外的协议元数据。
