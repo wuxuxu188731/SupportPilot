@@ -1,10 +1,11 @@
 from typing import Callable
 
+from app.application.organization_service import TenantContext
 from app.concurrency.conversation_locks import ConversationLockRegistry
 from app.schemas.chat import LLMResponse
 from app.sessions.base import Conversation,SessionStore
 
-#获取会话锁 run_agent 持久化
+
 class ChatService:
   def __init__(
     self,
@@ -20,46 +21,47 @@ class ChatService:
   def create_conversation(
     self,
     *,
-    user_id : str,
+    context : TenantContext,
     system_prompt : str | None = None
   )-> Conversation:
     return self._store.create_conversation(
-      user_id=user_id,
+      organization_id=context.organization_id,
+      user_id=context.user_id,
       system_prompt=system_prompt
     )
-  
+
   def update_system_prompt(
     self,
     *,
-    user_id : str,
+    context : TenantContext,
     conversation_id : str,
     system_prompt : str
   )-> None :
     with self._locks.acquire(conversation_id=conversation_id):
       self._store.update_system_prompt(
-        user_id=user_id,
+        organization_id=context.organization_id,
+        user_id=context.user_id,
         conversation_id=conversation_id,
         system_prompt=system_prompt
       )
 
-  #聊天 ：获取会话锁->get_conversations->load_messages->append_messages(持久化)
   def chat(
     self,
     *,
-    user_id : str,
+    context : TenantContext,
     conversation_id : str,
     question : str
   )-> LLMResponse:
     with self._locks.acquire(conversation_id=conversation_id):
-      #获取会话
       conversation = self._store.get_conversation(
-        user_id=user_id,
+        organization_id=context.organization_id,
+        user_id=context.user_id,
         conversation_id=conversation_id
       )
-      #加载会话的历史记录
       history = self._store.load_messages(
+        organization_id=context.organization_id,
+        user_id=context.user_id,
         conversation_id=conversation.conversation_id,
-        user_id=user_id,
       )
       messages : list[dict] = []
       if conversation.system_prompt:
@@ -72,12 +74,9 @@ class ChatService:
       response = self._run_agent(messages = messages)
 
       self._store.append_messages(
+        organization_id=context.organization_id,
+        user_id=context.user_id,
         conversation_id=conversation_id,
-        user_id=user_id,
         messages=messages[new_messages_start:]
       )
       return response
-
-    
-
-    

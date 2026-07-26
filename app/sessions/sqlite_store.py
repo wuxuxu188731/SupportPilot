@@ -22,7 +22,7 @@ class SQLiteSessionStore:
     connection.execute("PRAGMA foreign_keys = ON")
     connection.execute("PRAGMA journal_mode = WAL")
     return connection
-  
+
   @contextmanager
   def _connection(self)->Iterator[sqlite3.Connection]:
     connection = self._connect()
@@ -37,39 +37,43 @@ class SQLiteSessionStore:
   def _to_conversation(row : sqlite3.Row)->Conversation:
     return Conversation(
       conversation_id=row["id"],
+      organization_id=row["organization_id"],
       user_id=row["user_id"],
       system_prompt=row["system_prompt"]
     )
-  
+
   @staticmethod
   def _get_owned_row(
       connection:sqlite3.Connection,
       *,
+      organization_id : str,
       user_id : str,
       conversation_id : str
     )->sqlite3.Row:
     row = connection.execute(
       """
-      SELECT id,user_id,system_prompt 
-      FROM conversations 
-      WHERE id=? AND user_id=?
-      """,(conversation_id,user_id)
+      SELECT id, organization_id, user_id, system_prompt
+      FROM conversations
+      WHERE id=? AND organization_id=? AND user_id=?
+      """,(conversation_id, organization_id, user_id)
     ).fetchone()
 
     if row is None:
       raise ConversationNotFoundError("conversation not found")
-    
+
     return row
-  
+
   #create C
   def create_conversation(
     self,
     *,
+    organization_id : str,
     user_id : str,
     system_prompt : str | None = None
   )->Conversation:
     conversation = Conversation(
       conversation_id=str(uuid4()),
+      organization_id=organization_id,
       user_id=user_id,
       system_prompt=system_prompt
     )
@@ -77,10 +81,11 @@ class SQLiteSessionStore:
     with self._connection() as connection:
       connection.execute(
         """
-        INSERT INTO conversations (id, user_id, system_prompt, created_at, updated_at)
-        values(?,?,?,?,?)
+        INSERT INTO conversations (id, organization_id, user_id, system_prompt, created_at, updated_at)
+        values(?,?,?,?,?,?)
         """,(
           conversation.conversation_id,
+          conversation.organization_id,
           conversation.user_id,
           conversation.system_prompt,
           current_time,
@@ -88,16 +93,22 @@ class SQLiteSessionStore:
         )
       )
     return conversation
-  
+
   #get R
   def get_conversation(
     self,
     *,
+    organization_id : str,
     user_id : str,
     conversation_id : str
   )->Conversation:
     with self._connection() as connection:
-      row = self._get_owned_row(connection,user_id=user_id,conversation_id=conversation_id)
+      row = self._get_owned_row(
+        connection,
+        organization_id=organization_id,
+        user_id=user_id,
+        conversation_id=conversation_id
+      )
     return self._to_conversation(row)
 
 
@@ -105,6 +116,7 @@ class SQLiteSessionStore:
   def update_system_prompt(
     self,
     *,
+    organization_id : str,
     user_id : str,
     conversation_id : str,
     system_prompt : str,
@@ -112,46 +124,46 @@ class SQLiteSessionStore:
     with self._connection() as connection:
       self._get_owned_row(
         connection=connection,
+        organization_id=organization_id,
         user_id=user_id,
         conversation_id=conversation_id
       )
       connection.execute(
         """
-        UPDATE conversations 
+        UPDATE conversations
         SET system_prompt=?, updated_at=CURRENT_TIMESTAMP
-        where id=? AND user_id=?
-        """,(system_prompt,conversation_id,user_id)
+        where id=? AND organization_id=? AND user_id=?
+        """,(system_prompt,conversation_id,organization_id,user_id)
       )
 
-  #加载消息列表，从数据库中加载消息列表
   def load_messages(
     self,
     *,
+    organization_id : str,
     user_id : str,
     conversation_id : str,
   )->list[dict]:
     with self._connection() as connection:
-      #对会话的存在性和所有权进行校验
       self._get_owned_row(
         connection=connection,
+        organization_id=organization_id,
         user_id=user_id,
         conversation_id=conversation_id
       )
       rows = connection.execute(
         """
-        SELECT payload_json 
-        FROM messages 
+        SELECT payload_json
+        FROM messages
         WHERE conversation_id = ?
         ORDER BY seq ASC
         """,(conversation_id,)
       ).fetchall()
     return [json.loads(row["payload_json"]) for row in rows]
 
-  #将增加的消息存入数据库：1.判断conversation_id是否存在，2.conversation对应的user_id是否匹配，
-  # 3.将增加的messages:list[dict]加入数据库中，
   def append_messages(
     self,
     *,
+    organization_id : str,
     user_id : str,
     conversation_id : str,
     messages : list[dict]
@@ -160,7 +172,12 @@ class SQLiteSessionStore:
       return
     with self._connection() as connection:
       connection.execute("BEGIN IMMEDIATE")
-      self._get_owned_row(connection=connection,user_id=user_id,conversation_id=conversation_id)
+      self._get_owned_row(
+        connection=connection,
+        organization_id=organization_id,
+        user_id=user_id,
+        conversation_id=conversation_id
+      )
       last_seq = connection.execute(
         """
         SELECT COALESCE(MAX(seq), 0)
@@ -190,9 +207,6 @@ class SQLiteSessionStore:
         """
         UPDATE conversations
         SET updated_at=CURRENT_TIMESTAMP
-        WHERE id=? AND user_id=?
-        """,(conversation_id,user_id)
+        WHERE id=? AND organization_id=? AND user_id=?
+        """,(conversation_id,organization_id,user_id)
       )
-
-
-  

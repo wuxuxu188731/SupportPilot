@@ -1,14 +1,44 @@
+import sqlite3
+
 import pytest
 
 from app.application.chat_service import ChatService
+from app.application.organization_service import TenantContext
 from app.concurrency.conversation_locks import ConversationLockRegistry
+from app.organizations.base import MembershipRole
 from app.schemas.chat import LLMResponse
 from app.sessions.sqlite_store import SQLiteSessionStore
 from threading import Barrier, Event, Lock, Thread
 
 
+CONTEXT = TenantContext(
+    user_id="user-a",
+    organization_id="org-a",
+    role=MembershipRole.AGENT,
+)
+
+
+def _seed_tenant_scope(database_path):
+    """Insert matching user, org, and membership rows so FK constraints pass."""
+    with sqlite3.connect(database_path) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute(
+            "INSERT INTO users(id, username, password_hash) VALUES (?, ?, ?)",
+            ("user-a", "testuser", "hash"),
+        )
+        conn.execute(
+            "INSERT INTO organizations(id, name) VALUES (?, ?)",
+            ("org-a", "Test Org"),
+        )
+        conn.execute(
+            "INSERT INTO memberships(organization_id, user_id, role) VALUES (?, ?, ?)",
+            ("org-a", "user-a", "agent"),
+        )
+
+
 def build_service(tmp_path, runner):
   store = SQLiteSessionStore(tmp_path / "chat.db")
+  _seed_tenant_scope(tmp_path / "chat.db")
   service = ChatService(
     store = store,
     run_agent = runner,
@@ -22,24 +52,21 @@ def direct_answer_runner(*, messages : list[dict])->LLMResponse:
     llm_answer="answer"
   )
 
-#验证聊天记录在对话中是严格隔离的
-"""
-先创建两个conversation -> 构造两条假messages -> 将messages_1 存入conversation_1数据库中 -> 查询出来 ->比较
-conversation_1里面的messages和conversation_2里面的messages ->
-"""
+
 def test_chat_persists_only_current_conversation(tmp_path):
   service, store = build_service(tmp_path,direct_answer_runner)
-  first = service.create_conversation(user_id="user-a")
-  second = service.create_conversation(user_id="user-a")
+  first = service.create_conversation(context=CONTEXT)
+  second = service.create_conversation(context=CONTEXT)
 
   service.chat(
-    user_id="user-a",
+    context=CONTEXT,
     conversation_id=first.conversation_id,
     question="hello"
   )
 
   assert store.load_messages(
-    user_id="user-a",
+    organization_id=CONTEXT.organization_id,
+    user_id=CONTEXT.user_id,
     conversation_id=first.conversation_id
   ) == [
     {
@@ -53,14 +80,13 @@ def test_chat_persists_only_current_conversation(tmp_path):
   ]
 
   assert store.load_messages(
-    user_id="user-a",
+    organization_id=CONTEXT.organization_id,
+    user_id=CONTEXT.user_id,
     conversation_id=second.conversation_id
   ) == []
-  
 
-"""
-验证在多轮会话中，系统提示词和完整聊天历史可以被正确、完整的传给大模型
-"""
+
+
 def test_second_turn_receives_previous_history_and_system_prompt(tmp_path):
   received_messages = []
 
@@ -70,20 +96,20 @@ def test_second_turn_receives_previous_history_and_system_prompt(tmp_path):
     return LLMResponse(
       llm_answer="answer"
     )
-  
+
   service, _ = build_service(tmp_path, recording_runner)
 
   conversation = service.create_conversation(
-    user_id="user-a",
+    context=CONTEXT,
     system_prompt="你是测试助手"
   )
   service.chat(
-    user_id="user-a",
+    context=CONTEXT,
     conversation_id=conversation.conversation_id,
     question="first"
   )
   service.chat(
-    user_id="user-a",
+    context=CONTEXT,
     conversation_id=conversation.conversation_id,
     question="second"
   )
@@ -95,28 +121,29 @@ def test_second_turn_receives_previous_history_and_system_prompt(tmp_path):
     { "role":"user", "content":"second"}
   ]
 
-#保证大模型在调用成功以前，绝对不将任何数据(包括用户问题)写入数据库
+
 def test_failed_runner_does_not_persist_partial_turn(tmp_path):
   def fail_runner(*, messages : list[dict]):
     messages.append({"role": "user", "content": "partial"})
     raise RuntimeError("model unavailable")
 
   service, store = build_service(tmp_path,fail_runner)
-  conversation = service.create_conversation(user_id="user-a")
+  conversation = service.create_conversation(context=CONTEXT)
 
   with pytest.raises(RuntimeError):
     service.chat(
-      user_id="user-a",
+      context=CONTEXT,
       conversation_id=conversation.conversation_id,
       question="will fail"
     )
 
   assert store.load_messages(
-    user_id="user-a",
+    organization_id=CONTEXT.organization_id,
+    user_id=CONTEXT.user_id,
     conversation_id=conversation.conversation_id,
   ) == []
 
-#针对同一个对话的连续写入请求，必须严格串行化执行，不能并行处理
+
 def test_same_conversation_requests_are_serialized(tmp_path):
   first_entered = Event()
   release_first = Event()
@@ -125,24 +152,24 @@ def test_same_conversation_requests_are_serialized(tmp_path):
   call_count = 0
 
   def controlled_runner(*, messages):
-    nonlocal call_count 
+    nonlocal call_count
     with call_guard:
-      call_count += 1 
-      current_call = call_count 
+      call_count += 1
+      current_call = call_count
     if current_call == 1:
       first_entered.set()
-      assert release_first.wait(timeout=2) 
+      assert release_first.wait(timeout=2)
     else:
       second_entered.set()
     messages.append({"role": "assistant", "content": "answer"})
     return LLMResponse(llm_answer="answer")
 
   service, _ = build_service(tmp_path, controlled_runner)
-  conversation = service.create_conversation(user_id="user-a")
+  conversation = service.create_conversation(context=CONTEXT)
 
   def ask(question):
     service.chat(
-      user_id="user-a",
+      context=CONTEXT,
       conversation_id=conversation.conversation_id,
       question=question,
     )
@@ -159,9 +186,9 @@ def test_same_conversation_requests_are_serialized(tmp_path):
 
   assert second_entered.is_set()
 
-#验证不同对话conversation即使在同一个用户下，也完全可以、且应该并行执行，互不干扰
+
 def test_different_conversations_can_run_in_parallel(tmp_path):
-  both_runners_entered = Barrier(2) #必须凑齐 2 个线程，才能同时放行。
+  both_runners_entered = Barrier(2)
   errors = []
 
   def synchronized_runner(*, messages):
@@ -170,13 +197,13 @@ def test_different_conversations_can_run_in_parallel(tmp_path):
     return LLMResponse(llm_answer="answer")
 
   service, _ = build_service(tmp_path, synchronized_runner)
-  first = service.create_conversation(user_id="user-a")
-  second = service.create_conversation(user_id="user-a")
+  first = service.create_conversation(context=CONTEXT)
+  second = service.create_conversation(context=CONTEXT)
 
   def ask(conversation_id):
     try:
       service.chat(
-        user_id="user-a",
+        context=CONTEXT,
         conversation_id=conversation_id,
         question="hello",
       )

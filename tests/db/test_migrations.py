@@ -197,6 +197,76 @@ def test_latest_tenant_migration_can_rollback_without_losing_users(tmp_path):
         ).fetchone() == ("alice",)
 
 
+def test_legacy_conversation_is_backfilled_to_users_personal_org(tmp_path):
+    database_path = tmp_path / "conversation-backfill.db"
+    create_legacy_schema(database_path)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO users(id, username, password_hash)
+            VALUES ('user-1', 'alice', 'hash')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO conversations(id, user_id)
+            VALUES ('conversation-1', 'user-1')
+            """
+        )
+
+    upgrade_database(database_path)
+
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT c.organization_id, m.user_id, m.role
+            FROM conversations AS c
+            JOIN memberships AS m
+              ON m.organization_id = c.organization_id
+             AND m.user_id = c.user_id
+            WHERE c.id = 'conversation-1'
+            """
+        ).fetchone()
+
+    assert row[0]
+    assert row[1:] == ("user-1", "admin")
+
+
+def test_orphan_legacy_conversation_blocks_tenant_migration(tmp_path):
+    database_path = tmp_path / "orphan.db"
+    create_legacy_schema(database_path)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO conversations(id, user_id)
+            VALUES ('conversation-1', 'missing-user')
+            """
+        )
+
+    with pytest.raises(RuntimeError, match="unowned legacy conversations"):
+        upgrade_database(database_path)
+
+
+def test_conversation_tenant_scope_can_rollback_to_memberships(tmp_path):
+    database_path = tmp_path / "conversation-rollback.db"
+    upgrade_database(database_path)
+
+    command.downgrade(
+        alembic_config(database_path),
+        "0002_organization_memberships",
+    )
+
+    assert {"organizations", "memberships"} <= table_names(database_path)
+    with sqlite3.connect(database_path) as connection:
+        columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(conversations)"
+            ).fetchall()
+        }
+    assert "organization_id" not in columns
+
+
 def test_membership_rejects_unknown_role_and_duplicate_user(tmp_path):
     database_path = tmp_path / "constraints.db"
     upgrade_database(database_path)
