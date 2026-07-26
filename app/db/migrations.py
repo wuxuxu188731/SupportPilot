@@ -1,4 +1,5 @@
 import sqlite3
+import threading
 from pathlib import Path
 
 from alembic import command
@@ -31,6 +32,9 @@ BASELINE_COLUMNS = {
         "created_at",
     },
 }
+
+
+_upgrade_lock = threading.Lock()
 
 
 class DatabaseMigrationError(RuntimeError):
@@ -71,18 +75,19 @@ def _validate_legacy_schema(database_path: Path) -> None:
 
 
 def upgrade_database(database_path: str | Path) -> None:
-    path = Path(database_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tables = _table_names(path)
-    has_version_table = "alembic_version" in tables
-    business_tables = tables.intersection(BASELINE_TABLES)
+    with _upgrade_lock:
+        path = Path(database_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tables = _table_names(path)
+        has_version_table = "alembic_version" in tables
+        business_tables = tables.intersection(BASELINE_TABLES)
 
-    if not has_version_table and business_tables:
-        if business_tables != BASELINE_TABLES:
-            raise DatabaseMigrationError(
-                "partial legacy schema detected; restore a complete backup"
-            )
-        _validate_legacy_schema(path)
-        command.stamp(_config(path), BASELINE_REVISION)
+        if not has_version_table and business_tables:
+            if business_tables != BASELINE_TABLES:
+                raise DatabaseMigrationError(
+                    "partial legacy schema detected; restore a complete backup"
+                )
+            _validate_legacy_schema(path)
+            command.stamp(_config(path), BASELINE_REVISION)
 
-    command.upgrade(_config(path), "head")
+        command.upgrade(_config(path), "head")
