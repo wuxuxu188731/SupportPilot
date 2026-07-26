@@ -124,3 +124,115 @@ def test_baseline_downgrades_to_empty_database(tmp_path):
     assert not BUSINESS_BASELINE_TABLES.intersection(
         table_names(database_path)
     )
+
+
+def test_upgrade_creates_organization_and_membership_schema(tmp_path):
+    database_path = tmp_path / "tenant-schema.db"
+
+    upgrade_database(database_path)
+
+    assert {"organizations", "memberships"} <= table_names(database_path)
+    with sqlite3.connect(database_path) as connection:
+        membership_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(memberships)"
+            ).fetchall()
+        }
+
+    assert membership_columns == {
+        "organization_id",
+        "user_id",
+        "role",
+        "created_at",
+    }
+
+
+def test_existing_users_receive_personal_admin_memberships(tmp_path):
+    database_path = tmp_path / "legacy-users.db"
+    create_legacy_schema(database_path)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO users(id, username, password_hash)
+            VALUES ('user-1', 'alice', 'hash')
+            """
+        )
+
+    upgrade_database(database_path)
+
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT o.name, m.user_id, m.role
+            FROM memberships AS m
+            JOIN organizations AS o ON o.id = m.organization_id
+            """
+        ).fetchone()
+
+    assert row == ("alice organization", "user-1", "admin")
+
+
+def test_latest_tenant_migration_can_rollback_without_losing_users(tmp_path):
+    database_path = tmp_path / "tenant-rollback.db"
+    upgrade_database(database_path)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO users(id, username, password_hash)
+            VALUES ('user-1', 'alice', 'hash')
+            """
+        )
+
+    command.downgrade(
+        alembic_config(database_path),
+        "0001_baseline",
+    )
+
+    assert "organizations" not in table_names(database_path)
+    assert "memberships" not in table_names(database_path)
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT username FROM users WHERE id = 'user-1'"
+        ).fetchone() == ("alice",)
+
+
+def test_membership_rejects_unknown_role_and_duplicate_user(tmp_path):
+    database_path = tmp_path / "constraints.db"
+    upgrade_database(database_path)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(
+            """
+            INSERT INTO users(id, username, password_hash)
+            VALUES ('user-1', 'alice', 'hash')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO organizations(id, name)
+            VALUES ('org-1', 'Acme')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO memberships(organization_id, user_id, role)
+            VALUES ('org-1', 'user-1', 'admin')
+            """
+        )
+
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                """
+                INSERT INTO memberships(organization_id, user_id, role)
+                VALUES ('org-1', 'user-1', 'agent')
+                """
+            )
+
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                """
+                INSERT INTO memberships(organization_id, user_id, role)
+                VALUES ('org-1', 'missing-user', 'owner')
+                """
+            )
