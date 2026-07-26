@@ -6,13 +6,14 @@ from contextlib import contextmanager
 from typing import Iterator
 from datetime import datetime,timezone
 
+from app.db.migrations import upgrade_database
 from app.sessions.base import Conversation,ConversationNotFoundError
 
 
 class SQLiteSessionStore:
   def __init__(self, database_path : str|Path):
     self._database_path = database_path
-    self._initialize()
+    upgrade_database(self._database_path)
 
 
   def _connect(self)->sqlite3.Connection:
@@ -30,38 +31,6 @@ class SQLiteSessionStore:
         yield connection
     finally:
       connection.close()
-
-  
-  def _initialize(self)->None:
-    with self._connection() as connection:
-      connection.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS conversations (
-          id TEXT PRIMARY KEY,
-          user_id TEXT NOT NULL,
-          system_prompt TEXT,
-          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_conversations_user
-        ON conversations(user_id, updated_at);
-
-        CREATE TABLE IF NOT EXISTS messages (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          conversation_id TEXT NOT NULL,
-          seq INTEGER NOT NULL,
-          role TEXT NOT NULL,
-          payload_json TEXT NOT NULL,
-          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-          FOREIGN KEY(conversation_id) REFERENCES conversations(id),
-          UNIQUE(conversation_id, seq)
-        );
-
-        CREATE INDEX IF NOT EXISTS idx_messages_conversation_seq
-        ON messages(conversation_id, seq);
-        """
-      )
 
   #select
   @staticmethod

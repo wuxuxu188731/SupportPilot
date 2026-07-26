@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Iterator
 from uuid import uuid4
 
+from app.db.migrations import upgrade_database
 from app.users.base import(
   User,
   UserAlreadyExistError,
@@ -14,7 +15,7 @@ from app.users.base import(
 class SQLiteUserStore():
   def __init__(self, database_path : str | Path):
     self._database_path = database_path
-    self._initialize()
+    upgrade_database(self._database_path)
 
   def _connect(self) -> sqlite3.Connection:
     connection = sqlite3.Connection(self._database_path,timeout=30)
@@ -31,21 +32,6 @@ class SQLiteUserStore():
         yield connection
     finally:
       connection.close()
-
-  def _initialize(self) :
-    with self._connection() as connection:
-      connection.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS users(
-          id TEXT PRIMARY KEY,
-          username TEXT NOT NULL COLLATE NOCASE UNIQUE,
-          password_hash TEXT NOT NULL,
-          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username
-        ON users(username COLLATE NOCASE);
-        """
-      )
 
   @staticmethod
   def _to_row(row : sqlite3.Row) -> User:
