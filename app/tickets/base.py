@@ -26,6 +26,23 @@ class TicketStatus(str, Enum):
     CLOSED = "closed"
 
 
+class TicketCommentVisibility(str, Enum):
+    INTERNAL = "internal"
+    PUBLIC = "public"
+
+
+@dataclass(frozen=True)
+class TicketComment:
+    comment_id: str
+    organization_id: str
+    ticket_id: str
+    seq: int
+    author_user_id: str
+    visibility: TicketCommentVisibility
+    content: str
+    created_at: str
+
+
 @dataclass(frozen=True)
 class Ticket:
     ticket_id: str
@@ -52,6 +69,10 @@ class TicketAlreadyExistsError(ValueError):
 
 
 class InvalidTicketReferenceError(ValueError):
+    pass
+
+
+class InvalidTicketCommentReferenceError(ValueError):
     pass
 
 
@@ -86,4 +107,23 @@ class TicketStore(Protocol):
         organization_id: str,
         ticket_no: str,
     ) -> Ticket:
+        raise NotImplementedError
+
+    def add_comment(
+        self,
+        *,
+        organization_id: str,
+        ticket_id: str,
+        author_user_id: str,
+        visibility: TicketCommentVisibility,
+        content: str,
+    ) -> TicketComment:
+        raise NotImplementedError
+
+    def list_comments(
+        self,
+        *,
+        organization_id: str,
+        ticket_id: str,
+    ) -> list[TicketComment]:
         raise NotImplementedError

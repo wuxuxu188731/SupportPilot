@@ -1,15 +1,19 @@
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 from uuid import uuid4
 
 from app.db.migrations import upgrade_database
 from app.tickets.base import (
+    InvalidTicketCommentReferenceError,
     InvalidTicketReferenceError,
     Ticket,
     TicketAlreadyExistsError,
     TicketCategory,
+    TicketComment,
+    TicketCommentVisibility,
     TicketNotFoundError,
     TicketPriority,
     TicketStatus,
@@ -54,6 +58,19 @@ class SQLiteTicketStore(TicketStore):
             status=TicketStatus(row["status"]),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _to_comment(row: sqlite3.Row) -> TicketComment:
+        return TicketComment(
+            comment_id=row["id"],
+            organization_id=row["organization_id"],
+            ticket_id=row["ticket_id"],
+            seq=row["seq"],
+            author_user_id=row["author_user_id"],
+            visibility=TicketCommentVisibility(row["visibility"]),
+            content=row["content"],
+            created_at=row["created_at"],
         )
 
     def create_ticket(
@@ -154,3 +171,93 @@ class SQLiteTicketStore(TicketStore):
         if row is None:
             raise TicketNotFoundError("ticket not found")
         return self._to_ticket(row)
+
+    def add_comment(
+        self,
+        *,
+        organization_id: str,
+        ticket_id: str,
+        author_user_id: str,
+        visibility: TicketCommentVisibility,
+        content: str,
+    ) -> TicketComment:
+        self.get_by_id(
+            organization_id=organization_id,
+            ticket_id=ticket_id,
+        )
+        comment_id = str(uuid4())
+        created_at = datetime.now(timezone.utc).isoformat()
+        try:
+            with self._connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                last_seq = connection.execute(
+                    """
+                    SELECT COALESCE(MAX(seq), 0)
+                    FROM ticket_comments
+                    WHERE organization_id = ? AND ticket_id = ?
+                    """,
+                    (organization_id, ticket_id),
+                ).fetchone()[0]
+                next_seq = last_seq + 1
+                connection.execute(
+                    """
+                    INSERT INTO ticket_comments(
+                        id,
+                        organization_id,
+                        ticket_id,
+                        seq,
+                        author_user_id,
+                        visibility,
+                        content,
+                        created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        comment_id,
+                        organization_id,
+                        ticket_id,
+                        next_seq,
+                        author_user_id,
+                        visibility.value,
+                        content.strip(),
+                        created_at,
+                    ),
+                )
+                row = connection.execute(
+                    """
+                    SELECT *
+                    FROM ticket_comments
+                    WHERE organization_id = ? AND id = ?
+                    """,
+                    (organization_id, comment_id),
+                ).fetchone()
+        except sqlite3.IntegrityError as exc:
+            raise InvalidTicketCommentReferenceError(
+                "invalid ticket comment references or content"
+            ) from exc
+        if row is None:
+            raise RuntimeError("created ticket comment could not be reloaded")
+        return self._to_comment(row)
+
+    def list_comments(
+        self,
+        *,
+        organization_id: str,
+        ticket_id: str,
+    ) -> list[TicketComment]:
+        self.get_by_id(
+            organization_id=organization_id,
+            ticket_id=ticket_id,
+        )
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM ticket_comments
+                WHERE organization_id = ? AND ticket_id = ?
+                ORDER BY seq ASC
+                """,
+                (organization_id, ticket_id),
+            ).fetchall()
+        return [self._to_comment(row) for row in rows]
