@@ -306,3 +306,33 @@ def test_membership_rejects_unknown_role_and_duplicate_user(tmp_path):
                 VALUES ('org-1', 'missing-user', 'owner')
                 """
             )
+
+
+def test_customer_migration_upgrade_and_rollback(tmp_path):
+    database_path = tmp_path / "customers.db"
+    config = alembic_config(database_path)
+
+    command.upgrade(config, "0004_customers")
+
+    assert "customers" in table_names(database_path)
+    with sqlite3.connect(database_path) as connection:
+        columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(customers)"
+            ).fetchall()
+        }
+    assert columns == {
+        "id",
+        "organization_id",
+        "customer_no",
+        "name",
+        "email",
+        "phone",
+        "created_at",
+    }
+
+    command.downgrade(config, "0003_conversation_tenant_scope")
+
+    assert "customers" not in table_names(database_path)
+    assert {"organizations", "memberships"} <= table_names(database_path)
