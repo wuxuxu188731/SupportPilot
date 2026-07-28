@@ -336,3 +336,38 @@ def test_customer_migration_upgrade_and_rollback(tmp_path):
 
     assert "customers" not in table_names(database_path)
     assert {"organizations", "memberships"} <= table_names(database_path)
+
+
+def test_order_migration_upgrade_and_rollback(tmp_path):
+    database_path = tmp_path / "orders.db"
+    config = alembic_config(database_path)
+
+    command.upgrade(config, "0005_orders")
+
+    assert {"customers", "orders"} <= table_names(database_path)
+    with sqlite3.connect(database_path) as connection:
+        columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(orders)"
+            ).fetchall()
+        }
+    assert columns == {
+        "id",
+        "organization_id",
+        "order_no",
+        "customer_id",
+        "status",
+        "item_summary",
+        "total_amount_cents",
+        "currency",
+        "placed_at",
+        "promised_ship_at",
+        "created_at",
+        "updated_at",
+    }
+
+    command.downgrade(config, "0004_customers")
+
+    assert "orders" not in table_names(database_path)
+    assert "customers" in table_names(database_path)
