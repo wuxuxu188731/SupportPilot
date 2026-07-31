@@ -287,7 +287,7 @@ class CustomerSupportService:
     self,
     *,
     context : TenantContext,
-    ticket_no : Ticket,
+    ticket_no : str,
     content : str
   )->TicketComment:
     normalized_ticket_no = self._required_text(

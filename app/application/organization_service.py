@@ -104,14 +104,14 @@ class OrganizationService:
         username: str,
         role: MembershipRole,
     ) -> Membership:
-        context = self.get_tenant_context(
+        context = self.get_tenant_context( #寻找用户(user_id)在组织(conversation_id)中的身份是admin还是agent
             user_id=actor_user_id,
             organization_id=organization_id,
         )
         if context.role is not MembershipRole.ADMIN:
             raise AdminRoleRequiredError("admin role required")
 
-        target_user = self._user_store.get_by_username(
+        target_user = self._user_store.get_by_username( #寻找待添加进组织的成员是否存在
             username=username.strip().casefold()
         )
         return self._organization_store.add_membership(
