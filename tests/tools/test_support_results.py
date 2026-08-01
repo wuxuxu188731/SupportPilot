@@ -1,12 +1,21 @@
+from dataclasses import dataclass,field
 import json
+import pytest
 
 from app.application.customer_support_service import (
     LogisticsAvailability,
     LogisticsDetails,
     OrderDetails,
+    OrderCustomerMismatchError,
+    SupportCustomerNotFoundError,
+    SupportOperationRejectedError,
+    SupportTicketNotFoundError,
+    TicketNumberGenerationError,
 )
+from app.application.organization_service import TenantContext
 from app.customers.base import Customer
 from app.orders.base import Order, OrderStatus
+from app.organizations.base import MembershipRole
 from app.shipments.base import Shipment, ShipmentStatus
 from app.tickets.base import (
     Ticket,
@@ -16,6 +25,7 @@ from app.tickets.base import (
     TicketPriority,
     TicketStatus,
 )
+from app.tools.support_gateway import CustomerSupportToolGateway
 from app.tools.support_results import (
     serialize_logistics_details,
     serialize_order_details,
@@ -24,6 +34,7 @@ from app.tools.support_results import (
     tool_failure,
     tool_success,
 )
+
 
 
 CUSTOMER = Customer(
@@ -49,6 +60,76 @@ ORDER = Order(
     promised_ship_at="2026-07-25T08:00:00+00:00",
     created_at="2026-07-23T08:00:00+00:00",
     updated_at="2026-07-23T08:00:00+00:00",
+)
+
+CONTEXT = TenantContext(
+    user_id="user-a",
+    organization_id="org-a",
+    role=MembershipRole.AGENT,
+)
+
+
+@dataclass
+class FakeSupportService:
+    calls: list[tuple] = field(default_factory=list)
+    fail_with: Exception | None = None
+
+    def get_order(self, *, context, order_no):
+        self.calls.append(("get_order", context, order_no))
+        if self.fail_with is not None:
+            raise self.fail_with
+        return OrderDetails(order=ORDER, customer=CUSTOMER)
+
+    def get_logistics(self, *, context, order_no):
+        self.calls.append(
+            ("get_logistics", context, order_no)
+        )
+        if self.fail_with is not None:
+            raise self.fail_with
+        return LogisticsDetails(
+            order=ORDER,
+            customer=CUSTOMER,
+            availability=LogisticsAvailability.NOT_CREATED,
+            shipment=None,
+        )
+
+    def create_ticket(self, **arguments):
+        self.calls.append(("create_ticket", arguments))
+        if self.fail_with is not None:
+            raise self.fail_with
+        return TICKET
+
+    def add_ticket_note(self, **arguments):
+        self.calls.append(("add_ticket_note", arguments))
+        if self.fail_with is not None:
+            raise self.fail_with
+        return NOTE
+
+TICKET = Ticket(
+    ticket_id="ticket-id",
+    organization_id="org-a",
+    ticket_no="TKT-NEW-001",
+    customer_id=CUSTOMER.customer_id,
+    order_id=ORDER.order_id,
+    created_by_user_id=CONTEXT.user_id,
+    assigned_to_user_id=CONTEXT.user_id,
+    summary="订单超过承诺时间仍未发货",
+    category=TicketCategory.LOGISTICS,
+    priority=TicketPriority.HIGH,
+    status=TicketStatus.OPEN,
+    created_at="2026-07-31T08:00:00+00:00",
+    updated_at="2026-07-31T08:00:00+00:00",
+)
+
+NOTE = TicketComment(
+    comment_id="comment-id",
+    organization_id="org-a",
+    ticket_id=TICKET.ticket_id,
+    seq=1,
+    author_user_id=CONTEXT.user_id,
+    visibility=TicketCommentVisibility.INTERNAL,
+    content="已联系仓库核查。",
+    created_at="2026-07-31T08:01:00+00:00",
 )
 
 
@@ -187,3 +268,119 @@ def test_success_and_failure_envelopes_are_json_safe():
     assert failure["error"]["code"] == "INVALID_ARGUMENTS"
     json.dumps(success, ensure_ascii=False)
     json.dumps(failure, ensure_ascii=False)
+
+
+def test_bound_create_ticket_injects_context_and_converts_enums():
+    service = FakeSupportService()
+    functions = CustomerSupportToolGateway(
+        service=service
+    ).bind(context=CONTEXT)
+
+    result = functions["create_ticket"](
+        order_no="ORD-DELAY-001",
+        summary="订单超过承诺时间仍未发货",
+        category="logistics",
+        priority="high",
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["ticket_no"] == "TKT-NEW-001"
+    call_name, arguments = service.calls[0]
+    assert call_name == "create_ticket"
+    assert arguments == {
+        "context": CONTEXT,
+        "summary": "订单超过承诺时间仍未发货",
+        "category": TicketCategory.LOGISTICS,
+        "priority": TicketPriority.HIGH,
+        "customer_no": None,
+        "order_no": "ORD-DELAY-001",
+    }
+
+def test_bound_add_ticket_note_uses_context_and_hides_ids():
+    service = FakeSupportService()
+    functions = CustomerSupportToolGateway(
+        service=service
+    ).bind(context=CONTEXT)
+
+    result = functions["add_ticket_note"](
+        ticket_no="TKT-NEW-001",
+        content="  已联系仓库核查。  ",
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["ticket_no"] == "TKT-NEW-001"
+    assert result["data"]["visibility"] == "internal"
+    assert "comment_id" not in result["data"]
+    assert service.calls == [
+        (
+            "add_ticket_note",
+            {
+                "context": CONTEXT,
+                "ticket_no": "TKT-NEW-001",
+                "content": "已联系仓库核查。",
+            },
+        )
+    ]
+
+
+def test_invalid_create_ticket_result_is_json_safe():
+    service = FakeSupportService()
+    functions = CustomerSupportToolGateway(
+        service=service
+    ).bind(context=CONTEXT)
+
+    result = functions["create_ticket"](
+        summary="客户问题需要创建工单",
+        category="other",
+        priority="medium",
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "INVALID_ARGUMENTS"
+    json.dumps(result, ensure_ascii=False)
+    assert service.calls == []
+
+@pytest.mark.parametrize(
+    ("error", "expected_code"),
+    [
+        (
+            SupportCustomerNotFoundError("private detail"),
+            "CUSTOMER_NOT_FOUND",
+        ),
+        (
+            OrderCustomerMismatchError("private detail"),
+            "ORDER_CUSTOMER_MISMATCH",
+        ),
+        (
+            SupportTicketNotFoundError("private detail"),
+            "TICKET_NOT_FOUND",
+        ),
+        (
+            SupportOperationRejectedError("private detail"),
+            "OPERATION_REJECTED",
+        ),
+        (
+            TicketNumberGenerationError("private detail"),
+            "TICKET_NUMBER_GENERATION_FAILED",
+        ),
+    ],
+)
+def test_gateway_maps_write_errors_without_private_detail(
+    error,
+    expected_code,
+):
+    service = FakeSupportService(fail_with=error)
+    functions = CustomerSupportToolGateway(
+        service=service
+    ).bind(context=CONTEXT)
+
+    result = functions["create_ticket"](
+        order_no="ORD-DELAY-001",
+        summary="订单超过承诺时间仍未发货",
+        category="logistics",
+        priority="high",
+    )
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == expected_code
+    assert "private detail" not in str(result)
