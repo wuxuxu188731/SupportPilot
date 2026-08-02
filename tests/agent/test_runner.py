@@ -19,7 +19,90 @@ agent编排测试，覆盖路径：
 9.每条路径的 messages 顺序和事件顺序都正确。
 """
 
-from app.agent.runner import run_one_turn
+from app.agent.runner import AgentToolRoundLimitError, run_one_turn
+
+
+def test_run_one_turn_uses_requested_model_name():
+  received = []
+  fake_message = SimpleNamespace(
+    content="answer",
+    reasoning_content="reasoning",
+    tool_calls=None,
+  )
+  fake_response = SimpleNamespace(
+    choices=[SimpleNamespace(message=fake_message)]
+  )
+
+  def create(**kwargs):
+    received.append(kwargs)
+    return fake_response
+
+  fake_client = SimpleNamespace(
+    chat=SimpleNamespace(
+      completions=SimpleNamespace(create=create)
+    )
+  )
+
+  run_one_turn(
+    messages=[{"role": "user", "content": "hello"}],
+    client=fake_client,
+    tool_definitions=[],
+    tool_functions={},
+    model_name="test-support-model",
+  )
+
+  assert received[0]["model"] == "test-support-model"
+
+
+def test_run_one_turn_stops_after_max_tool_rounds():
+  call_count = 0
+
+  def create(**kwargs):
+    nonlocal call_count
+    call_count += 1
+    tool_call = SimpleNamespace(
+      id=f"call-{call_count}",
+      type="function",
+      function=SimpleNamespace(name="get_food", arguments="{}"),
+    )
+    message = SimpleNamespace(
+      content="",
+      reasoning_content="continue calling tools",
+      tool_calls=[tool_call],
+    )
+    return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+  fake_client = SimpleNamespace(
+    chat=SimpleNamespace(
+      completions=SimpleNamespace(create=create)
+    )
+  )
+
+  with pytest.raises(
+    AgentToolRoundLimitError,
+    match="maximum tool rounds exceeded",
+  ):
+    run_one_turn(
+      messages=[{"role": "user", "content": "loop"}],
+      client=fake_client,
+      tool_definitions=TOOL_DEFINITIONS,
+      tool_functions=TOOL_FUNCTIONS,
+      max_tool_rounds=2,
+    )
+
+  assert call_count == 3
+
+
+@pytest.mark.parametrize("max_tool_rounds", [0, -1])
+def test_run_one_turn_requires_positive_tool_round_limit(max_tool_rounds):
+  with pytest.raises(ValueError, match="max_tool_rounds must be positive"):
+    run_one_turn(
+      messages=[],
+      client=SimpleNamespace(),
+      tool_definitions=[],
+      tool_functions={},
+      max_tool_rounds=max_tool_rounds,
+    )
 
 
 #测试工具------------------

@@ -1,10 +1,23 @@
-from typing import Any,Callable
+from typing import Any, Callable, Protocol
 
 from app.agent.events import AgentEvent
+from app.core.config import MODEL_NAME
 from app.schemas.chat import LLMResponse
 
 import json
 import time
+
+
+DEFAULT_MAX_TOOL_ROUNDS = 20
+
+
+class AgentToolRoundLimitError(RuntimeError):
+  pass
+
+
+class AgentToolFunction(Protocol):
+  def __call__(self, **arguments: Any) -> Any:
+    raise NotImplementedError
 
 
 def stringify_tool_result(result : Any)->str:
@@ -40,7 +53,19 @@ def build_error_result(tool_call_id,error_message : str)->dict:
     )
   }
 
-def run_one_turn(*,messages : list[dict], client:Any, tool_definitions:list[dict], tool_functions:dict[str,Callable[...,Any]], on_event : Callable[[AgentEvent],None]|None = None)->LLMResponse:
+def run_one_turn(
+  *,
+  messages: list[dict],
+  client: Any,
+  tool_definitions: list[dict],
+  tool_functions: dict[str, AgentToolFunction],
+  on_event: Callable[[AgentEvent], None] | None = None,
+  model_name: str = MODEL_NAME,
+  max_tool_rounds: int = DEFAULT_MAX_TOOL_ROUNDS,
+) -> LLMResponse:
+  if max_tool_rounds <= 0:
+    raise ValueError("max_tool_rounds must be positive")
+  tool_rounds = 0
   events : list[AgentEvent] = []
 
   #this function is used to add agent_event into events && extension operation
@@ -53,7 +78,7 @@ def run_one_turn(*,messages : list[dict], client:Any, tool_definitions:list[dict
 
   while True:
     response = client.chat.completions.create(
-      model="deepseek-v4-flash",
+      model=model_name,
       messages=messages,
       tools=tool_definitions,
       extra_body={
@@ -83,6 +108,10 @@ def run_one_turn(*,messages : list[dict], client:Any, tool_definitions:list[dict
       )
       return LLMResponse(llm_answer=llm_res,llm_reasoning_content=reason_content,events=events) 
     
+    if tool_rounds >= max_tool_rounds:
+      raise AgentToolRoundLimitError("maximum tool rounds exceeded")
+    tool_rounds += 1
+
     #tools were called
     """
     将模型发送的调用信息加入messages->遍历工具列表(对每一个工具进行)
