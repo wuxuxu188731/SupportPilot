@@ -43,6 +43,17 @@ def final_response(content):
     return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
 
+def order_query_responses(order_no, final_text):
+    return [
+        tool_call_response(
+            "call-order",
+            "get_order",
+            {"order_no": order_no},
+        ),
+        final_response(final_text),
+    ]
+
+
 class FakeCompletionClient:
     def __init__(self, responses):
         self._responses = iter(responses)
@@ -192,3 +203,129 @@ def test_delayed_order_creates_ticket_and_grounded_reply(tmp_path):
     assert '"availability": "not_created"' in tool_messages[1]["content"]
     assert '"ticket_no": "TKT-GOLDEN-001"' in tool_messages[2]["content"]
     assert history[-1]["content"] == result.llm_answer
+
+
+def test_same_agent_runner_rebinds_between_tenants(tmp_path):
+    database_path = tmp_path / "tenants.db"
+    users = SQLiteUserStore(database_path)
+    organizations = SQLiteOrganizationStore(database_path)
+    customers = SQLiteCustomerStore(database_path)
+    orders = SQLiteOrderStore(database_path)
+
+    contexts = []
+    for username, company, item_summary in (
+        ("alice", "Company A", "企业A耳机 x1"),
+        ("bob", "Company B", "企业B键盘 x1"),
+    ):
+        user = users.create_user(
+            username=username,
+            password_hash="hash",
+        )
+        organization = organizations.create_with_admin(
+            name=company,
+            admin_user_id=user.user_id,
+        )
+        customer = customers.create_customer(
+            organization_id=organization.organization_id,
+            customer_no="CUST-001",
+            name=f"{company} Customer",
+        )
+        orders.create_order(
+            organization_id=organization.organization_id,
+            order_no="ORD-SHARED-001",
+            customer_id=customer.customer_id,
+            status=OrderStatus.PROCESSING,
+            item_summary=item_summary,
+            total_amount_cents=10000,
+            currency="CNY",
+            placed_at="2026-07-25T08:00:00+00:00",
+        )
+        contexts.append(
+            TenantContext(
+                user_id=user.user_id,
+                organization_id=organization.organization_id,
+                role=MembershipRole.ADMIN,
+            )
+        )
+
+    client = FakeCompletionClient(
+        order_query_responses("ORD-SHARED-001", "企业A查询完成")
+        + order_query_responses("ORD-SHARED-001", "企业B查询完成")
+    )
+    gateway = create_customer_support_tool_gateway(database_path)
+    agent = CustomerSupportAgentRunner(
+        client=client,
+        gateway=gateway,
+        model_name="fake-model",
+    )
+
+    first_messages = [{"role": "user", "content": "查询订单"}]
+    second_messages = [{"role": "user", "content": "查询订单"}]
+    agent(messages=first_messages, context=contexts[0])
+    agent(messages=second_messages, context=contexts[1])
+
+    assert "企业A耳机 x1" in first_messages[2]["content"]
+    assert "企业B键盘 x1" in second_messages[2]["content"]
+    assert "企业B键盘 x1" not in first_messages[2]["content"]
+    assert "企业A耳机 x1" not in second_messages[2]["content"]
+
+
+def test_agent_can_retry_after_gateway_validation_failure(tmp_path):
+    database_path = tmp_path / "retry.db"
+    users = SQLiteUserStore(database_path)
+    organizations = SQLiteOrganizationStore(database_path)
+    user = users.create_user(
+        username="alice",
+        password_hash="hash",
+    )
+    organization = organizations.create_with_admin(
+        name="Company A",
+        admin_user_id=user.user_id,
+    )
+    context = TenantContext(
+        user_id=user.user_id,
+        organization_id=organization.organization_id,
+        role=MembershipRole.ADMIN,
+    )
+    client = FakeCompletionClient(
+        [
+            tool_call_response(
+                "bad-ticket",
+                "create_ticket",
+                {
+                    "summary": "客户要求创建工单",
+                    "category": "other",
+                    "priority": "medium",
+                },
+            ),
+            tool_call_response(
+                "good-ticket",
+                "create_ticket",
+                {
+                    "customer_no": "CUST-MISSING",
+                    "summary": "客户要求创建工单",
+                    "category": "other",
+                    "priority": "medium",
+                },
+            ),
+            final_response("无法创建工单：没有找到对应客户。"),
+        ]
+    )
+    gateway = create_customer_support_tool_gateway(database_path)
+    agent = CustomerSupportAgentRunner(
+        client=client,
+        gateway=gateway,
+        model_name="fake-model",
+    )
+    messages = [{"role": "user", "content": "请创建工单"}]
+
+    result = agent(messages=messages, context=context)
+
+    first_tool_result = json.loads(messages[2]["content"])
+    second_tool_result = json.loads(messages[4]["content"])
+    assert first_tool_result["ok"] is False
+    assert first_tool_result["error"]["code"] == "INVALID_ARGUMENTS"
+    assert second_tool_result["ok"] is False
+    assert second_tool_result["error"]["code"] == "CUSTOMER_NOT_FOUND"
+    assert "无法创建工单" in result.llm_answer
+    assert "创建成功" not in result.llm_answer
