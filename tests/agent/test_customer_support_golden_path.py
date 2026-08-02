@@ -321,6 +321,8 @@ def test_agent_can_retry_after_gateway_validation_failure(tmp_path):
 
     result = agent(messages=messages, context=context)
 
+    assert messages[2]["role"] == "tool"
+    assert messages[4]["role"] == "tool"
     first_tool_result = json.loads(messages[2]["content"])
     second_tool_result = json.loads(messages[4]["content"])
     assert first_tool_result["ok"] is False
