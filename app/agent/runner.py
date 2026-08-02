@@ -93,12 +93,6 @@ def run_one_turn(
 
     #no tool was called
     if not response.choices[0].message.tool_calls:
-      """调试信息"""
-      print(f"LLM answer:{llm_res}")
-      print(f"LLM reasoning content:{reason_content}")
-      print()
-      print(f"tool_calls:{response.choices[0].message.tool_calls}")
-
       messages.append(
         {
           "role":"assistant",
@@ -209,8 +203,6 @@ def run_one_turn(
         messages.append(build_error_result(tool_call_id=tool_call.id,error_message=error_message))
         continue
       
-      #工具执行成功，下面打印的内容为调试信息
-      print(f"tool_call: {func_name},result:{func_result}")
       #执行工具没有抛出异常，工具正常执行，添加事件，将消息append进入messages
       emit(
         AgentEvent(

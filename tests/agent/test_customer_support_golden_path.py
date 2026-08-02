@@ -1,4 +1,5 @@
 import json
+from copy import deepcopy
 from types import SimpleNamespace
 
 from app.agent.prompts import SUPPORT_SYSTEM_PROMPT
@@ -43,6 +44,34 @@ def final_response(content):
     return SimpleNamespace(choices=[SimpleNamespace(message=message)])
 
 
+def grounded_ticket_response(**kwargs):
+    tool_message = next(
+        message
+        for message in reversed(kwargs["messages"])
+        if message["role"] == "tool"
+    )
+    tool_result = json.loads(tool_message["content"])
+    assert tool_result["ok"] is True
+    ticket_no = tool_result["data"]["ticket_no"]
+    return final_response(
+        f"已核实订单尚未产生物流记录，并已创建工单 {ticket_no}。"
+    )
+
+
+def failed_ticket_response(**kwargs):
+    tool_results = [
+        json.loads(message["content"])
+        for message in kwargs["messages"]
+        if message["role"] == "tool"
+    ]
+    assert [result["ok"] for result in tool_results] == [False, False]
+    assert [result["error"]["code"] for result in tool_results] == [
+        "INVALID_ARGUMENTS",
+        "CUSTOMER_NOT_FOUND",
+    ]
+    return final_response("无法创建工单：没有找到对应客户。")
+
+
 def order_query_responses(order_no, final_text):
     return [
         tool_call_response(
@@ -63,8 +92,11 @@ class FakeCompletionClient:
         )
 
     def create(self, **kwargs):
-        self.calls.append(kwargs)
-        return next(self._responses)
+        self.calls.append(deepcopy(kwargs))
+        response = next(self._responses)
+        if callable(response):
+            return response(**kwargs)
+        return response
 
 
 def build_golden_path(tmp_path):
@@ -120,9 +152,7 @@ def build_golden_path(tmp_path):
                 "priority": "high",
             },
         ),
-        final_response(
-            "已核实订单尚未产生物流记录，并已创建工单 TKT-GOLDEN-001。"
-        ),
+        grounded_ticket_response,
     ]
     client = FakeCompletionClient(responses)
     gateway = create_customer_support_tool_gateway(
@@ -180,6 +210,9 @@ def test_delayed_order_creates_ticket_and_grounded_reply(tmp_path):
     assert ticket.summary == "订单超过承诺时间仍未发货"
 
     assert len(scope["client"].calls) == 4
+    assert [
+        len(call["messages"]) for call in scope["client"].calls
+    ] == [2, 4, 6, 8]
     for call in scope["client"].calls:
         assert call["model"] == "fake-support-model"
         assert {
@@ -308,7 +341,7 @@ def test_agent_can_retry_after_gateway_validation_failure(tmp_path):
                     "priority": "medium",
                 },
             ),
-            final_response("无法创建工单：没有找到对应客户。"),
+            failed_ticket_response,
         ]
     )
     gateway = create_customer_support_tool_gateway(database_path)

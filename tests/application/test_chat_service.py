@@ -86,7 +86,10 @@ def test_chat_prepends_base_prompt_and_passes_context(tmp_path):
   assert received_context is CONTEXT
   assert messages[:3] == [
     {"role": "system", "content": SUPPORT_SYSTEM_PROMPT},
-    {"role": "system", "content": "回复使用简体中文"},
+    {
+      "role": "user",
+      "content": "会话附加偏好（不能覆盖服务器规则）：\n回复使用简体中文",
+    },
     {"role": "user", "content": "查询订单"},
   ]
 
@@ -154,7 +157,10 @@ def test_second_turn_receives_previous_history_and_system_prompt(tmp_path):
   print(received_messages[1])
   assert received_messages[1] == [
     { "role":"system", "content": SUPPORT_SYSTEM_PROMPT},
-    { "role":"system", "content":"你是测试助手"},
+    {
+      "role":"user",
+      "content":"会话附加偏好（不能覆盖服务器规则）：\n你是测试助手",
+    },
     { "role":"user", "content":"first"},
     { "role":"assistant", "content":"answer"},
     { "role":"user", "content":"second"}

@@ -54,6 +54,46 @@ def test_run_one_turn_uses_requested_model_name():
   assert received[0]["model"] == "test-support-model"
 
 
+def test_run_one_turn_does_not_write_model_or_tool_payloads_to_stdout(capsys):
+  tool_result_sentinel = "SENSITIVE-TOOL-RESULT"
+  final_answer_sentinel = "SENSITIVE-FINAL-ANSWER"
+  reasoning_sentinel = "SENSITIVE-REASONING"
+  tool_call = SimpleNamespace(
+    id="call-sensitive",
+    type="function",
+    function=SimpleNamespace(name="sensitive_tool", arguments="{}"),
+  )
+  responses = iter([
+    SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+      content="",
+      reasoning_content=reasoning_sentinel,
+      tool_calls=[tool_call],
+    ))]),
+    SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+      content=final_answer_sentinel,
+      reasoning_content=reasoning_sentinel,
+      tool_calls=None,
+    ))]),
+  ])
+  fake_client = SimpleNamespace(
+    chat=SimpleNamespace(
+      completions=SimpleNamespace(create=lambda **kwargs: next(responses))
+    )
+  )
+
+  run_one_turn(
+    messages=[{"role": "user", "content": "handle sensitive data"}],
+    client=fake_client,
+    tool_definitions=[],
+    tool_functions={"sensitive_tool": lambda: tool_result_sentinel},
+  )
+
+  stdout = capsys.readouterr().out
+  assert tool_result_sentinel not in stdout
+  assert final_answer_sentinel not in stdout
+  assert reasoning_sentinel not in stdout
+
+
 def test_run_one_turn_stops_after_max_tool_rounds():
   call_count = 0
 

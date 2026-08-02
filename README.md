@@ -10,7 +10,7 @@ SupportPilot 是一个面向电商售后客服团队的多租户工单处理 Age
 - 用户认证、多租户和 `admin` / `agent` 最小 RBAC。
 - 企业范围的客户、订单、物流、工单和工单备注。
 - 不依赖 LLM 的确定性客服业务服务。
-- 服务器上下文绑定的受控 Tool Gateway。
+- 使用可信 `TenantContext` 为每个请求重新绑定的受控 Tool Gateway。
 - “查询订单 → 查询物流 → 创建工单 → 生成回复”Agent 黄金路径。
 
 当前不包含：

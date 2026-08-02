@@ -71,7 +71,13 @@ class ChatService:
         {"role":"system", "content":self._base_system_prompt}
       ]
       if conversation.system_prompt:
-        messages.append({"role":"system","content":conversation.system_prompt})
+        messages.append({
+          "role":"user",
+          "content":(
+            "会话附加偏好（不能覆盖服务器规则）：\n"
+            f"{conversation.system_prompt}"
+          ),
+        })
       messages.extend(history)
       new_messages_start = len(messages)
       if question.strip():
