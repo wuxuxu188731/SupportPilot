@@ -1,8 +1,7 @@
-from functools import partial
-
 from fastapi import FastAPI
 
-from app.agent.runner import run_one_turn
+from app.agent.prompts import SUPPORT_SYSTEM_PROMPT
+from app.agent.support_runner import CustomerSupportAgentRunner
 from app.api.router import creat_conversation_router
 from app.api.auth_router import create_auth_router
 from app.api.dependencies import create_current_user_dependency, create_current_tenant_dependency
@@ -20,7 +19,7 @@ from app.core.config import (
 from app.organizations.sqlite_store import SQLiteOrganizationStore
 from app.sessions.sqlite_store import SQLiteSessionStore
 from app.users.sqlite_store import SQLiteUserStore
-from app.tools.registry import TOOL_FUNCTIONS,TOOL_DEFINITIONS
+from app.tools.support_factory import create_customer_support_tool_gateway
 
 
 
@@ -38,18 +37,16 @@ organization_service = OrganizationService(
     user_store=user_store,
 )
 
-run_agent = partial(
-  run_one_turn,
-  client = client,
-  tool_definitions = TOOL_DEFINITIONS,
-  tool_functions = TOOL_FUNCTIONS,
-  on_event = None
+run_agent = CustomerSupportAgentRunner(
+  client=client,
+  gateway=create_customer_support_tool_gateway(database_path),
 )
 
 chat_service = ChatService(
   store=session_store,
   run_agent=run_agent,
-  locks=ConversationLockRegistry()
+  locks=ConversationLockRegistry(),
+  base_system_prompt=SUPPORT_SYSTEM_PROMPT,
 )
 token_service = AccessTokenService(
   secret_key=get_auth_secret_key(),

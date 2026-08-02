@@ -12,11 +12,15 @@ class ChatService:
     *,
     store : SessionStore,
     run_agent : Callable[...,LLMResponse],
-    locks : ConversationLockRegistry
+    locks : ConversationLockRegistry,
+    base_system_prompt: str,
   ):
     self._store = store
     self._run_agent = run_agent
     self._locks = locks
+    self._base_system_prompt = base_system_prompt.strip()
+    if not self._base_system_prompt:
+      raise ValueError("base_system_prompt must not be blank")
 
   def create_conversation(
     self,
@@ -63,7 +67,9 @@ class ChatService:
         user_id=context.user_id,
         conversation_id=conversation.conversation_id,
       )
-      messages : list[dict] = []
+      messages : list[dict] = [
+        {"role":"system", "content":self._base_system_prompt}
+      ]
       if conversation.system_prompt:
         messages.append({"role":"system","content":conversation.system_prompt})
       messages.extend(history)
@@ -71,7 +77,7 @@ class ChatService:
       if question.strip():
         messages.append({"role":"user","content":question})
 
-      response = self._run_agent(messages = messages)
+      response = self._run_agent(messages=messages, context=context)
 
       self._store.append_messages(
         organization_id=context.organization_id,

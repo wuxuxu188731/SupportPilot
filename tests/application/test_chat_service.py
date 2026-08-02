@@ -4,6 +4,7 @@ import pytest
 
 from app.application.chat_service import ChatService
 from app.application.organization_service import TenantContext
+from app.agent.prompts import SUPPORT_SYSTEM_PROMPT
 from app.concurrency.conversation_locks import ConversationLockRegistry
 from app.organizations.base import MembershipRole
 from app.schemas.chat import LLMResponse
@@ -42,15 +43,52 @@ def build_service(tmp_path, runner):
   service = ChatService(
     store = store,
     run_agent = runner,
-    locks = ConversationLockRegistry()
+    locks = ConversationLockRegistry(),
+    base_system_prompt=SUPPORT_SYSTEM_PROMPT,
   )
   return service, store
 
-def direct_answer_runner(*, messages : list[dict])->LLMResponse:
+def direct_answer_runner(*, messages : list[dict], context)->LLMResponse:
   messages.append({"role":"assistant","content":"answer"})
   return LLMResponse(
     llm_answer="answer"
   )
+
+
+def test_support_prompt_contains_fact_and_write_rules():
+  assert "工具结果" in SUPPORT_SYSTEM_PROMPT
+  assert "不得编造" in SUPPORT_SYSTEM_PROMPT
+  assert "明确要求创建工单" in SUPPORT_SYSTEM_PROMPT
+  assert "ok" in SUPPORT_SYSTEM_PROMPT
+
+
+def test_chat_prepends_base_prompt_and_passes_context(tmp_path):
+  received = []
+
+  def runner(*, messages, context):
+    received.append((list(messages), context))
+    messages.append({"role": "assistant", "content": "answer"})
+    return LLMResponse(llm_answer="answer")
+
+  service, _ = build_service(tmp_path, runner)
+  conversation = service.create_conversation(
+    context=CONTEXT,
+    system_prompt="回复使用简体中文",
+  )
+
+  service.chat(
+    context=CONTEXT,
+    conversation_id=conversation.conversation_id,
+    question="查询订单",
+  )
+
+  messages, received_context = received[0]
+  assert received_context is CONTEXT
+  assert messages[:3] == [
+    {"role": "system", "content": SUPPORT_SYSTEM_PROMPT},
+    {"role": "system", "content": "回复使用简体中文"},
+    {"role": "user", "content": "查询订单"},
+  ]
 
 
 def test_chat_persists_only_current_conversation(tmp_path):
@@ -90,7 +128,7 @@ def test_chat_persists_only_current_conversation(tmp_path):
 def test_second_turn_receives_previous_history_and_system_prompt(tmp_path):
   received_messages = []
 
-  def recording_runner(*, messages):
+  def recording_runner(*, messages, context):
     received_messages.append([dict(message) for message in messages])
     messages.append({"role": "assistant", "content": "answer"})
     return LLMResponse(
@@ -115,6 +153,7 @@ def test_second_turn_receives_previous_history_and_system_prompt(tmp_path):
   )
   print(received_messages[1])
   assert received_messages[1] == [
+    { "role":"system", "content": SUPPORT_SYSTEM_PROMPT},
     { "role":"system", "content":"你是测试助手"},
     { "role":"user", "content":"first"},
     { "role":"assistant", "content":"answer"},
@@ -123,7 +162,7 @@ def test_second_turn_receives_previous_history_and_system_prompt(tmp_path):
 
 
 def test_failed_runner_does_not_persist_partial_turn(tmp_path):
-  def fail_runner(*, messages : list[dict]):
+  def fail_runner(*, messages : list[dict], context):
     messages.append({"role": "user", "content": "partial"})
     raise RuntimeError("model unavailable")
 
@@ -151,7 +190,7 @@ def test_same_conversation_requests_are_serialized(tmp_path):
   call_guard = Lock()
   call_count = 0
 
-  def controlled_runner(*, messages):
+  def controlled_runner(*, messages, context):
     nonlocal call_count
     with call_guard:
       call_count += 1
@@ -191,7 +230,7 @@ def test_different_conversations_can_run_in_parallel(tmp_path):
   both_runners_entered = Barrier(2)
   errors = []
 
-  def synchronized_runner(*, messages):
+  def synchronized_runner(*, messages, context):
     both_runners_entered.wait(timeout=2)
     messages.append({"role": "assistant", "content": "answer"})
     return LLMResponse(llm_answer="answer")
