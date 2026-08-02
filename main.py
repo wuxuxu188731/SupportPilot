@@ -11,6 +11,7 @@ from app.application.auth_service import AuthService,AccessTokenService
 from app.application.organization_service import OrganizationService
 from app.concurrency.conversation_locks import ConversationLockRegistry
 from app.core.config import (
+  MODEL_NAME,
   create_llm_client,
   get_chat_db_path,
   get_auth_secret_key,
@@ -37,14 +38,18 @@ organization_service = OrganizationService(
     user_store=user_store,
 )
 
-run_agent = CustomerSupportAgentRunner(
+support_tool_gateway = create_customer_support_tool_gateway(
+  database_path,
+)
+support_agent_runner = CustomerSupportAgentRunner(
   client=client,
-  gateway=create_customer_support_tool_gateway(database_path),
+  gateway=support_tool_gateway,
+  model_name=MODEL_NAME,
 )
 
 chat_service = ChatService(
   store=session_store,
-  run_agent=run_agent,
+  run_agent=support_agent_runner,
   locks=ConversationLockRegistry(),
   base_system_prompt=SUPPORT_SYSTEM_PROMPT,
 )

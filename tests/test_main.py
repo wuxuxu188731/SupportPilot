@@ -7,6 +7,9 @@ def test_main_wires_sqlite_service_without_global_messages(
   monkeypatch,
   tmp_path
 ):
+  from app.agent.support_runner import CustomerSupportAgentRunner
+  from app.tools.support_gateway import CustomerSupportToolGateway
+
   database_path = tmp_path / "min-chat.db"
   monkeypatch.setenv("DEEPSEEK_API_KEY","test-only-key")
   monkeypatch.setenv("CHAT_DB_PATH", str(database_path))
@@ -16,7 +19,26 @@ def test_main_wires_sqlite_service_without_global_messages(
   main = importlib.import_module("main")
 
   paths = {route.path for route in main.app.routes}
+  assert isinstance(
+      main.support_tool_gateway,
+      CustomerSupportToolGateway,
+  )
+  assert isinstance(
+      main.support_agent_runner,
+      CustomerSupportAgentRunner,
+  )
+  assert {
+      item["function"]["name"]
+      for item in main.support_tool_gateway.definitions
+  } == {
+      "get_order",
+      "get_logistics",
+      "create_ticket",
+      "add_ticket_note",
+  }
   assert not hasattr(main, "messages")
+  assert not hasattr(main, "TOOL_FUNCTIONS")
+  assert not hasattr(main, "TOOL_DEFINITIONS")
   assert database_path.exists()
   assert "/conversations/" in paths
   assert "/conversations/{conversation_id}/chat/" in paths
