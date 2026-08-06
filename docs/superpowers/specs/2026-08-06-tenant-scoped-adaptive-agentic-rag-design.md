@@ -62,13 +62,14 @@ CustomerSupportAgentRunner
           |        +--> QueryPlanner                           |
           +--> HybridRetriever                                 |
                     |                                          |
-                    +--> LexicalIndex                          |
-                    +--> VectorIndex                           |
-                    +--> RankFusion / Reranker                 |
+                    +--> DashScopeEmbeddingClient              |
+                    +--> QdrantVectorStore                     |
+                           dense + sparse + native RRF          |
                                                                |
-Document API --> KnowledgeIngestionService --> KnowledgeStore -+
-                         |                    --> EmbeddingClient
-                         +--> Parser / Chunker
+Document API --> KnowledgeIngestionService --> SQLiteKnowledgeStore
+                         |                    --> DashScopeEmbeddingClient
+                         +--> DocumentLoader / Chunker         |
+                         +--------------------> QdrantVectorStore
 ```
 
 顶层 Agent 仍然决定何时调用订单、物流、工单和知识工具。`search_knowledge` 工具内部封装检索规划、混合召回、证据检查和一次受控补充检索。这样可以避免把复杂检索状态直接塞进通用 `AgentRunner`，并确保检索预算、安全过滤和错误语义由确定性应用代码控制。
@@ -79,14 +80,15 @@ Document API --> KnowledgeIngestionService --> KnowledgeStore -+
 
 ```text
 app/knowledge/
-  base.py                 # Document、Version、Chunk、Job、Citation 及 Store Protocol
-  sqlite_store.py         # SQLite 元数据、正文、版本、Chunk、Job、Event
-  parser.py               # Markdown/TXT 标准化与标题层级提取
-  chunker.py              # 确定性分块与稳定 chunk ordinal
-  embeddings.py           # EmbeddingClient Protocol 与批量嵌入适配器
-  lexical_index.py        # SQLite FTS5 关键词召回
-  vector_index.py         # VectorIndex Protocol 与 MVP 精确余弦检索实现
-  retrieval.py            # 混合召回、RRF 融合、去重和 Token 预算
+  base.py                 # Document、Version、Chunk、Job、Citation 及领域异常
+  sqlite_store.py         # SQLite 文档元数据、正文、版本、Chunk、Job、Event
+  document_loader.py      # Markdown/TXT loader 的项目适配层
+  chunking.py             # langchain-text-splitters 的项目适配层
+  embeddings.py           # EmbeddingClient Protocol
+  dashscope_embeddings.py # text-embedding-v4 原生 DashScope SDK 适配器
+  vector_store.py         # VectorStore Protocol
+  qdrant_store.py         # qdrant-client、租户过滤、dense/sparse 查询与 RRF
+  retrieval.py            # 召回编排、候选解析、去重和 Token 预算
   planning.py             # 路由、查询分解和结构化计划校验
   evidence.py             # 证据充分性检查与缺失信息描述
   service.py              # AdaptiveKnowledgeSearchService
@@ -96,13 +98,15 @@ app/knowledge/
 app/tools/
   knowledge_arguments.py  # search_knowledge 参数模型
   knowledge_gateway.py    # 注入 TenantContext 并映射领域错误
-  knowledge_factory.py    # 组装 Store、Index、Planner、Retriever
+  knowledge_factory.py    # 组装 SQLite、DashScope、Qdrant、Planner、Retriever
 
 app/api/
   knowledge_router.py     # 文档管理和入库状态 API
 
 app/schemas/
   knowledge.py            # HTTP 请求/响应模型
+
+compose.yaml              # Qdrant 服务、固定镜像版本、健康检查和持久卷
 ```
 
 ### 5.1 核心接口
@@ -119,7 +123,17 @@ list_active_chunks(organization_id, candidate_ids?)
 record_retrieval_event(organization_id, event)
 ```
 
-`VectorIndex.search` 和 `LexicalIndex.search` 同样要求 `organization_id`，并只返回当前激活版本的片段。`AdaptiveKnowledgeSearchService` 依赖这些 Protocol，而不依赖 SQLite、特定模型 SDK或 Agent 框架。
+`EmbeddingClient` 提供 `embed_documents` 和 `embed_query`，分别固定使用 `text_type=document` 与 `text_type=query`。`VectorStore.search` 必须接收 `organization_id` 和当前激活版本集合，并在 Qdrant 查询中强制注入过滤条件。`AdaptiveKnowledgeSearchService` 只依赖这些 Protocol，不直接依赖 DashScope SDK、Qdrant Client 或 Agent 框架。
+
+### 5.2 自研与复用边界
+
+- 项目自己维护：文档版本、入库 Job、幂等、租户隔离、检索预算、Agentic 规划、证据检查、引用校验和 Eval。
+- `document_loader.py` 只负责把成熟 loader 的输出转换为项目领域对象；MVP 的 Markdown/TXT 不引入重量级解析框架。
+- `chunking.py` 包装 `langchain-text-splitters` 的 Markdown 标题切分与递归字符切分，并补充稳定 ordinal、offset 和项目元数据。
+- `dashscope_embeddings.py` 使用原生 DashScope SDK，不重复实现向量模型；固定模型 `text-embedding-v4`、维度 1024、输出 `dense&sparse`。
+- `qdrant_store.py` 直接使用官方 `qdrant-client` 和 Qdrant Query API，不自行实现向量索引、相似度搜索或 RRF。
+- 顶层 Agent、QueryPlanner 和 EvidenceAssessor 继续使用 `deepseek-v4-flash`；顶层工具循环保留 Thinking，结构化规划与证据检查使用非 Thinking JSON 输出以控制延迟。
+- 不使用 LangChain/LlamaIndex 的完整 Chain、Agent 或端到端 RAG Pipeline，避免隐藏租户过滤、版本切换、预算和评测轨迹。
 
 ## 6. 数据模型
 
@@ -149,7 +163,7 @@ document_id            TEXT NOT NULL
 version_no             INTEGER NOT NULL
 content_hash           TEXT NOT NULL
 raw_text               TEXT NOT NULL
-parser_version         TEXT NOT NULL
+loader_version         TEXT NOT NULL
 chunker_version        TEXT NOT NULL
 embedding_model        TEXT NOT NULL
 embedding_dimensions   INTEGER NOT NULL
@@ -171,12 +185,13 @@ content                TEXT NOT NULL
 token_count            INTEGER NOT NULL
 start_offset           INTEGER NOT NULL
 end_offset             INTEGER NOT NULL
-embedding              BLOB NOT NULL
 created_at             TEXT NOT NULL
 UNIQUE (organization_id, version_id, ordinal)
 ```
 
-MVP 在 SQLite 中保存归一化后的定长浮点向量，并在企业及激活版本过滤后执行精确余弦检索。该实现面向演示规模：每个企业最多 10,000 个激活片段。未来切换到 PostgreSQL + pgvector 时保持 `VectorIndex` 接口不变，并通过基准测试决定 HNSW/IVFFlat 参数。
+SQLite 保存可审计的片段正文和引用元数据，不保存向量。Qdrant Collection `supportpilot_knowledge_te4_1024_v1` 以 `chunk_id` 作为 Point ID，保存两个命名向量：1024 维 `dense` 和 `sparse`。Point Payload 仅保存 `organization_id`、`document_id`、`version_id`、`chunk_id` 和 `ordinal` 等过滤字段；检索命中后仍回到 SQLite 批量读取正文并重新校验租户和激活版本。
+
+一个 Embedding 模型和维度对应一个 Collection；修改模型或维度时创建新 Collection 并重新入库，不原地混用不同向量空间。
 
 ### 6.4 ingestion_jobs
 
@@ -222,14 +237,14 @@ created_at             TEXT NOT NULL
 1. Router 从认证依赖获得 `TenantContext`，并要求当前成员角色为 `admin`。
 2. 校验文件类型、UTF-8 解码、标题、正文非空和大小上限。MVP 单文件最大 2 MiB。
 3. 创建 `documents`、`document_versions` 和 `ingestion_jobs` 记录，状态为 `processing/queued`。
-4. Parser 将 Markdown/TXT 转换为规范化文本，并保留标题层级。
-5. Chunker 按标题边界优先分块；目标 400～700 tokens，重叠不超过 80 tokens。
-6. EmbeddingClient 分批生成向量，并校验数量、维度和有限数值。
-7. 在事务内写入全部 chunks 和词法索引。
-8. 成功后原子切换 `active_version_id`，设置文档 `active`、Job `succeeded`。
-9. 失败时 Job 记录稳定错误码；新文档标记 `failed`，已有文档继续保留旧激活版本。
+4. DocumentLoader 将 Markdown/TXT 转换为规范化文本，并保留标题层级。
+5. Chunker 使用 `langchain-text-splitters` 按 Markdown 标题和递归字符边界分块；项目层补充稳定 ordinal 与 offset。目标 400～700 tokens，重叠不超过 80 tokens。
+6. DashScopeEmbeddingClient 通过原生 SDK 分批生成 `dense&sparse`，文档固定 `text_type=document`、维度 1024；每批不超过 10 条，并校验数量、维度和有限数值。
+7. 在 SQLite 事务内写入 chunks，再将向量和租户 Payload 幂等 upsert 到 Qdrant。Qdrant 写入成功前不得激活新版本。
+8. Qdrant 写入成功后原子切换 SQLite 的 `active_version_id`，设置文档 `active`、Job `succeeded`。检索始终使用 SQLite 提供的激活版本集合，因此未激活的残留 Point 不会进入结果。
+9. 失败时 Job 记录稳定错误码；新文档标记 `failed`，已有文档继续保留旧激活版本。失败任务留下的未激活 Qdrant Point 由幂等重试覆盖或后台清理。
 
-内容哈希相同的重复上传不产生新版本，返回已有版本信息。停用文档后，词法和向量检索都必须立即排除该文档，无需等待物理删除索引。
+内容哈希相同的重复上传不产生新版本，返回已有版本信息。停用文档后，SQLite 不再返回该文档的激活版本，因此 Qdrant 查询必须立即排除对应 Point，无需等待物理删除索引。
 
 ## 8. 检索策略
 
@@ -238,8 +253,9 @@ created_at             TEXT NOT NULL
 Baseline 使用固定流程：
 
 ```text
-原始问题 → 单个查询 → 向量 Top-8 + 关键词 Top-8
-        → RRF 融合与去重 → Token 预算裁剪 → Top-5 证据
+原始问题 → DashScope query dense&sparse
+        → Qdrant dense Top-8 + sparse Top-8
+        → Qdrant RRF → 项目层去重与 Token 预算 → Top-5 证据
 ```
 
 Baseline 不做查询分解、不做补充检索，用于建立可重复的质量、延迟和成本基准。
@@ -266,9 +282,10 @@ reason_code: BUSINESS_ONLY | SIMPLE_POLICY | MULTI_CONDITION | MIXED_FACT_POLICY
 
 每个查询分别执行：
 
-- 向量召回 Top-8：覆盖语义相近但措辞不同的片段。
-- FTS5/BM25 召回 Top-8：覆盖订单术语、政策名、期限和精确关键词。
-- Reciprocal Rank Fusion：默认 `k=60`，融合两个排名。
+- DashScope 原生 SDK 使用 `text_type=query` 和固定检索 `instruct`，一次生成 1024 维 dense 与 sparse 查询向量。
+- Qdrant dense 召回 Top-8：覆盖语义相近但措辞不同的片段。
+- Qdrant sparse 召回 Top-8：覆盖订单术语、政策名、期限和精确关键词。
+- Qdrant Query API 使用原生 Reciprocal Rank Fusion 融合两个排名，项目层不重复实现 RRF。
 - 同版本相邻片段去重：保留得分更高者；证据需要连续上下文时允许合并最多一个相邻片段。
 - 全局 Token 预算：提供给生成模型的知识片段不超过 3,000 tokens，最终最多 6 个片段。
 
@@ -390,6 +407,7 @@ retrieval_summary: RetrievalSummary | None
 | `INVALID_DOCUMENT` | 类型、编码、大小或正文无效 | API 422 |
 | `INGESTION_FAILED` | 解析、分块或写入失败 | 保留旧激活版本 |
 | `EMBEDDING_UNAVAILABLE` | 嵌入服务临时失败 | 一次重试后失败 |
+| `VECTOR_STORE_UNAVAILABLE` | Qdrant 不可用或查询超时 | 不降级为无结果，返回基础设施失败 |
 | `INVALID_SEARCH_PLAN` | 计划输出不符合 Schema | 降级为单次原问题检索 |
 | `INSUFFICIENT_EVIDENCE` | 检索成功但证据不足 | 拒绝无依据回答，不作为 500 |
 | `SEARCH_BUDGET_EXCEEDED` | 达到轮数、时间或模型调用上限 | 终止搜索并降级 |
@@ -400,8 +418,9 @@ retrieval_summary: RetrievalSummary | None
 ## 13. 安全与多租户隔离
 
 - `organization_id`、`user_id`、`role` 只来自可信 `TenantContext`。
-- Repository、关键词索引、向量索引和引用解析都必须接收并校验企业 ID。
-- 查询先过滤企业和激活版本，再执行相似度排序；禁止全局召回后只依赖模型忽略其他企业结果。
+- SQLiteKnowledgeStore、QdrantVectorStore 和引用解析都必须接收并校验企业 ID。
+- Qdrant 使用单个共享 Collection，通过 `organization_id` Payload 分区并为该字段建立 tenant keyword index；不为每个企业创建独立 Collection。
+- Qdrant 的 dense 与 sparse 两个 prefetch 都必须同时过滤 `organization_id` 和 SQLite 提供的激活版本集合，再执行相似度排序；禁止全局召回后只依赖模型忽略其他企业结果。
 - 数据库使用复合外键和唯一约束保证 Document、Version、Chunk 始终属于同一企业。
 - 文档停用后立即从候选集合排除；物理清理可以延后。
 - Citation Resolver 再次校验 `organization_id + document_id + version_id + chunk_id`。
@@ -413,10 +432,12 @@ retrieval_summary: RetrievalSummary | None
 
 ### 14.1 单元测试
 
-- Parser：换行标准化、Markdown 标题、空文档和异常编码。
-- Chunker：边界、重叠、稳定 ordinal、超长段落和 Token 上限。
+- DocumentLoader：换行标准化、Markdown 标题、空文档和异常编码。
+- Chunker 适配器：第三方 splitter 输出转换、边界、重叠、稳定 ordinal、超长段落和 Token 上限。
+- DashScopeEmbeddingClient：document/query 参数、批量上限、维度、dense/sparse 映射、超时和错误转换。
+- QdrantVectorStore：Point 映射、强制租户过滤、激活版本过滤、dense/sparse prefetch 与 RRF 请求结构。
 - Planner：三种策略、Schema 损坏降级、查询数和字段白名单。
-- HybridRetriever：向量/关键词召回、RRF、去重、相邻合并和预算裁剪。
+- HybridRetriever：Qdrant 候选解析、SQLite 二次校验、去重、相邻合并和预算裁剪。
 - EvidenceAssessor：空结果、部分覆盖、充分覆盖和第二轮触发条件。
 - Citation Resolver：有效引用、伪造编号、跨企业和停用版本。
 - Budget：轮数、查询数、Token、超时和模型调用上限不可突破。
@@ -426,12 +447,13 @@ retrieval_summary: RetrievalSummary | None
 - 文档、版本、Chunk 和 Job 的复合租户约束。
 - 相同内容哈希幂等。
 - 新版本失败不影响旧激活版本。
-- 停用文档不再进入 FTS 和向量候选。
+- 停用文档和未激活版本不再进入 Qdrant 有效候选。
 - 企业 A 使用企业 B 的 ID 查询时统一表现为不存在。
 
 ### 14.3 集成测试
 
-- 真实 SQLite Store + Fake EmbeddingClient + Fake Planner/Assessor。
+- 真实 SQLiteKnowledgeStore + Fake DashScopeEmbeddingClient + 测试 Qdrant + Fake Planner/Assessor。
+- Qdrant Docker 集成测试覆盖 Collection 创建、1024 维 dense、sparse、RRF、Payload tenant index 和持久卷重启。
 - 入库后完成传统混合检索并返回可解析引用。
 - 复杂查询第一轮不足、第二轮补齐后成功。
 - 第二轮仍不足时返回拒答信号。
@@ -497,8 +519,8 @@ MVP 验收阈值：
 
 ### 阶段 A：知识入库与传统 RAG 基线
 
-- 完成数据表、Store、Parser、Chunker、Embedding 接口和文档管理 API。
-- 完成 FTS5 + 精确向量召回 + RRF。
+- 完成数据表、SQLiteKnowledgeStore、DocumentLoader、Chunker 适配器、Embedding/VectorStore 接口和文档管理 API。
+- 完成 DashScope `text-embedding-v4` dense&sparse 适配器、Docker Qdrant Collection 和原生 RRF 混合召回。
 - 完成固定 Top-K Baseline、结构化引用和第一版评测集。
 - 产出 Baseline 指标报告。
 
@@ -518,7 +540,7 @@ MVP 验收阈值：
 
 ### 阶段 D：后续演进，不属于本次 MVP
 
-- PostgreSQL + pgvector 适配器和 ANN 索引基准测试。
+- Qdrant HNSW、量化、快照备份和多节点部署基准测试。
 - PDF 解析、异步 Worker、批量上传和后台管理页面。
 - Cross-encoder reranker、查询缓存和在线反馈闭环。
 - 将 retrieval events 接入统一 Agent Trace。
@@ -540,7 +562,8 @@ MVP 验收阈值：
 - 传统 RAG 是可测基线，不是被 Agentic Search 替代的旧实现。
 - Agentic Search 封装在单个只读知识工具内部，顶层 AgentRunner 保持通用和稳定。
 - 复杂性路由可以使用模型，但租户、预算、阈值和循环次数全部由服务端确定性控制。
-- SQLite 精确检索用于当前演示规模，借助 Protocol 为 pgvector 演进保留边界。
+- SQLite 保存文档、版本、片段正文和审计元数据；Docker Qdrant 保存 DashScope dense/sparse 向量并执行原生 RRF。
+- DashScope、Qdrant 和第三方 splitter 都封装在项目 Protocol 后，替换供应商不会影响应用服务与 Agent 工具边界。
 - 引用由服务端生成并再次解析校验，不能只依赖模型自然语言。
 - 证据不足是正常业务结果；系统必须拒答，而不是把它当异常或继续无限搜索。
 - 项目的面试价值来自 Baseline/Adaptive 对照、失败归因和安全边界，而不只是“使用了 Agentic RAG”这一标签。
@@ -550,3 +573,7 @@ MVP 验收阈值：
 - Lewis et al., Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks: https://arxiv.org/abs/2005.11401
 - Asai et al., Self-RAG: Learning to Retrieve, Generate, and Critique through Self-Reflection: https://arxiv.org/abs/2310.11511
 - Jeong et al., Adaptive-RAG: Learning to Adapt Retrieval-Augmented Large Language Models through Question Complexity: https://arxiv.org/abs/2403.14403
+- Alibaba Cloud Model Studio, text-embedding-v4: https://help.aliyun.com/en/model-studio/embedding
+- Qdrant, Hybrid and Multi-Stage Queries: https://qdrant.tech/documentation/search/hybrid-queries/
+- Qdrant, Multitenancy: https://qdrant.tech/documentation/tutorials/multiple-partitions/
+- DeepSeek API, Models & Pricing: https://api-docs.deepseek.com/quick_start/pricing/
