@@ -130,6 +130,24 @@ class DocumentNotFoundError(KnowledgeError, LookupError):
         )
 
 
+class DuplicateDocumentVersionError(KnowledgeError):
+    """Raised when a version with the same content hash already exists.
+
+    The store catches the unique-hash IntegrityError and queries the
+    existing version so the caller can treat the upload as idempotent
+    instead of creating a duplicate version.
+    """
+
+    code = "DUPLICATE_DOCUMENT_VERSION"
+
+    def __init__(self, existing_version_id: str) -> None:
+        self.existing_version_id = existing_version_id
+        super().__init__(
+            "DUPLICATE_DOCUMENT_VERSION",
+            f"a version with this content already exists ({existing_version_id})",
+        )
+
+
 class DocumentDisabledError(KnowledgeError):
     code = "DOCUMENT_DISABLED"
 
