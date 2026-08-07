@@ -474,3 +474,87 @@ def test_ticket_comment_migration_upgrade_and_rollback(tmp_path):
 
     assert "ticket_comments" not in table_names(database_path)
     assert "tickets" in table_names(database_path)
+
+
+def seed_two_memberships(database_path):
+    """Insert org-a/user-a and org-b/user-b admin memberships for real.
+
+    Foreign keys are enabled inside the same connection so memberships can
+    only be created for users and organizations that actually exist.
+    """
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        for user_id in ("user-a", "user-b"):
+            connection.execute(
+                """
+                INSERT INTO users(id, username, password_hash)
+                VALUES (?, ?, 'hash')
+                """,
+                (user_id, user_id),
+            )
+        for org_id in ("org-a", "org-b"):
+            connection.execute(
+                """
+                INSERT INTO organizations(id, name)
+                VALUES (?, ?)
+                """,
+                (org_id, org_id),
+            )
+        for org_id, user_id in (("org-a", "user-a"), ("org-b", "user-b")):
+            connection.execute(
+                """
+                INSERT INTO memberships(organization_id, user_id, role)
+                VALUES (?, ?, 'admin')
+                """,
+                (org_id, user_id),
+            )
+
+
+def test_knowledge_migration_upgrade_and_rollback(tmp_path):
+    database_path = tmp_path / "knowledge.db"
+    config = alembic_config(database_path)
+
+    command.upgrade(config, "0009_knowledge_base")
+
+    assert {
+        "documents",
+        "document_versions",
+        "document_chunks",
+        "ingestion_jobs",
+        "retrieval_events",
+    } <= table_names(database_path)
+
+    command.downgrade(config, "0008_ticket_comments")
+
+    assert "documents" not in table_names(database_path)
+    assert "ticket_comments" in table_names(database_path)
+
+
+def test_knowledge_schema_rejects_cross_tenant_version(tmp_path):
+    database_path = tmp_path / "knowledge-constraints.db"
+    upgrade_database(database_path)
+    seed_two_memberships(database_path)
+
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(
+            """
+            INSERT INTO documents(
+                id, organization_id, uploaded_by_user_id,
+                title, source_type, status
+            ) VALUES ('doc-a', 'org-a', 'user-a', 'A', 'text', 'processing')
+            """
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                """
+                INSERT INTO document_versions(
+                    id, organization_id, document_id, version_no,
+                    content_hash, raw_text, loader_version,
+                    chunker_version, embedding_model, embedding_dimensions
+                ) VALUES (
+                    'version-b', 'org-b', 'doc-a', 1, 'hash', 'body',
+                    'loader-v1', 'chunker-v1', 'text-embedding-v4', 1024
+                )
+                """
+            )
