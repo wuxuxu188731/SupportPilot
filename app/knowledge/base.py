@@ -257,6 +257,49 @@ class KnowledgeStore(Protocol):
     ) -> KnowledgeDocument:
         raise NotImplementedError
 
+    def list_documents(
+        self,
+        *,
+        organization_id: str,
+    ) -> list[KnowledgeDocument]:
+        """List the caller's documents, tenant-scoped and ordered."""
+        raise NotImplementedError
+
+    def get_document(
+        self,
+        *,
+        organization_id: str,
+        document_id: str,
+    ) -> KnowledgeDocument:
+        """Return a single document, scoped to the caller's organization.
+
+        A missing id is indistinguishable from one that belongs to another
+        organization; both raise :class:`DocumentNotFoundError`.
+        """
+        raise NotImplementedError
+
+    def set_document_status(
+        self,
+        *,
+        organization_id: str,
+        document_id: str,
+        status: DocumentStatus,
+    ) -> KnowledgeDocument:
+        raise NotImplementedError
+
+    def list_versions(
+        self,
+        *,
+        organization_id: str,
+        document_id: str,
+    ) -> list[DocumentVersion]:
+        """List the versions of one document for the caller's organization.
+
+        A document id that does not exist (or belongs to another org) yields an
+        empty list, never a cross-tenant leak.
+        """
+        raise NotImplementedError
+
     def create_version(
         self,
         *,
@@ -278,6 +321,19 @@ class KnowledgeStore(Protocol):
         document_id: str,
         version_id: str,
     ) -> IngestionJob:
+        raise NotImplementedError
+
+    def get_latest_job_for_version(
+        self,
+        *,
+        organization_id: str,
+        document_id: str,
+        version_id: str,
+        job_id: str | None = None,
+    ) -> IngestionJob | None:
+        """Return the latest job for a document's version (or by id, when
+        ``job_id`` is provided). The id-only lookup is scoped SOLELY by
+        ``organization_id``; a missing or cross-tenant job is None."""
         raise NotImplementedError
 
     def replace_chunks(

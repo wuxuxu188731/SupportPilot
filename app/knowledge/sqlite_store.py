@@ -196,6 +196,26 @@ class SQLiteKnowledgeStore(KnowledgeStore):
             raise DocumentNotFoundError(organization_id, document_id)
         return self._to_document(row)
 
+    def list_documents(
+        self,
+        *,
+        organization_id: str,
+    ) -> list[KnowledgeDocument]:
+        """List the caller's documents, tenant-scoped and deterministically
+        ordered (by ``created_at`` then ``id``). Another organization's rows
+        can never appear."""
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM documents
+                WHERE organization_id = ?
+                ORDER BY created_at, id
+                """,
+                (organization_id,),
+            ).fetchall()
+        return [self._to_document(row) for row in rows]
+
     def _get_version_row(
         self,
         connection: sqlite3.Connection,
@@ -400,6 +420,28 @@ class SQLiteKnowledgeStore(KnowledgeStore):
         if version is None:
             raise DocumentNotFoundError(organization_id, document_id)
         return version
+
+    def list_versions(
+        self,
+        *,
+        organization_id: str,
+        document_id: str,
+    ) -> list[DocumentVersion]:
+        """List the versions of one document for the caller's organization,
+        ordered by version number ascending. A document id that does not exist
+        (or belongs to another org) yields an empty list, never a cross-tenant
+        leak."""
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM document_versions
+                WHERE organization_id = ? AND document_id = ?
+                ORDER BY version_no, id
+                """,
+                (organization_id, document_id),
+            ).fetchall()
+        return [self._to_version(row) for row in rows]
 
     # ----------------------------------------------------------------- jobs
     def create_job(

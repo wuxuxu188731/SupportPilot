@@ -14,6 +14,8 @@ def test_main_wires_sqlite_service_without_global_messages(
   monkeypatch.setenv("DEEPSEEK_API_KEY","test-only-key")
   monkeypatch.setenv("CHAT_DB_PATH", str(database_path))
   monkeypatch.setenv("AUTH_SECRET_KEY", "test-only-auth-secret-key-abcdefghijklmnopqrstuvwxyz")
+  monkeypatch.setenv("DASHSCOPE_API_KEY", "test-only-key")
+  monkeypatch.setenv("QDRANT_URL", "http://qdrant.invalid:6333")
 
   sys.modules.pop("main",None)
   main = importlib.import_module("main")
@@ -55,8 +57,48 @@ def load_app(monkeypatch, tmp_path):
         "CHAT_DB_PATH",
         str(tmp_path / "app.db"),
     )
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "test-only-key")
+    monkeypatch.setenv("QDRANT_URL", "http://qdrant.invalid:6333")
     sys.modules.pop("main", None)
     return importlib.import_module("main").app
+
+
+def test_knowledge_routes_registered_without_network(monkeypatch, tmp_path):
+    """The knowledge router's 7 management routes are registered, and importing
+    main with an unresolvable QDRANT_URL does NOT connect: collection init is
+    deferred, so no DNS/connection attempt happens at import time."""
+    database_path = tmp_path / "knowledge-app.db"
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-only-key")
+    monkeypatch.setenv(
+        "AUTH_SECRET_KEY",
+        "test-secret-key-that-is-at-least-32-characters",
+    )
+    monkeypatch.setenv("CHAT_DB_PATH", str(database_path))
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "test-only-key")
+    monkeypatch.setenv("QDRANT_URL", "http://qdrant.invalid:6333")
+
+    sys.modules.pop("main", None)
+    main = importlib.import_module("main")
+
+    paths = {route.path for route in main.app.routes}
+    assert "/knowledge/documents/" in paths
+    assert "/knowledge/documents/{document_id}/" in paths
+    assert "/knowledge/documents/{document_id}/versions/" in paths
+    assert "/knowledge/documents/{document_id}/disable/" in paths
+    assert "/knowledge/documents/{document_id}/enable/" in paths
+    assert "/knowledge/ingestion-jobs/{job_id}/" in paths
+    # 7 management routes: POST+GET share /knowledge/documents/ (one path,
+    # two routes), so count the route objects, not the deduplicated paths.
+    knowledge_routes = [
+        route.path for route in main.app.routes if route.path.startswith("/knowledge/")
+    ]
+    assert len(knowledge_routes) == 7
+    assert knowledge_routes.count("/knowledge/documents/") == 2
+
+    # Importing main must not have touched the qdrant URL (it would raise, since
+    # qdrant.invalid does not resolve). The fact that we got this far proves the
+    # factory deferred every network call.
+    assert database_path.exists()
 
 
 def register_and_login(client, username):

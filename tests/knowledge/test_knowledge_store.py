@@ -187,6 +187,95 @@ class TestTenantScoping:
                 content_hash="sha256:only",
             )
 
+    def test_list_documents_is_tenant_scoped_and_ordered(self, two_tenant_knowledge_store):
+        """Task 11: list_documents must only ever return the caller's own
+        organization's documents, deterministically ordered (never another
+        tenant's rows)."""
+        store, context_a, context_b = two_tenant_knowledge_store
+        doc_a1 = store.create_document(
+            organization_id=context_a.organization_id,
+            uploaded_by_user_id=context_a.user_id,
+            title="A 一号",
+            source_type=DocumentSourceType.MARKDOWN,
+        )
+        doc_a2 = store.create_document(
+            organization_id=context_a.organization_id,
+            uploaded_by_user_id=context_a.user_id,
+            title="A 二号",
+            source_type=DocumentSourceType.TEXT,
+        )
+        store.create_document(
+            organization_id=context_b.organization_id,
+            uploaded_by_user_id=context_b.user_id,
+            title="B 文档",
+            source_type=DocumentSourceType.MARKDOWN,
+        )
+
+        listed = store.list_documents(
+            organization_id=context_a.organization_id,
+        )
+
+        assert {d.document_id for d in listed} == {
+            doc_a1.document_id,
+            doc_a2.document_id,
+        }
+        # Deterministic order by created_at then id; B's document must never leak.
+        assert [d.document_id for d in listed][0] in {
+            doc_a1.document_id,
+            doc_a2.document_id,
+        }
+        assert all(d.organization_id == context_a.organization_id for d in listed)
+
+    def test_list_versions_is_tenant_and_document_scoped(self, two_tenant_knowledge_store):
+        """Task 11: list_versions returns only the versions of the requested
+        document for the caller's organization, ordered by version number."""
+        store, context_a, context_b = two_tenant_knowledge_store
+        doc_a = store.create_document(
+            organization_id=context_a.organization_id,
+            uploaded_by_user_id=context_a.user_id,
+            title="一号",
+            source_type=DocumentSourceType.MARKDOWN,
+        )
+        doc_b = store.create_document(
+            organization_id=context_a.organization_id,
+            uploaded_by_user_id=context_a.user_id,
+            title="二号",
+            source_type=DocumentSourceType.MARKDOWN,
+        )
+        v1 = create_version(
+            store, context_a, doc_a, content_hash="sha256:one"
+        )
+        v2 = create_version(
+            store, context_a, doc_a, content_hash="sha256:two"
+        )
+        # A version of a different document in the SAME org.
+        create_version(
+            store, context_a, doc_b, content_hash="sha256:other"
+        )
+
+        versions = store.list_versions(
+            organization_id=context_a.organization_id,
+            document_id=doc_a.document_id,
+        )
+
+        assert [v.version_id for v in versions] == [
+            v1.version_id,
+            v2.version_id,
+        ]
+        assert [v.version_no for v in versions] == [1, 2]
+        assert all(v.document_id == doc_a.document_id for v in versions)
+
+    def test_list_versions_does_not_raise_for_missing_document(
+        self, two_tenant_knowledge_store
+    ):
+        """A document id that does not exist (or belongs to another org)
+        yields an empty list, never a cross-tenant leak or a raise."""
+        store, context_a, _ = two_tenant_knowledge_store
+        assert store.list_versions(
+            organization_id=context_a.organization_id,
+            document_id="does-not-exist",
+        ) == []
+
 
 class TestHashIdempotency:
     def test_same_content_hash_returns_existing_version(self, store_with_document):

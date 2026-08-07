@@ -15,8 +15,11 @@ from app.core.config import (
   create_llm_client,
   get_chat_db_path,
   get_auth_secret_key,
-  get_access_token_ttl_seconds
+  get_access_token_ttl_seconds,
+  get_knowledge_settings
 )
+from app.api.knowledge_router import create_knowledge_router
+from app.knowledge.factory import create_knowledge_services
 from app.organizations.sqlite_store import SQLiteOrganizationStore
 from app.sessions.sqlite_store import SQLiteSessionStore
 from app.users.sqlite_store import SQLiteUserStore
@@ -66,6 +69,19 @@ get_current_user = create_current_user_dependency(auth_service=auth_service)
 get_current_tenant = create_current_tenant_dependency(
     organization_service=organization_service,
     get_current_user=get_current_user,
+)
+
+knowledge_services = create_knowledge_services(
+    database_path=database_path,
+    settings=get_knowledge_settings(),
+)
+
+app.include_router(
+  create_knowledge_router(
+    ingestion_service=knowledge_services.ingestion,
+    knowledge_store=knowledge_services.store,
+    get_current_tenant=get_current_tenant,
+  )
 )
 
 app.include_router(
