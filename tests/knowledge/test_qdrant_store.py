@@ -122,6 +122,56 @@ def test_ensure_collection_raises_on_dense_size_mismatch():
         store.ensure_collection()
 
 
+def test_ensure_collection_raises_when_lacking_dense_vector():
+    client = FakeQdrantClient(points=[])
+    client.collections.add(COLLECTION)
+    missing_dense = type(
+        "C",
+        (),
+        {
+            "vectors": {"sparse": None},
+            "sparse_vectors": {"sparse": None},
+        },
+    )
+    client._collections_info[COLLECTION] = missing_dense
+    store = QdrantVectorStore(client=client, collection_name=COLLECTION)
+
+    with pytest.raises(VectorConfigurationError, match="lacks 'dense'"):
+        store.ensure_collection()
+
+
+def test_ensure_collection_raises_when_lacking_sparse_vector():
+    client = FakeQdrantClient(points=[])
+    client.collections.add(COLLECTION)
+    missing_sparse = type(
+        "C",
+        (),
+        {
+            "vectors": {"dense": type("V", (), {"size": 1024})},
+            "sparse_vectors": {},
+        },
+    )
+    client._collections_info[COLLECTION] = missing_sparse
+    store = QdrantVectorStore(client=client, collection_name=COLLECTION)
+
+    with pytest.raises(VectorConfigurationError, match="lacks 'sparse'"):
+        store.ensure_collection()
+
+
+def test_ensure_collection_converts_transport_errors_to_unavailable():
+    from qdrant_client.http.exceptions import UnexpectedResponse
+
+    class ExplodingCreateClient(FakeQdrantClient):
+        def create_collection(self, **kwargs):
+            raise UnexpectedResponse(500, "Internal Server Error", b"boom", {})
+
+    client = ExplodingCreateClient(points=[])
+    store = QdrantVectorStore(client=client, collection_name=COLLECTION)
+
+    with pytest.raises(VectorStoreUnavailableError):
+        store.ensure_collection()
+
+
 def both_filters_equal(
     prefetch,
     *,
@@ -189,6 +239,36 @@ def test_upsert_point_payload_excludes_document_body():
     assert payload["version_id"] == "version-1"
     assert payload["chunk_id"] == "chunk-1"
     assert payload["ordinal"] == 0
+
+
+def test_upsert_point_id_is_deterministic_per_org_version_chunk():
+    client = FakeQdrantClient(points=[])
+    store = QdrantVectorStore(client=client, collection_name=COLLECTION)
+
+    def point(chunk_id: str) -> VectorPoint:
+        return VectorPoint(
+            chunk_id=chunk_id,
+            organization_id="org-a",
+            document_id="doc-1",
+            version_id="version-1",
+            ordinal=0,
+            embedding=embedding_vector(),
+        )
+
+    # Re-upserting the same chunk yields an identical point id, so Qdrant
+    # replaces the existing point rather than appending a duplicate.
+    store.upsert(points=[point("chunk-1")])
+    store.upsert(points=[point("chunk-1")])
+
+    first_id = client.upsert_calls[0]["points"][0].id
+    second_id = client.upsert_calls[1]["points"][0].id
+    assert first_id == "org-a:version-1:chunk-1"
+    assert second_id == first_id
+
+    # A different chunk maps to a distinct id.
+    store.upsert(points=[point("chunk-2")])
+    assert client.upsert_calls[2]["points"][0].id == "org-a:version-1:chunk-2"
+    assert client.upsert_calls[2]["points"][0].id != first_id
 
 
 def test_search_filters_both_prefetches_by_tenant_and_active_versions():

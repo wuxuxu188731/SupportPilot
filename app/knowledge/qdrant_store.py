@@ -85,21 +85,26 @@ class QdrantVectorStore:
                 self._verify_collection_shape()
                 return
 
-            self._client.create_collection(
-                collection_name=self._collection_name,
-                vectors_config={
-                    DENSE_VECTOR_NAME: models.VectorParams(
-                        size=self._dense_size,
-                        distance=models.Distance.COSINE,
-                    )
-                },
-                sparse_vectors_config={
-                    SPARSE_VECTOR_NAME: models.SparseVectorParams(
-                        index=models.SparseIndexParams(on_disk=False)
-                    )
-                },
-            )
-            self._ensure_organization_index()
+            try:
+                self._client.create_collection(
+                    collection_name=self._collection_name,
+                    vectors_config={
+                        DENSE_VECTOR_NAME: models.VectorParams(
+                            size=self._dense_size,
+                            distance=models.Distance.COSINE,
+                        )
+                    },
+                    sparse_vectors_config={
+                        SPARSE_VECTOR_NAME: models.SparseVectorParams(
+                            index=models.SparseIndexParams(on_disk=False)
+                        )
+                    },
+                )
+                self._ensure_organization_index()
+            except (UnexpectedResponse, ConnectionError, TimeoutError) as exc:
+                raise VectorStoreUnavailableError(
+                    reason=f"create collection: {type(exc).__name__}: {exc}"
+                ) from exc
 
     def _collection_exists(self) -> bool:
         names = {c.name for c in self._client.get_collections().collections}
