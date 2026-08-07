@@ -80,8 +80,16 @@ class KnowledgeChunker:
             raise InvalidDocumentError(reason="document has no sectionable content")
 
         # Resolve each section to its exact [start, end) span in the normalised
-        # text by forward-searching from the previous section's end. Sections
-        # partition the text, so this is exact and deterministic.
+        # text by forward-searching from the previous section's end.
+        #
+        # Bounded assumption: the loader derives its sections from the same
+        # normalised text (a heading stack over "\n"-split lines), so section
+        # bodies appear as contiguous, non-overlapping substrings in document
+        # order. The search window is monotonic (each starts after the previous
+        # section's end), and any whitespace between a body's end and the next
+        # body's start is only heading lines and blank lines - it cannot contain
+        # a body's non-heading content as a prefix. This makes forward `find`
+        # exact and deterministic.
         bounds: list[tuple[str | None, int, int]] = []
         search_from = 0
         for section in sections:
@@ -102,25 +110,61 @@ class KnowledgeChunker:
         ordinal = 0
         for heading_path, section_start, section_end in bounds:
             section_text = text[section_start:section_end]
-            cursor = section_start  # running absolute cursor over the partition
+
+            # Determine each splitter piece's *true* position within the section.
+            # ``RecursiveCharacterTextSplitter`` drops the separator char(s) at
+            # the joint between adjacent pieces, so ``sum(len(piece))`` is less
+            # than ``len(section_text)``: a purely arithmetic cursor
+            # under-counts and every chunk after the first would be a
+            # start-shifted slice of the raw text, and the section's final
+            # characters would never be emitted. We therefore advance the cursor
+            # by the true distance - locating each piece within the unconsumed
+            # remainder from the cursor. Pieces partition the section and carry
+            # no trailing separators, so the first match is the true position
+            # even on repetitive text.
+            piece_starts: list[int] = []
+            cursor = section_start
+            remainder = section_text
             for piece in self._splitter.split_text(section_text):
                 if not piece:
                     continue
+                idx = remainder.find(piece)
+                if idx < 0:
+                    # Defensive: a partition-derived piece always matches.
+                    idx = 0
+                true_start = cursor + idx
                 if piece.isspace():
-                    cursor += len(piece)
+                    # Separator-only remainder: fold it into the previous
+                    # chunk rather than emitting a zero-content chunk.
+                    cursor = true_start + len(piece)
+                    remainder = section_text[cursor - section_start:]
                     continue
-                base_start = cursor
-                # Re-include the previous chunk's tail (CHUNK_OVERLAP_TOKENS
-                # token overlap) so adjacent chunks stay contiguous-context.
-                if chunks:
+                piece_starts.append(true_start)
+                cursor = true_start + len(piece)
+                remainder = section_text[cursor - section_start:]
+
+            # Emit one chunk per located piece. Each chunk's content spans from
+            # its piece's true start to the *next* piece's true start (or the
+            # section end), so the dropped separators are absorbed and adjacent
+            # chunks tile the section with no gap and no drift.
+            prev_end: int | None = None
+            for i, start in enumerate(piece_starts):
+                end = (
+                    piece_starts[i + 1]
+                    if i + 1 < len(piece_starts)
+                    else section_end
+                )
+                base_start = start
+                if prev_end is not None:
+                    # Re-include the previous chunk's tail (CHUNK_OVERLAP_TOKENS
+                    # token overlap) so adjacent chunks stay contiguous-context.
                     overlap = self._overlap_start(
-                        text, section_start, cursor
+                        text, section_start, prev_end
                     )
                     if overlap is not None and overlap < base_start:
                         base_start = overlap
-                end = cursor + len(piece)
                 if base_start >= end:
-                    cursor = end
+                    prev_end = end
                     continue
                 chunks.append(
                     DocumentChunk(
@@ -138,7 +182,7 @@ class KnowledgeChunker:
                         end_offset=end,
                     )
                 )
-                cursor = end
+                prev_end = end
                 ordinal += 1
 
         if not chunks:
