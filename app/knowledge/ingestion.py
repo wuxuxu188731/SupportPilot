@@ -1,0 +1,246 @@
+"""Synchronous knowledge-ingestion orchestration.
+
+Ties together the store, loader, chunker, embedding client and vector store
+into a single in-request ingestion pipeline: validate -> version/job -> chunk
+-> embed -> SQLite chunks -> Qdrant points -> activate. The version is only
+activated after the vector points are written, so a document is never
+searchable before its vectors are durable.
+
+The constructor depends solely on Protocols so any concrete
+store/loader/chunker/embedding/vector-store can be injected; no concrete class
+is instantiated here.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from dataclasses import dataclass
+
+from app.knowledge.base import (
+    DocumentSourceType,
+    IngestionJob,
+    IngestionStatus,
+    InvalidDocumentError,
+    KnowledgeDocument,
+    KnowledgeStore,
+)
+from app.knowledge.chunking import CHUNKER_VERSION, KnowledgeChunker
+from app.knowledge.document_loader import LOADER_VERSION, DocumentLoader, LoadedDocument
+from app.knowledge.embeddings import EmbeddingClient
+from app.knowledge.vector_store import VectorPoint, VectorStore
+
+MAX_TITLE_LENGTH = 200
+MIN_TITLE_LENGTH = 1
+
+
+@dataclass(frozen=True)
+class IngestionReceipt:
+    document_id: str
+    version_id: str
+    job_id: str
+    status: IngestionStatus
+    deduplicated: bool
+
+
+class KnowledgeIngestionService:
+    """Orchestrates the synchronous, happy-path ingestion of a knowledge
+    document (or a new version of an existing document) into SQLite + Qdrant.
+
+    ``embedding_model`` / ``embedding_dimensions`` are scalar metadata stamped
+    onto every new ``DocumentVersion`` so retrieval can be reproduced; they are
+    not classes and are independent of the injected Protocol dependencies.
+    """
+
+    def __init__(
+        self,
+        *,
+        store: KnowledgeStore,
+        loader: DocumentLoader,
+        chunker: KnowledgeChunker,
+        embedding: EmbeddingClient,
+        vector_store: VectorStore,
+        embedding_model: str = "text-embedding-v4",
+        embedding_dimensions: int = 1024,
+    ) -> None:
+        self._store = store
+        self._loader = loader
+        self._chunker = chunker
+        self._embedding = embedding
+        self._vector_store = vector_store
+        self._embedding_model = embedding_model
+        self._embedding_dimensions = embedding_dimensions
+
+    # -------------------------------------------------------------- public
+
+    def ingest_new_document(
+        self,
+        *,
+        organization_id: str,
+        uploaded_by_user_id: str,
+        title: str,
+        source_type: DocumentSourceType,
+        content: bytes,
+    ) -> IngestionReceipt:
+        """Create a brand-new document and ingest its first version.
+
+        The full version pipeline runs synchronously; on the happy path the
+        document ends ``ACTIVE`` only after its vectors are in Qdrant. The
+        upload is loaded before the document row is created (load first in the
+        strict event order).
+        """
+        clean_title = self._validate_title(title)
+        loaded = self._loader.load(content, source_type)
+        content_hash = self._hash(loaded.text)
+        document = self._store.create_document(
+            organization_id=organization_id,
+            uploaded_by_user_id=uploaded_by_user_id,
+            title=clean_title,
+            source_type=source_type,
+        )
+        return self._ingest_version(
+            organization_id=organization_id,
+            document=document,
+            source_type=source_type,
+            loaded=loaded,
+            content_hash=content_hash,
+        )
+
+    def ingest_new_version(
+        self,
+        *,
+        organization_id: str,
+        uploaded_by_user_id: str,
+        document_id: str,
+        source_type: DocumentSourceType,
+        content: bytes,
+    ) -> IngestionReceipt:
+        """Ingest a new version of an existing document.
+
+        The document is looked up by org+id (``DOCUMENT_NOT_FOUND`` if absent)
+        and keeps its original ``source_type``; an upload whose declared type
+        differs is rejected with ``INVALID_DOCUMENT``.
+        """
+        document = self._store.get_document(
+            organization_id=organization_id,
+            document_id=document_id,
+        )
+        if source_type is not document.source_type:
+            raise InvalidDocumentError(
+                reason=(
+                    f"source type {source_type.value} does not match document "
+                    f"type {document.source_type.value}"
+                )
+            )
+        loaded = self._loader.load(content, document.source_type)
+        content_hash = self._hash(loaded.text)
+        return self._ingest_version(
+            organization_id=organization_id,
+            document=document,
+            source_type=document.source_type,
+            loaded=loaded,
+            content_hash=content_hash,
+        )
+
+    # ------------------------------------------------------------- private
+
+    @staticmethod
+    def _validate_title(title: str) -> str:
+        clean = title.strip()
+        if not (MIN_TITLE_LENGTH <= len(clean) <= MAX_TITLE_LENGTH):
+            raise InvalidDocumentError(
+                reason=(
+                    f"title must be {MIN_TITLE_LENGTH}-{MAX_TITLE_LENGTH} "
+                    f"characters after trimming"
+                )
+            )
+        return clean
+
+    @staticmethod
+    def _hash(normalized_text: str) -> str:
+        return "sha256:" + hashlib.sha256(
+            normalized_text.encode("utf-8")
+        ).hexdigest()
+
+    def _ingest_version(
+        self,
+        *,
+        organization_id: str,
+        document: KnowledgeDocument,
+        source_type: DocumentSourceType,
+        loaded: LoadedDocument,
+        content_hash: str,
+    ) -> IngestionReceipt:
+        # 1. (load + hash already done by the caller, in event order.)
+        # 2. version + job bookkeeping.
+        version = self._store.create_version(
+            organization_id=organization_id,
+            document_id=document.document_id,
+            content_hash=content_hash,
+            raw_text=loaded.text,
+            loader_version=LOADER_VERSION,
+            chunker_version=CHUNKER_VERSION,
+            embedding_model=self._embedding_model,
+            embedding_dimensions=self._embedding_dimensions,
+        )
+        job: IngestionJob = self._store.create_job(
+            organization_id=organization_id,
+            document_id=document.document_id,
+            version_id=version.version_id,
+        )
+        self._store.mark_job_running(
+            organization_id=organization_id,
+            job_id=job.job_id,
+        )
+
+        # 3. chunk + embed (embedding sees only plain chunk contents).
+        chunks = self._chunker.split(
+            loaded,
+            organization_id=organization_id,
+            document_id=document.document_id,
+            version_id=version.version_id,
+        )
+        vectors = self._embedding.embed_documents(
+            [chunk.content for chunk in chunks]
+        )
+
+        # 4. persist chunks in SQLite.
+        self._store.replace_chunks(
+            organization_id=organization_id,
+            document_id=document.document_id,
+            version_id=version.version_id,
+            chunks=chunks,
+        )
+
+        # 5. ensure the collection exists, then write vector points. This must
+        #    happen before activation so the version is only searchable once
+        #    its points are durable.
+        self._vector_store.ensure_collection()
+        self._vector_store.upsert(
+            points=[
+                VectorPoint(
+                    chunk_id=chunk.chunk_id,
+                    organization_id=organization_id,
+                    document_id=document.document_id,
+                    version_id=version.version_id,
+                    ordinal=chunk.ordinal,
+                    embedding=vector,
+                )
+                for chunk, vector in zip(chunks, vectors)
+            ]
+        )
+
+        # 6. finally activate the version (with the job that belongs to it).
+        self._store.activate_version(
+            organization_id=organization_id,
+            document_id=document.document_id,
+            version_id=version.version_id,
+            job_id=job.job_id,
+        )
+
+        return IngestionReceipt(
+            document_id=document.document_id,
+            version_id=version.version_id,
+            job_id=job.job_id,
+            status=IngestionStatus.SUCCEEDED,
+            deduplicated=False,
+        )
