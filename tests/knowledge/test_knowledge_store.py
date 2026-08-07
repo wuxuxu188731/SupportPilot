@@ -8,13 +8,15 @@ from dataclasses import dataclass
 
 import pytest
 
-from app.knowledge import (
+from app.knowledge.base import (
     DocumentChunk,
     DocumentNotFoundError,
     DocumentSourceType,
     DocumentStatus,
     DuplicateDocumentVersionError,
     IngestionStatus,
+    InvalidDocumentError,
+    VectorStoreUnavailableError,
 )
 from app.knowledge.sqlite_store import SQLiteKnowledgeStore
 from app.organizations.sqlite_store import SQLiteOrganizationStore
@@ -374,3 +376,354 @@ class TestVersionActivation:
         # Both chunks are active; the returned order must follow candidate_ids
         # (chunk-b first), not insertion/autoincrement order.
         assert [chunk.chunk_id for chunk in chunks] == ["chunk-b", "chunk-a"]
+
+
+# ----------------------------------------------------------------------
+# Task 8: hardened ingestion via the real SQLite store + recording fakes.
+# ----------------------------------------------------------------------
+
+
+class _FakeChunker:
+    def __init__(self):
+        self.split_groups = []
+
+    def split(self, document, *, organization_id, document_id, version_id):
+        class _Chunk:
+            pass
+
+        # One chunk per call, id built deterministically from version id.
+        chunk = DocumentChunk(
+            chunk_id=f"chunk-of-{version_id}",
+            organization_id=organization_id,
+            document_id=document_id,
+            version_id=version_id,
+            ordinal=0,
+            heading_path=None,
+            content="policy body text",
+            token_count=4,
+            start_offset=0,
+            end_offset=16,
+        )
+        self.split_groups.append((document_id, version_id))
+        return [chunk]
+
+    @property
+    def split_calls(self) -> int:
+        return len(self.split_groups)
+
+
+class _FakeEmbedding:
+    def __init__(self):
+        self.embed_calls = 0
+
+    def embed_documents(self, texts):
+        self.embed_calls += 1
+        from app.knowledge.embeddings import EmbeddingVector, SparseValue
+
+        return [
+            EmbeddingVector(
+                dense=tuple(0.1 * i for i in range(1024)),
+                sparse=(SparseValue(index=0, value=1.0),),
+                token_count=4,
+            )
+            for _ in texts
+        ]
+
+
+class _FakeVectorStore:
+    def __init__(self, *, available=True):
+        self.available = available
+        self.upsert_calls = 0
+
+    def ensure_collection(self) -> None:
+        return None
+
+    def upsert(self, *, points):
+        self.upsert_calls += 1
+        if not self.available:
+            raise VectorStoreUnavailableError(reason="qdrant transport refused")
+
+
+def _build_service(store, *, vector_available=True, chunker=None, embedding=None):
+    from app.knowledge.document_loader import DocumentLoader
+    from app.knowledge.ingestion import KnowledgeIngestionService
+
+    _chunker = chunker or _FakeChunker()
+    _embedding = embedding or _FakeEmbedding()
+    vectors = _FakeVectorStore(available=vector_available)
+    service = KnowledgeIngestionService(
+        store=store,
+        loader=DocumentLoader(),
+        chunker=_chunker,
+        embedding=_embedding,
+        vector_store=vectors,
+    )
+    return service, vectors, _chunker, _embedding
+
+
+class TestOldVersionPreservedOnFailedReingest:
+    def test_vector_failure_keeps_prior_active_version(self, two_tenant_knowledge_store):
+        """Step 2: v1 activates; a VECTOR_STORE_UNAVAILABLE on v2's upsert must
+        keep the document ACTIVE on v1, fail only v2's job, and leave only v1
+        chunks retrievable."""
+        store, context, _ = two_tenant_knowledge_store
+        service, vectors, _, _ = _build_service(store, vector_available=True)
+
+        v1 = service.ingest_new_document(
+            organization_id=context.organization_id,
+            uploaded_by_user_id=context.user_id,
+            title="退货政策",
+            source_type=DocumentSourceType.MARKDOWN,
+            content=b"# Policy\nBody of the policy.",
+        )
+        assert v1.status is IngestionStatus.SUCCEEDED
+        assert vectors.upsert_calls == 1
+        doc_after_v1 = store.get_document(
+            organization_id=context.organization_id,
+            document_id=v1.document_id,
+        )
+        assert doc_after_v1.status is DocumentStatus.ACTIVE
+        assert doc_after_v1.active_version_id == v1.version_id
+
+        # Now take the vector store down and attempt v2.
+        vectors.available = False
+        with pytest.raises(VectorStoreUnavailableError):
+            service.ingest_new_version(
+                organization_id=context.organization_id,
+                uploaded_by_user_id=context.user_id,
+                document_id=v1.document_id,
+                source_type=DocumentSourceType.MARKDOWN,
+                content=b"# Policy\nA brand NEW body for v2.",
+            )
+
+        doc = store.get_document(
+            organization_id=context.organization_id,
+            document_id=v1.document_id,
+        )
+        assert doc.status is DocumentStatus.ACTIVE
+        assert doc.active_version_id == v1.version_id
+
+        # v2's job is FAILED with the stable code, v1's job stayed SUCCEEDED.
+        v1_job = store.get_latest_job_for_version(
+            organization_id=context.organization_id,
+            document_id=v1.document_id,
+            version_id=v1.version_id,
+        )
+        assert v1_job.status is IngestionStatus.SUCCEEDED
+        v2_version = store.get_version_by_hash(
+            organization_id=context.organization_id,
+            document_id=v1.document_id,
+            content_hash=(
+                "sha256:"
+                + __import__("hashlib").sha256(
+                    "# Policy\nA brand NEW body for v2.".encode("utf-8")
+                ).hexdigest()
+            ),
+        )
+        v2_job = store.get_latest_job_for_version(
+            organization_id=context.organization_id,
+            document_id=v1.document_id,
+            version_id=v2_version.version_id,
+        )
+        assert v2_job.status is IngestionStatus.FAILED
+        assert v2_job.error_code == "VECTOR_STORE_UNAVAILABLE"
+
+        chunks = store.list_active_chunks(
+            organization_id=context.organization_id,
+            candidate_ids=[
+                f"chunk-of-{v1.version_id}",
+                f"chunk-of-{v2_version.version_id}",
+            ],
+        )
+        assert [c.chunk_id for c in chunks] == [f"chunk-of-{v1.version_id}"]
+
+
+class TestInvalidDocumentCreatesNoRows:
+    def test_invalid_inputs_create_no_records(self, two_tenant_knowledge_store):
+        """Step 3: bad type/encoding/size/empty body raise INVALID_DOCUMENT
+        before any Document/Version/Job row exists."""
+        store, context, _ = two_tenant_knowledge_store
+        service, _, _, _ = _build_service(store)
+
+        S = DocumentSourceType
+
+        # Empty body.
+        with pytest.raises(InvalidDocumentError):
+            service.ingest_new_document(
+                organization_id=context.organization_id,
+                uploaded_by_user_id=context.user_id,
+                title="T",
+                source_type=S.MARKDOWN,
+                content=b"   \n ",
+            )
+        # Invalid utf-8 encoding.
+        with pytest.raises(InvalidDocumentError):
+            service.ingest_new_document(
+                organization_id=context.organization_id,
+                uploaded_by_user_id=context.user_id,
+                title="T",
+                source_type=S.MARKDOWN,
+                content=b"\xff\xfe\x00\x81",
+            )
+        # Blank title.
+        with pytest.raises(InvalidDocumentError):
+            service.ingest_new_document(
+                organization_id=context.organization_id,
+                uploaded_by_user_id=context.user_id,
+                title="   ",
+                source_type=S.MARKDOWN,
+                content=b"# valid body",
+            )
+
+        # None of the failed attempts created any rows.
+        assert _count_rows(store, "documents") == 0
+        assert _count_rows(store, "document_versions") == 0
+        assert _count_rows(store, "ingestion_jobs") == 0
+
+
+def _count_rows(store, table: str) -> int:
+    """Count rows in a store table directly so tests can assert record absence."""
+    with store._connection() as connection:
+        return connection.execute(
+            f"SELECT COUNT(*) FROM {table}"
+        ).fetchone()[0]
+
+
+class TestNewDocumentFailureState:
+    def test_loader_passing_doc_failing_at_vector_marks_failed_with_safe_message(
+        self, two_tenant_knowledge_store
+    ):
+        """Step 3: a loader-passing new document that fails at the vector stage
+        leaves Document=FAILED, Job=FAILED; the safe error_message must not
+        leak the API key, the raw document body, or the underlying traceback."""
+        store, context, _ = two_tenant_knowledge_store
+        secret = "sk-test-4893f0a1b2c3"
+
+        class _SecretVectorStore(_FakeVectorStore):
+            def upsert(self, *, points):
+                self.upsert_calls += 1
+                raise VectorStoreUnavailableError(
+                    reason=f"refused auth with key {secret} context aborted"
+                )
+
+        from app.knowledge.document_loader import DocumentLoader
+        from app.knowledge.ingestion import KnowledgeIngestionService
+
+        vectors = _SecretVectorStore()
+        service = KnowledgeIngestionService(
+            store=store,
+            loader=DocumentLoader(),
+            chunker=_FakeChunker(),
+            embedding=_FakeEmbedding(),
+            vector_store=vectors,
+        )
+
+        with pytest.raises(VectorStoreUnavailableError):
+            service.ingest_new_document(
+                organization_id=context.organization_id,
+                uploaded_by_user_id=context.user_id,
+                title="政策",
+                source_type=DocumentSourceType.MARKDOWN,
+                content=b"# Policy\nFull confidential body content.",
+            )
+
+        # The document has no prior active version -> FAILED.
+        document = _first_document(store, context)
+        assert document.status is DocumentStatus.FAILED
+
+        version = store.get_version_by_hash(
+            organization_id=context.organization_id,
+            document_id=document.document_id,
+            content_hash=(
+                "sha256:"
+                + __import__("hashlib").sha256(
+                    "# Policy\nFull confidential body content.".encode("utf-8")
+                ).hexdigest()
+            ),
+        )
+        job = store.get_latest_job_for_version(
+            organization_id=context.organization_id,
+            document_id=document.document_id,
+            version_id=version.version_id,
+        )
+        # The job is FAILED with the stable vector-store code.
+        assert job is not None
+        assert job.status is IngestionStatus.FAILED
+        safe_error = job.error_message or ""
+        assert secret not in safe_error
+        assert "confidential body" not in safe_error
+        assert "Traceback" not in safe_error
+        assert "refused auth" not in safe_error
+
+    def test_unknown_exception_maps_to_ingestion_failed_safe_message(
+        self, two_tenant_knowledge_store
+    ):
+        """Other Exception subclasses (not the stable domain ones) map to a
+        generic INGESTION_FAILED with the hardened safe message."""
+        store, context, _ = two_tenant_knowledge_store
+
+        class _BoomChunker(_FakeChunker):
+            def split(self, document, *, organization_id, document_id, version_id):
+                raise RuntimeError("boom in chunker: <supersecret internal>")
+
+        from app.knowledge.document_loader import DocumentLoader
+        from app.knowledge.ingestion import KnowledgeIngestionService
+
+        service = KnowledgeIngestionService(
+            store=store,
+            loader=DocumentLoader(),
+            chunker=_BoomChunker(),
+            embedding=_FakeEmbedding(),
+            vector_store=_FakeVectorStore(),
+        )
+
+        with pytest.raises(RuntimeError):
+            service.ingest_new_document(
+                organization_id=context.organization_id,
+                uploaded_by_user_id=context.user_id,
+                title="政策",
+                source_type=DocumentSourceType.MARKDOWN,
+                content=b"# Policy\nBody text.",
+            )
+
+        document = _first_document(store, context)
+        assert document.status is DocumentStatus.FAILED
+        version = store.get_version_by_hash(
+            organization_id=context.organization_id,
+            document_id=document.document_id,
+            content_hash=(
+                "sha256:"
+                + __import__("hashlib").sha256(
+                    "# Policy\nBody text.".encode("utf-8")
+                ).hexdigest()
+            ),
+        )
+        job = store.get_latest_job_for_version(
+            organization_id=context.organization_id,
+            document_id=document.document_id,
+            version_id=version.version_id,
+        )
+        assert job is not None
+        assert job.status is IngestionStatus.FAILED
+        assert job.error_code == "INGESTION_FAILED"
+        assert job.error_message == "knowledge ingestion failed"
+        assert "supersecret" not in (job.error_message or "")
+
+
+def _first_document(store, context):
+    """Fetch the single document created for an org (tests create only one)."""
+    with store._connection() as connection:
+        row = connection.execute(
+            """
+            SELECT id FROM documents
+            WHERE organization_id = ?
+            ORDER BY created_at, id
+            LIMIT 1
+            """,
+            (context.organization_id,),
+        ).fetchone()
+    assert row is not None
+    return store.get_document(
+        organization_id=context.organization_id,
+        document_id=row["id"],
+    )

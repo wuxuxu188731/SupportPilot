@@ -14,16 +14,20 @@ is instantiated here.
 from __future__ import annotations
 
 import hashlib
+import logging
 from dataclasses import dataclass
 
 from app.knowledge.base import (
+    DocumentNotFoundError,
     DocumentSourceType,
+    DuplicateDocumentVersionError,
     EmbeddingUnavailableError,
     IngestionJob,
     IngestionStatus,
     InvalidDocumentError,
     KnowledgeDocument,
     KnowledgeStore,
+    VectorStoreUnavailableError,
 )
 from app.knowledge.chunking import CHUNKER_VERSION, KnowledgeChunker
 from app.knowledge.document_loader import LOADER_VERSION, DocumentLoader, LoadedDocument
@@ -32,6 +36,29 @@ from app.knowledge.vector_store import VectorPoint, VectorStore
 
 MAX_TITLE_LENGTH = 200
 MIN_TITLE_LENGTH = 1
+
+# Stable machine-readable error codes produced once document/version/job rows
+# exist. Only these domain exceptions carry their own code; everything else
+# is folded into INGESTION_FAILED with a safe generic message.
+ERROR_CODE_BY_EXCEPTION = {
+    EmbeddingUnavailableError: "EMBEDDING_UNAVAILABLE",
+    VectorStoreUnavailableError: "VECTOR_STORE_UNAVAILABLE",
+    InvalidDocumentError: "INVALID_DOCUMENT",
+}
+INGESTION_FAILED_MESSAGE = "knowledge ingestion failed"
+# Safe, stable error messages forever pinned by code. These never interpolate
+# the exception ``reason``/``safe_message``, so API keys, raw document bodies or
+# provider transport detail can never leak into the persisted job error.
+SAFE_ERROR_MESSAGE_BY_CODE = {
+    "EMBEDDING_UNAVAILABLE": "embedding service unavailable",
+    "VECTOR_STORE_UNAVAILABLE": "vector store unavailable",
+    "INVALID_DOCUMENT": "invalid document",
+}
+
+# Internal diagnostics only. Explicitly carries the traceback (with the
+# exception chain) so operators can root-cause, while the job's error_message
+# stays safe and never exposes keys, raw bodies or stack details.
+_logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -134,6 +161,13 @@ class KnowledgeIngestionService:
             )
         loaded = self._loader.load(content, document.source_type)
         content_hash = self._hash(loaded.text)
+        duplicate = self._resolve_duplicate(
+            organization_id=organization_id,
+            document=document,
+            content_hash=content_hash,
+        )
+        if duplicate is not None:
+            return duplicate
         return self._ingest_version(
             organization_id=organization_id,
             document=document,
@@ -162,6 +196,48 @@ class KnowledgeIngestionService:
             normalized_text.encode("utf-8")
         ).hexdigest()
 
+    def _resolve_duplicate(
+        self,
+        *,
+        organization_id: str,
+        document: KnowledgeDocument,
+        content_hash: str,
+    ) -> IngestionReceipt | None:
+        """Return a deduplicated receipt for an identical, already-ingested
+        version, or None if this hash has not been ingested yet.
+
+        This short-circuits idempotent re-uploads BEFORE any new version/job is
+        reserved and before any embedding/upsert work, so re-uploading the same
+        normalized content touches the store/embedding/vector store exactly
+        once. The (org, document, hash) uniqueness protects against concurrent
+        duplicates via the store's unique constraint instead.
+        """
+        try:
+            existing = self._store.get_version_by_hash(
+                organization_id=organization_id,
+                document_id=document.document_id,
+                content_hash=content_hash,
+            )
+        except DocumentNotFoundError:
+            return None
+        job = self._store.get_latest_job_for_version(
+            organization_id=organization_id,
+            document_id=document.document_id,
+            version_id=existing.version_id,
+        )
+        if job is None:
+            # A version exists but has no job yet (e.g. mid-race); fall back to
+            # the normal create path and let the store's unique constraint
+            # decide, converting any DuplicateDocumentVersionError below.
+            return None
+        return IngestionReceipt(
+            document_id=document.document_id,
+            version_id=existing.version_id,
+            job_id=job.job_id,
+            status=IngestionStatus.SUCCEEDED,
+            deduplicated=True,
+        )
+
     def _ingest_version(
         self,
         *,
@@ -183,6 +259,51 @@ class KnowledgeIngestionService:
             embedding_model=self._embedding_model,
             embedding_dimensions=self._embedding_dimensions,
         )
+        try:
+            return self._pipeline_version(
+                organization_id=organization_id,
+                document=document,
+                version=version,
+                loaded=loaded,
+            )
+        except DuplicateDocumentVersionError as exc:
+            # A concurrent upload reserved this exact content between our
+            # idempotency check and this insert. Treat it as the same, already
+            # successful upload: return the existing version's records without
+            # ever re-embedding or re-upserting.
+            job = self._store.get_latest_job_for_version(
+                organization_id=organization_id,
+                document_id=document.document_id,
+                version_id=exc.existing_version_id,
+            )
+            if job is not None:
+                return IngestionReceipt(
+                    document_id=document.document_id,
+                    version_id=exc.existing_version_id,
+                    job_id=job.job_id,
+                    status=IngestionStatus.SUCCEEDED,
+                    deduplicated=True,
+                )
+            # No resolvable job for the existing version; surface the original
+            # duplicate error so the caller can decide how to proceed.
+            raise
+
+    def _pipeline_version(
+        self,
+        *,
+        organization_id: str,
+        document: KnowledgeDocument,
+        version,
+        loaded: LoadedDocument,
+    ) -> IngestionReceipt:
+        """Run the chunk->embed->persist->activate pipeline for a reserved
+        version, closing any post-reservation failure into the job/document.
+
+        Exceptions are only caught here AFTER version+job rows exist. The safe
+        ``error_message`` on the job never carries API keys, raw document
+        bodies or the underlying traceback; ``KeyboardInterrupt`` /
+        ``SystemExit`` are deliberately never swallowed.
+        """
         job: IngestionJob = self._store.create_job(
             organization_id=organization_id,
             document_id=document.document_id,
@@ -192,63 +313,72 @@ class KnowledgeIngestionService:
             organization_id=organization_id,
             job_id=job.job_id,
         )
-
-        # 3. chunk + embed (embedding sees only plain chunk contents).
-        chunks = self._chunker.split(
-            loaded,
-            organization_id=organization_id,
-            document_id=document.document_id,
-            version_id=version.version_id,
-        )
-        vectors = self._embedding.embed_documents(
-            [chunk.content for chunk in chunks]
-        )
-
-        # The embedding response must mirror the chunk set 1:1. If it does
-        # not, points would be silently dropped (or mismatched), leaving a
-        # searchable version whose Qdrant points don't mirror its SQLite
-        # chunks. Fail loudly *before* any upsert and before any activation.
-        if len(vectors) != len(chunks):
-            raise EmbeddingUnavailableError(
-                reason=(
-                    f"embedding provider returned {len(vectors)} vectors for "
-                    f"{len(chunks)} chunks; expected a 1:1 match"
-                )
+        try:
+            # 3. chunk + embed (embedding sees only plain chunk contents).
+            chunks = self._chunker.split(
+                loaded,
+                organization_id=organization_id,
+                document_id=document.document_id,
+                version_id=version.version_id,
+            )
+            vectors = self._embedding.embed_documents(
+                [chunk.content for chunk in chunks]
             )
 
-        # 4. persist chunks in SQLite.
-        self._store.replace_chunks(
-            organization_id=organization_id,
-            document_id=document.document_id,
-            version_id=version.version_id,
-            chunks=chunks,
-        )
-
-        # 5. ensure the collection exists, then write vector points. This must
-        #    happen before activation so the version is only searchable once
-        #    its points are durable.
-        self._vector_store.ensure_collection()
-        self._vector_store.upsert(
-            points=[
-                VectorPoint(
-                    chunk_id=chunk.chunk_id,
-                    organization_id=organization_id,
-                    document_id=document.document_id,
-                    version_id=version.version_id,
-                    ordinal=chunk.ordinal,
-                    embedding=vector,
+            # The embedding response must mirror the chunk set 1:1. If it does
+            # not, points would be silently dropped (or mismatched), leaving a
+            # searchable version whose Qdrant points don't mirror its SQLite
+            # chunks. Fail loudly *before* any upsert and before any activation.
+            if len(vectors) != len(chunks):
+                raise EmbeddingUnavailableError(
+                    reason=(
+                        f"embedding provider returned {len(vectors)} vectors for "
+                        f"{len(chunks)} chunks; expected a 1:1 match"
+                    )
                 )
-                for chunk, vector in zip(chunks, vectors)
-            ]
-        )
 
-        # 6. finally activate the version (with the job that belongs to it).
-        self._store.activate_version(
-            organization_id=organization_id,
-            document_id=document.document_id,
-            version_id=version.version_id,
-            job_id=job.job_id,
-        )
+            # 4. persist chunks in SQLite.
+            self._store.replace_chunks(
+                organization_id=organization_id,
+                document_id=document.document_id,
+                version_id=version.version_id,
+                chunks=chunks,
+            )
+
+            # 5. ensure the collection exists, then write vector points. This
+            #    must happen before activation so the version is only
+            #    searchable once its points are durable.
+            self._vector_store.ensure_collection()
+            self._vector_store.upsert(
+                points=[
+                    VectorPoint(
+                        chunk_id=chunk.chunk_id,
+                        organization_id=organization_id,
+                        document_id=document.document_id,
+                        version_id=version.version_id,
+                        ordinal=chunk.ordinal,
+                        embedding=vector,
+                    )
+                    for chunk, vector in zip(chunks, vectors)
+                ]
+            )
+
+            # 6. finally activate the version (with the job that belongs to it).
+            self._store.activate_version(
+                organization_id=organization_id,
+                document_id=document.document_id,
+                version_id=version.version_id,
+                job_id=job.job_id,
+            )
+        except Exception as exc:
+            self._fail_reserved(
+                organization_id=organization_id,
+                document=document,
+                version=version,
+                job_id=job.job_id,
+                exc=exc,
+            )
+            raise
 
         return IngestionReceipt(
             document_id=document.document_id,
@@ -256,4 +386,46 @@ class KnowledgeIngestionService:
             job_id=job.job_id,
             status=IngestionStatus.SUCCEEDED,
             deduplicated=False,
+        )
+
+    def _fail_reserved(
+        self,
+        *,
+        organization_id: str,
+        document: KnowledgeDocument,
+        version,
+        job_id: str,
+        exc: Exception,
+    ) -> None:
+        """Persist a stable failure on the job/document without leaking secret
+        content, then hand the original exception back to the caller.
+
+        ``error_message`` is a stable per-code safe string that never embeds
+        the exception ``reason``/traceback/API key/raw body. The traceback is
+        routed only to the internal logger (IDs only) for operators.
+        """
+        error_code = ERROR_CODE_BY_EXCEPTION.get(type(exc))
+        if error_code is None:
+            _logger.exception(
+                "knowledge ingestion failed; organization_id=%s "
+                "document_id=%s version_id=%s job_id=%s exc_type=%s",
+                organization_id,
+                document.document_id,
+                getattr(version, "version_id", ""),
+                job_id,
+                type(exc).__name__,
+            )
+            error_code = "INGESTION_FAILED"
+            error_message = INGESTION_FAILED_MESSAGE
+        else:
+            error_message = SAFE_ERROR_MESSAGE_BY_CODE.get(
+                error_code, INGESTION_FAILED_MESSAGE
+            )
+        self._store.fail_ingestion(
+            organization_id=organization_id,
+            document_id=document.document_id,
+            version_id=version.version_id,
+            job_id=job_id,
+            error_code=error_code,
+            error_message=error_message,
         )

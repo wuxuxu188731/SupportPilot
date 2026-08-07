@@ -22,6 +22,7 @@ from app.knowledge.base import (
     IngestionStatus,
     InvalidDocumentError,
     KnowledgeDocument,
+    VectorStoreUnavailableError,
 )
 from app.knowledge.chunking import CHUNKER_VERSION
 from app.knowledge.document_loader import LOADER_VERSION
@@ -50,6 +51,10 @@ class RecordingKnowledgeStore:
     def __init__(self, events):
         self.events = events
         self.documents: dict[str, KnowledgeDocument] = {}
+        self.versions: dict[str, DocumentVersion] = {}
+        self._hash_key_to_version: dict[tuple[str, str, str], str] = {}
+        self.jobs: dict[str, IngestionJob] = {}
+        self.failed_jobs: list[tuple[str, str, str]] = []
         self._version_counter = 0
 
     def _new_version_id(self) -> str:
@@ -111,7 +116,7 @@ class RecordingKnowledgeStore:
     ) -> DocumentVersion:
         self.events.append("create_version")
         version_id = self._new_version_id()
-        return DocumentVersion(
+        version = DocumentVersion(
             version_id=version_id,
             organization_id=organization_id,
             document_id=document_id,
@@ -124,6 +129,25 @@ class RecordingKnowledgeStore:
             embedding_dimensions=embedding_dimensions,
             created_at="2026-01-01T00:00:00+00:00",
         )
+        self.versions[version_id] = version
+        self._hash_key_to_version[
+            (organization_id, document_id, content_hash)
+        ] = version_id
+        return version
+
+    def get_version_by_hash(
+        self,
+        *,
+        organization_id: str,
+        document_id: str,
+        content_hash: str,
+    ) -> DocumentVersion:
+        version_id = self._hash_key_to_version.get(
+            (organization_id, document_id, content_hash)
+        )
+        if version_id is None:
+            raise DocumentNotFoundError(organization_id, document_id)
+        return self.versions[version_id]
 
     # job -----------------------------------------------------------------
     def create_job(
@@ -134,8 +158,9 @@ class RecordingKnowledgeStore:
         version_id: str,
     ) -> IngestionJob:
         self.events.append("create_job")
-        return IngestionJob(
-            job_id="job-1",
+        job_id = f"job-{len(self.jobs) + 1}"
+        job = IngestionJob(
+            job_id=job_id,
             organization_id=organization_id,
             document_id=document_id,
             version_id=version_id,
@@ -147,6 +172,27 @@ class RecordingKnowledgeStore:
             finished_at=None,
             created_at="2026-01-01T00:00:00+00:00",
         )
+        self.jobs[job_id] = job
+        return job
+
+    def get_latest_job_for_version(
+        self,
+        *,
+        organization_id: str,
+        document_id: str,
+        version_id: str,
+        job_id: str | None = None,
+    ) -> IngestionJob | None:
+        if job_id is not None:
+            return self.jobs.get(job_id)
+        for job in self.jobs.values():
+            if (
+                job.organization_id == organization_id
+                and job.document_id == document_id
+                and job.version_id == version_id
+            ):
+                return job
+        return None
 
     def mark_job_running(
         self,
@@ -155,11 +201,13 @@ class RecordingKnowledgeStore:
         job_id: str,
     ) -> IngestionJob | None:
         self.events.append("mark_job_running")
-        return IngestionJob(
+        if job_id not in self.jobs:
+            return None
+        running = IngestionJob(
             job_id=job_id,
             organization_id=organization_id,
-            document_id="doc-1",
-            version_id="version-1",
+            document_id=self.jobs[job_id].document_id,
+            version_id=self.jobs[job_id].version_id,
             status=IngestionStatus.RUNNING,
             attempt_count=1,
             error_code=None,
@@ -167,6 +215,25 @@ class RecordingKnowledgeStore:
             started_at="2026-01-01T00:00:00+00:00",
             finished_at=None,
             created_at="2026-01-01T00:00:00+00:00",
+        )
+        self.jobs[job_id] = running
+        return running
+
+    def fail_ingestion(
+        self,
+        *,
+        organization_id: str,
+        document_id: str,
+        version_id: str,
+        job_id: str,
+        error_code: str,
+        error_message: str,
+    ) -> KnowledgeDocument:
+        self.events.append("fail_ingestion")
+        self.failed_jobs.append((job_id, error_code, error_message))
+        return self.get_document(
+            organization_id=organization_id,
+            document_id=document_id,
         )
 
     # chunks --------------------------------------------------------------
@@ -270,11 +337,13 @@ class RecordingEmbedding:
         self.dimensions = dimensions
         self.seen_texts: list[str] = []
         self.embedded_inputs = 0
+        self.document_calls = 0
 
     def embed_documents(self, texts):
         self.events.append("embed_documents")
         self.embedded_inputs += len(texts)
         self.seen_texts.extend(texts)
+        self.document_calls += 1
         return [
             EmbeddingVector(
                 dense=tuple(float(i % 7) for i in range(self.dimensions)),
@@ -302,6 +371,7 @@ class RecordingVectorStore:
         self.active_state_at_upsert = active_state_at_upsert
         self.points: list[VectorPoint] = []
         self.ensure_collections = 0
+        self.upsert_calls = 0
 
     def ensure_collection(self):
         self.ensure_collections += 1
@@ -309,6 +379,7 @@ class RecordingVectorStore:
 
     def upsert(self, *, points):
         self.events.append("vector_upsert")
+        self.upsert_calls += 1
         self.points = list(points)
         for point in self.points:
             self.active_state_at_upsert.append(
@@ -564,3 +635,77 @@ def test_embedding_vector_count_mismatch_fails_before_upsert_and_activate():
     assert "vector_upsert" not in events
     assert "activate_version" not in events
     assert vectors.points == []
+
+
+def test_reuploading_same_content_is_idempotent(ingestion_scope):
+    """Step 1: re-uploading identical normalized content must not re-embed or
+    re-upsert. It returns the SAME version/job ids and a deduplicated receipt."""
+    service = ingestion_scope.service
+    original_bytes = b"# Returns\nSeven days refund policy."
+    first = service.ingest_new_document(
+        organization_id="org-a",
+        uploaded_by_user_id="user-a",
+        title="退货政策",
+        source_type=DocumentSourceType.MARKDOWN,
+        content=original_bytes,
+    )
+
+    second = service.ingest_new_version(
+        organization_id="org-a",
+        uploaded_by_user_id="user-a",
+        document_id=first.document_id,
+        source_type=DocumentSourceType.MARKDOWN,
+        content=original_bytes,
+    )
+
+    assert second.version_id == first.version_id
+    assert second.job_id == first.job_id
+    assert second.deduplicated is True
+    # The embedding client saw exactly one document call and the vector store
+    # exactly one upsert (both from the FIRST upload).
+    assert ingestion_scope.embedding.document_calls == 1
+    assert ingestion_scope.vectors.upsert_calls == 1
+
+
+def test_failed_ingestion_persists_stable_error_code_and_re_raises():
+    """A vector-store failure after records exist is mapped to a stable error
+    code via fail_ingestion, and the original exception still propagates."""
+    events: list[str] = []
+    store = RecordingKnowledgeStore(events)
+    loader = RecordingLoader(events)
+    chunker = RecordingChunker(events)
+    embedding = RecordingEmbedding(events)
+    active_state_at_upsert: list[bool] = []
+    vectors = RecordingVectorStore(events, store, active_state_at_upsert)
+
+    class UnavailableVectorStore(RecordingVectorStore):
+        def upsert(self, *, points):
+            self.events.append("vector_upsert")
+            raise VectorStoreUnavailableError(reason="qdrant refused connection")
+
+    vectors = UnavailableVectorStore(events, store, active_state_at_upsert)
+
+    service = KnowledgeIngestionService(
+        store=store,
+        loader=loader,
+        chunker=chunker,
+        embedding=embedding,
+        vector_store=vectors,
+    )
+
+    with pytest.raises(VectorStoreUnavailableError):
+        service.ingest_new_document(
+            organization_id="org-a",
+            uploaded_by_user_id="user-a",
+            title="T",
+            source_type=DocumentSourceType.TEXT,
+            content=b"first chunk content second chunk content",
+        )
+
+    # fail_ingestion was called with a stable error code and a safe message
+    # that never leaks the raw body or an underlying traceback.
+    assert len(store.failed_jobs) == 1
+    _job_id, error_code, error_message = store.failed_jobs[0]
+    assert error_code == "VECTOR_STORE_UNAVAILABLE"
+    assert "Traceback" not in error_message
+    assert "first chunk content" not in error_message
