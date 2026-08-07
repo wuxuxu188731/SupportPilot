@@ -55,6 +55,22 @@ SAFE_ERROR_MESSAGE_BY_CODE = {
     "INVALID_DOCUMENT": "invalid document",
 }
 
+def _lookup_error_code(exc: Exception) -> str | None:
+    """Resolve a stable error code for an exception via isinstance checks.
+
+    A plain dict ``.get(type(exc))`` matches on exact type only, so a
+    subclass (e.g. a Qdrant transport error subclass of
+    ``VectorStoreUnavailableError``) would silently fall through to
+    ``INGESTION_FAILED``. Iterating the mapping in order with ``isinstance``
+    lets subclasses inherit their base's stable code while the most specific
+    key wins.
+    """
+    for exc_type, code in ERROR_CODE_BY_EXCEPTION.items():
+        if isinstance(exc, exc_type):
+            return code
+    return None
+
+
 # Internal diagnostics only. Explicitly carries the traceback (with the
 # exception chain) so operators can root-cause, while the job's error_message
 # stays safe and never exposes keys, raw bodies or stack details.
@@ -164,6 +180,7 @@ class KnowledgeIngestionService:
         duplicate = self._resolve_duplicate(
             organization_id=organization_id,
             document=document,
+            loaded=loaded,
             content_hash=content_hash,
         )
         if duplicate is not None:
@@ -201,16 +218,21 @@ class KnowledgeIngestionService:
         *,
         organization_id: str,
         document: KnowledgeDocument,
+        loaded: LoadedDocument,
         content_hash: str,
     ) -> IngestionReceipt | None:
-        """Return a deduplicated receipt for an identical, already-ingested
-        version, or None if this hash has not been ingested yet.
+        """Return a deduplicated receipt for an identical, ALREADY-ACTIVATED
+        version, or None if we must run the (re-)ingestion pipeline.
 
         This short-circuits idempotent re-uploads BEFORE any new version/job is
         reserved and before any embedding/upsert work, so re-uploading the same
-        normalized content touches the store/embedding/vector store exactly
-        once. The (org, document, hash) uniqueness protects against concurrent
-        duplicates via the store's unique constraint instead.
+        normalized content that already SUCCEEDED touches the store/embedding/
+        vector store exactly once. The (org, document, hash) uniqueness protects
+        against concurrent duplicates via the store's unique constraint instead.
+
+        A version whose latest job FAILED is deliberately NOT short-circuited:
+        it was never activated, so re-uploading that content must fall through
+        to the pipeline and actually make it searchable (or fail truthfully).
         """
         try:
             existing = self._store.get_version_by_hash(
@@ -225,10 +247,12 @@ class KnowledgeIngestionService:
             document_id=document.document_id,
             version_id=existing.version_id,
         )
-        if job is None:
-            # A version exists but has no job yet (e.g. mid-race); fall back to
-            # the normal create path and let the store's unique constraint
-            # decide, converting any DuplicateDocumentVersionError below.
+        if job is None or job.status is not IngestionStatus.SUCCEEDED:
+            # No job yet (mid-race), or the previous attempt failed before
+            # activation. Fall through to the normal create/retry path; the
+            # store's unique constraint will surface a
+            # DuplicateDocumentVersionError that _reuse_duplicate_version
+            # turns into a re-run of the pipeline for the same content.
             return None
         return IngestionReceipt(
             document_id=document.document_id,
@@ -236,6 +260,54 @@ class KnowledgeIngestionService:
             job_id=job.job_id,
             status=IngestionStatus.SUCCEEDED,
             deduplicated=True,
+        )
+
+    def _reuse_duplicate_version(
+        self,
+        *,
+        organization_id: str,
+        document: KnowledgeDocument,
+        existing_version_id: str,
+        loaded: LoadedDocument,
+    ) -> IngestionReceipt:
+        """Handle a ``DuplicateDocumentVersionError`` raised by ``create_version``.
+
+        If the existing version's latest job SUCCEEDED, the content is already
+        active, so the upload is idempotent: return its original records with a
+        deduplicated receipt and never re-embed/re-upsert.
+
+        Otherwise the existing version was never activated — its job FAILED (or
+        no job exists yet, e.g. mid-race). To satisfy the invariant that a new
+        version is invisible until Qdrant succeeds, we must NOT report it as
+        uploaded. Instead we re-run the full pipeline against the SAME version
+        with a fresh job, so re-uploading the content ends SUCCEEDED (and
+        activated) or fails truthfully with a stable code recorded on the new job.
+        """
+        job = self._store.get_latest_job_for_version(
+            organization_id=organization_id,
+            document_id=document.document_id,
+            version_id=existing_version_id,
+        )
+        if job is not None and job.status is IngestionStatus.SUCCEEDED:
+            return IngestionReceipt(
+                document_id=document.document_id,
+                version_id=existing_version_id,
+                job_id=job.job_id,
+                status=IngestionStatus.SUCCEEDED,
+                deduplicated=True,
+            )
+        # The earlier attempt was not activated. Re-run the pipeline against the
+        # existing version so the same content gets a truthful outcome.
+        version = self._store.get_version_by_id(
+            organization_id=organization_id,
+            document_id=document.document_id,
+            version_id=existing_version_id,
+        )
+        return self._pipeline_version(
+            organization_id=organization_id,
+            document=document,
+            version=version,
+            loaded=loaded,
         )
 
     def _ingest_version(
@@ -248,45 +320,39 @@ class KnowledgeIngestionService:
         content_hash: str,
     ) -> IngestionReceipt:
         # 1. (load + hash already done by the caller, in event order.)
-        # 2. version + job bookkeeping.
-        version = self._store.create_version(
-            organization_id=organization_id,
-            document_id=document.document_id,
-            content_hash=content_hash,
-            raw_text=loaded.text,
-            loader_version=LOADER_VERSION,
-            chunker_version=CHUNKER_VERSION,
-            embedding_model=self._embedding_model,
-            embedding_dimensions=self._embedding_dimensions,
-        )
+        # 2. version bookkeeping. create_version raises
+        #    DuplicateDocumentVersionError when the same (org, doc, hash) was
+        #    already reserved — this is where a concurrent-duplicate race
+        #    surfaces, so it MUST be inside the guarded region (it was previously
+        #    outside the try, letting the race escape uncaught).
         try:
-            return self._pipeline_version(
-                organization_id=organization_id,
-                document=document,
-                version=version,
-                loaded=loaded,
-            )
-        except DuplicateDocumentVersionError as exc:
-            # A concurrent upload reserved this exact content between our
-            # idempotency check and this insert. Treat it as the same, already
-            # successful upload: return the existing version's records without
-            # ever re-embedding or re-upserting.
-            job = self._store.get_latest_job_for_version(
+            version = self._store.create_version(
                 organization_id=organization_id,
                 document_id=document.document_id,
-                version_id=exc.existing_version_id,
+                content_hash=content_hash,
+                raw_text=loaded.text,
+                loader_version=LOADER_VERSION,
+                chunker_version=CHUNKER_VERSION,
+                embedding_model=self._embedding_model,
+                embedding_dimensions=self._embedding_dimensions,
             )
-            if job is not None:
-                return IngestionReceipt(
-                    document_id=document.document_id,
-                    version_id=exc.existing_version_id,
-                    job_id=job.job_id,
-                    status=IngestionStatus.SUCCEEDED,
-                    deduplicated=True,
-                )
-            # No resolvable job for the existing version; surface the original
-            # duplicate error so the caller can decide how to proceed.
-            raise
+        except DuplicateDocumentVersionError as exc:
+            # The store reserved this exact content between our idempotency
+            # check (above) and this insert. Route it to the shared duplicate
+            # handler: dedup if it already SUCCEEDED, otherwise re-run the
+            # pipeline for the existing version.
+            return self._reuse_duplicate_version(
+                organization_id=organization_id,
+                document=document,
+                existing_version_id=exc.existing_version_id,
+                loaded=loaded,
+            )
+        return self._pipeline_version(
+            organization_id=organization_id,
+            document=document,
+            version=version,
+            loaded=loaded,
+        )
 
     def _pipeline_version(
         self,
@@ -404,7 +470,7 @@ class KnowledgeIngestionService:
         the exception ``reason``/traceback/API key/raw body. The traceback is
         routed only to the internal logger (IDs only) for operators.
         """
-        error_code = ERROR_CODE_BY_EXCEPTION.get(type(exc))
+        error_code = _lookup_error_code(exc)
         if error_code is None:
             _logger.exception(
                 "knowledge ingestion failed; organization_id=%s "

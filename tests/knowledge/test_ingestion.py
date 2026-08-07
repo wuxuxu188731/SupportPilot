@@ -17,6 +17,7 @@ from app.knowledge.base import (
     DocumentSourceType,
     DocumentStatus,
     DocumentVersion,
+    DuplicateDocumentVersionError,
     EmbeddingUnavailableError,
     IngestionJob,
     IngestionStatus,
@@ -115,6 +116,15 @@ class RecordingKnowledgeStore:
         embedding_dimensions: int,
     ) -> DocumentVersion:
         self.events.append("create_version")
+        # Mirror the real store: the (org, document, hash) unique constraint
+        # rejects a second version of already-ingested content.
+        existing_id = self._hash_key_to_version.get(
+            (organization_id, document_id, content_hash)
+        )
+        if existing_id is not None:
+            raise DuplicateDocumentVersionError(
+                existing_version_id=existing_id
+            )
         version_id = self._new_version_id()
         version = DocumentVersion(
             version_id=version_id,
@@ -148,6 +158,22 @@ class RecordingKnowledgeStore:
         if version_id is None:
             raise DocumentNotFoundError(organization_id, document_id)
         return self.versions[version_id]
+
+    def get_version_by_id(
+        self,
+        *,
+        organization_id: str,
+        document_id: str,
+        version_id: str,
+    ) -> DocumentVersion:
+        version = self.versions.get(version_id)
+        if (
+            version is None
+            or version.organization_id != organization_id
+            or version.document_id != document_id
+        ):
+            raise DocumentNotFoundError(organization_id, document_id)
+        return version
 
     # job -----------------------------------------------------------------
     def create_job(
@@ -231,6 +257,21 @@ class RecordingKnowledgeStore:
     ) -> KnowledgeDocument:
         self.events.append("fail_ingestion")
         self.failed_jobs.append((job_id, error_code, error_message))
+        job = self.jobs.get(job_id)
+        if job is not None:
+            self.jobs[job_id] = IngestionJob(
+                job_id=job_id,
+                organization_id=organization_id,
+                document_id=document_id,
+                version_id=version_id,
+                status=IngestionStatus.FAILED,
+                attempt_count=job.attempt_count,
+                error_code=error_code,
+                error_message=error_message,
+                started_at=job.started_at,
+                finished_at="2026-01-02T00:00:00+00:00",
+                created_at=job.created_at,
+            )
         return self.get_document(
             organization_id=organization_id,
             document_id=document_id,
@@ -256,6 +297,21 @@ class RecordingKnowledgeStore:
         job_id: str,
     ) -> KnowledgeDocument:
         self.events.append("activate_version")
+        job = self.jobs.get(job_id)
+        if job is not None:
+            self.jobs[job_id] = IngestionJob(
+                job_id=job_id,
+                organization_id=organization_id,
+                document_id=document_id,
+                version_id=version_id,
+                status=IngestionStatus.SUCCEEDED,
+                attempt_count=job.attempt_count,
+                error_code=None,
+                error_message=None,
+                started_at=job.started_at,
+                finished_at="2026-01-02T00:00:00+00:00",
+                created_at=job.created_at,
+            )
         doc = self.documents[document_id]
         updated = KnowledgeDocument(
             document_id=doc.document_id,
@@ -709,3 +765,97 @@ def test_failed_ingestion_persists_stable_error_code_and_re_raises():
     assert error_code == "VECTOR_STORE_UNAVAILABLE"
     assert "Traceback" not in error_message
     assert "first chunk content" not in error_message
+
+
+def test_reupload_after_failure_retries_instead_of_false_success():
+    """Re-uploading content whose earlier version FAILED must NOT return a false
+    SUCCEEDED/deduplicated receipt. It re-attempts the pipeline on the SAME
+    version, so the content either activates now (backend recovered) or fails
+    truthfully with the stable code."""
+    events: list[str] = []
+    store = RecordingKnowledgeStore(events)
+    loader = RecordingLoader(events)
+    chunker = RecordingChunker(events)
+    embedding = RecordingEmbedding(events)
+    active_state_at_upsert: list[bool] = []
+    vectors = RecordingVectorStore(events, store, active_state_at_upsert)
+
+    class _ToggleableVectorStore(RecordingVectorStore):
+        def __init__(self, events, store, active_state_at_upsert):
+            super().__init__(events, store, active_state_at_upsert)
+            self.available = True
+
+        def upsert(self, *, points):
+            if not self.available:
+                self.events.append("vector_upsert")
+                raise VectorStoreUnavailableError(reason="qdrant refused connection")
+            super().upsert(points=points)
+
+    vectors = _ToggleableVectorStore(events, store, active_state_at_upsert)
+
+    service = KnowledgeIngestionService(
+        store=store,
+        loader=loader,
+        chunker=chunker,
+        embedding=embedding,
+        vector_store=vectors,
+    )
+
+    # v1 succeeds and activates.
+    v1 = service.ingest_new_document(
+        organization_id="org-a",
+        uploaded_by_user_id="user-a",
+        title="退货政策",
+        source_type=DocumentSourceType.MARKDOWN,
+        content=b"# Returns\nSeven days.",
+    )
+    assert v1.status is IngestionStatus.SUCCEEDED
+    body_b = b"# Returns\nA brand NEW body for v2."
+
+    # v2 (body_b) FAILS at the vector stage; the doc stays on v1.
+    vectors.available = False
+    with pytest.raises(VectorStoreUnavailableError):
+        service.ingest_new_version(
+            organization_id="org-a",
+            uploaded_by_user_id="user-a",
+            document_id=v1.document_id,
+            source_type=DocumentSourceType.MARKDOWN,
+            content=body_b,
+        )
+    v2 = store.get_version_by_hash(
+        organization_id="org-a",
+        document_id=v1.document_id,
+        content_hash="sha256:"
+        + __import__("hashlib").sha256(body_b).hexdigest(),
+    )
+    v2_failed_job = store.get_latest_job_for_version(
+        organization_id="org-a",
+        document_id=v1.document_id,
+        version_id=v2.version_id,
+    )
+    assert v2_failed_job.status is IngestionStatus.FAILED
+    # Document stayed active on v1.
+    assert (
+        store.documents[v1.document_id].active_version_id
+        == v1.version_id
+    )
+
+    # Backend recovers; re-uploading body_b retries the pipeline (NOT a false
+    # dedup). The receipt is truthful: SUCCEEDED now, but NOT deduplicated.
+    vectors.available = True
+    reupload = service.ingest_new_version(
+        organization_id="org-a",
+        uploaded_by_user_id="user-a",
+        document_id=v1.document_id,
+        source_type=DocumentSourceType.MARKDOWN,
+        content=body_b,
+    )
+    assert reupload.status is IngestionStatus.SUCCEEDED
+    assert reupload.deduplicated is False
+    assert reupload.version_id == v2.version_id
+    # The version is now actually activated (becomes searchable).
+    assert store.documents[v1.document_id].active_version_id == v2.version_id
+    # The re-attempt was NOT a dedup short-circuit: it ran a fresh embedding
+    # (v1, v2-failed, then the retry) and a fresh upsert (v1 + the retry).
+    assert embedding.document_calls == 3
+    assert vectors.upsert_calls == 2
