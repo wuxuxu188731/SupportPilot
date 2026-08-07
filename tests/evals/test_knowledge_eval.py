@@ -26,6 +26,8 @@ from scripts.run_knowledge_baseline_eval import (
     CaseMetrics,
     EvalCase,
     ExpectedRelevant,
+    _hit_count,
+    _matches_expected,
     citation_precision,
     compile_report,
     cross_tenant_leak,
@@ -237,6 +239,98 @@ def test_recall_at_5_miss_is_zero():
 def test_recall_at_5_none_for_no_expected():
     case = _case(category="safety_no_answer", expected_relevant=(), should_have_answer=False)
     assert recall_at_5(case, []) is None
+
+
+# --------------------------------------------------------------------------- #
+# Heading path-segment matching rule (Task 14 fix)
+# --------------------------------------------------------------------------- #
+def test_match_expected_full_path_citation_matches_bare_heading():
+    # A citation carrying the FULL heading path (loader semantics) must match a
+    # golden expected_relevant carrying the BARE second-level heading.
+    pair = ("returns", "云舟商城退货政策（A 版）/退货时限")
+    expected = ("returns", "退货时限")
+    assert _matches_expected(pair, expected) is True
+
+
+def test_match_expected_exact_no_slash_still_wins():
+    # A citation heading with no slash equals the expected heading directly.
+    assert _matches_expected(("returns", "退货时限"), ("returns", "退货时限")) is True
+
+
+def test_match_expected_wrong_document_same_heading_does_not_match():
+    # Same heading text in a different document is NOT a match: the document_key
+    # must be equal.
+    assert _matches_expected(
+        ("warranty", "云舟商城退货政策（A 版）/退货时限"), ("returns", "退货时限")
+    ) is False
+
+
+def test_match_expected_heading_containing_expected_as_substring_does_not_match():
+    # A heading that merely CONTAINS the expected text inside a different final
+    # segment (e.g. a longer suffix) does NOT match: the final "/"-segment must
+    # equal the expected heading, not just share it as a prefix/substring.
+    assert _matches_expected(
+        ("returns", "云舟商城退货政策（A 版）/退货时限延长期"), ("returns", "退货时限")
+    ) is False
+
+
+def test_match_expected_heading_containing_expected_as_prefix_does_not_match():
+    # "退货时限" as a bare heading whose final segment is exactly "退货时限" DOES
+    # match via exact equality; but a final segment that starts with it and
+    # continues is excluded by the whole-segment rule.
+    assert _matches_expected(
+        ("returns", "云舟商城退货政策（A 版）/普通退货时限"), ("returns", "退货时限")
+    ) is False
+
+
+def test_recall_at_5_full_path_citation_matches_bare_expected():
+    case = _case(expected_relevant=(("returns", "退货时限"),))
+    returned = [("returns", "云舟商城退货政策（A 版）/退货时限")]
+    assert recall_at_5(case, returned) == 1.0
+
+
+def test_citation_precision_full_path_citation_counts_as_relevant():
+    case = _case(expected_relevant=(("returns", "退货时限"),))
+    returned = [
+        ("returns", "云舟商城退货政策（A 版）/退货时限"),
+        ("warranty", "云舟商城保修政策（A 版）/保修期限"),
+    ]
+    assert citation_precision(case, returned, len(returned)) == pytest.approx(0.5)
+
+
+def test_recall_at_5_wrong_document_full_path_no_match():
+    case = _case(expected_relevant=(("returns", "退货时限"),))
+    returned = [("warranty", "云舟商城保修政策（A 版）/退货时限")]
+    assert recall_at_5(case, returned) == 0.0
+
+
+def test_recall_at_5_heading_prefix_suffix_no_match():
+    # A final segment that only shares the expected text as a prefix/substring
+    # must not count as a hit.
+    case = _case(expected_relevant=(("returns", "退货时限"),))
+    assert recall_at_5(case, [("returns", "退货时限延长期")]) == 0.0
+    assert recall_at_5(case, [("returns", "普通退货时限")]) == 0.0
+
+
+def test_hit_count_each_expected_pair_counts_at_most_once():
+    # Two returned pairs that both match the same expected pair still score one
+    # hit for that expected pair.
+    expected = {("returns", "退货时限")}
+    assert _hit_count(
+        [("returns", "云舟商城退货政策（A 版）/退货时限"), ("returns", "退货时限")],
+        expected,
+    ) == 1
+
+
+def test_evaluate_case_full_path_citation_hits():
+    case = _case(expected_relevant=(("returns", "退货时限"),))
+    metrics = evaluate_case(case, {
+        "pairs": [("returns", "云舟商城退货政策（A 版）/退货时限")],
+        "citations_returned": 1,
+    })
+    assert metrics.hit_count == 1
+    assert metrics.recall_at_5 == 1.0
+    assert metrics.citation_precision == pytest.approx(1.0)
 
 
 def test_citation_precision_positive_with_hits():

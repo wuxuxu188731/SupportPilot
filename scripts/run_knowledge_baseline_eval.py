@@ -172,10 +172,58 @@ def _expected_pairs(case: EvalCase) -> set[tuple[str, str]]:
     return {(e.document_key, e.heading_path) for e in case.expected_relevant}
 
 
+def _matches_expected(
+    returned: tuple[str, str], expected_pair: tuple[str, str]
+) -> bool:
+    """True when a returned ``(document_key, heading_path)`` matches an expected
+    ``(document_key, expected_heading)``.
+
+    The rule resolves the scoring-convention mismatch between the runner's
+    citations (which carry the FULL heading path, e.g. ``云舟商城退货政策（A 版）
+    /退货时限``, built from the loader's heading stack) and the golden
+    ``expected_relevant`` [heading_path] (which carry the BARE second-level
+    heading, e.g. ``退货时限``). A match requires:
+
+    * the ``document_key`` fields to be equal;
+    * the last "/"-segment of the returned ``heading_path`` to equal the
+      expected heading (an exact, whole-segment comparison at the trailing end:
+      ``云舟商城退货政策（A 版）/退货时限`` matches ``退货时限``, but a heading
+      that merely CONTAINS the expected text as a prefix/substring inside a
+      different final segment, e.g. ``退货时限延长期``, does NOT match).
+
+    An exact string equality still wins first — a citation heading with no
+    slash equals the expected heading directly. """
+    returned_doc, returned_heading = returned
+    expected_doc, expected_heading = expected_pair
+    if returned_doc != expected_doc:
+        return False
+    if returned_heading == expected_heading:
+        return True
+    return returned_heading.endswith("/" + expected_heading)
+
+
+def _hit_count(
+    pairs: Sequence[tuple[str, str]],
+    expected: set[tuple[str, str]],
+) -> int:
+    """Number of expected pairs with at least one matching returned pair, using
+    :func:`_matches_expected` path-segment semantics. Each expected pair counts
+    at most once, preserving the brief's hit_count semantics."""
+    return sum(
+        1
+        for expected_pair in expected
+        if any(
+            _matches_expected(p, expected_pair)
+            for p in pairs
+        )
+    )
+
+
 def recall_at_5(
     case: EvalCase, returned_pairs: Sequence[tuple[str, str]]
 ) -> float | None:
-    """Fraction of expected (document_key, heading_path) pairs that were returned.
+    """Fraction of expected relevant pairs that were returned, using
+    path-segment heading matching (see :func:`_matches_expected`).
 
     Returns None when the case has no expected_relevant (safety/no-answer), so
     aggregates can skip it. Otherwise hit_count / expected_count per the brief.
@@ -183,18 +231,21 @@ def recall_at_5(
     expected = _expected_pairs(case)
     if not expected:
         return None
-    returned = set(returned_pairs)
-    hit = sum(1 for p in expected if p in returned)
-    return hit / len(expected)
+    return _hit_count(returned_pairs, expected) / len(expected)
 
 
 def citation_precision(case: EvalCase, returned_pairs, returned_count: int) -> float:
     """relevant_returned / returned_count, with the brief's empty-citation rules:
-    empty citations + should_have_answer=False -> 1.0; empty + positive -> 0.0."""
+    empty citations + should_have_answer=False -> 1.0; empty + positive -> 0.0.
+
+    ``relevant_returned`` counts returned pairs that match an expected pair under
+    the same path-segment rule as recall (:func:`_matches_expected`)."""
     if returned_count == 0:
         return 1.0 if not case.should_have_answer else 0.0
     expected = _expected_pairs(case)
-    relevant_returned = sum(1 for p in returned_pairs if p in expected)
+    relevant_returned = sum(
+        1 for p in returned_pairs if any(_matches_expected(p, e) for e in expected)
+    )
     return relevant_returned / returned_count
 
 
@@ -227,7 +278,7 @@ def evaluate_case(case: EvalCase, result: dict) -> CaseMetrics:
     )
     tenant_keys = result.get("tenant_keys", [case.tenant_key])
     expected = _expected_pairs(case)
-    hit_count = sum(1 for p in pairs if p in expected)
+    hit_count = _hit_count(pairs, expected)
     return CaseMetrics(
         category=case.category,
         tenant_key=case.tenant_key,
