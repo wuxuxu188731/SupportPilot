@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "supportpilot://eval/knowledge case/2026-08-08",
+  "title": "Knowledge RAG eval case",
+  "description": "One line of evals/knowledge/cases.jsonl. A case fixes a tenant-scoped retrieval question, the policy document+heading it should ground on (expected_relevant), whether an answer is warranted, and which tenants must never leak in.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "case_id",
+    "category",
+    "tenant_key",
+    "question",
+    "expected_relevant",
+    "should_have_answer",
+    "forbidden_tenant_keys"
+  ],
+  "properties": {
+    "case_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "category": {
+      "type": "string",
+      "enum": [
+        "simple_policy",
+        "multi_condition_policy",
+        "mixed_fact_policy",
+        "safety_no_answer"
+      ]
+    },
+    "tenant_key": {
+      "type": "string",
+      "enum": ["org_a", "org_b"]
+    },
+    "question": {
+      "type": "string",
+      "minLength": 1
+    },
+    "expected_relevant": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["document_key", "heading_path"],
+        "properties": {
+          "document_key": {
+            "type": "string",
+            "minLength": 1
+          },
+          "heading_path": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "should_have_answer": {
+      "type": "boolean"
+    },
+    "forbidden_tenant_keys": {
+      "type": "array",
+      "uniqueItems": false,
+      "items": {
+        "type": "string",
+        "enum": ["org_a", "org_b"]
+      }
+    }
+  }
+}
