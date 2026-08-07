@@ -233,8 +233,8 @@ def test_adjacent_same_document_chunks_keep_only_the_higher_score_one(
     retrieval_scope,
 ):
     """Same document + version, ordinal difference of 1: only the higher-score
-    candidate survives dedupe. Ordinal-5 chunks differ by more than 1 so all
-    survive."""
+    candidate survives dedupe. Ordinal-5 chunk differs by more than 1 from every
+    kept ordinal, so it survives."""
     retrieval_scope.vector.candidates = [
         _candidate("chunk-a0", score=0.9, ordinal=0),
         _candidate("chunk-a1", score=0.8, ordinal=1),   # |0-1| == 1, lower
@@ -250,8 +250,45 @@ def test_adjacent_same_document_chunks_keep_only_the_higher_score_one(
     ids = [c.chunk_id for c in result.citations]
     # chunk-a0 (score 0.9) beats chunk-a1 (score 0.8) since they are adjacent;
     # chunk-a2 (score 0.7) is adjacent to chunk-a1 (dropped) but NOT to
-    # chunk-a0 (difference 2), so it survives. chunk-a5 is a different document.
+    # chunk-a0 (difference 2), so it survives (still same document doc-a).
+    # chunk-a5 (doc-b, ordinal 5) is a DIFFERENT document: it survives because
+    # adjacency is document-scoped AND its ordinal is not adjacent to any kept
+    # ordinal in doc-a.
     assert ids == ["chunk-a0", "chunk-a2", "chunk-a5"]
+
+
+def test_adjacent_chunks_from_different_documents_are_both_kept(
+    retrieval_scope,
+):
+    """Two chunks from DIFFERENT documents that share a version_id and differ by
+    one ordinal must BOTH be kept. Document-scoping prevents cross-document
+    collisions: without it, the shared version + adjacent ordinals would make a
+    valid hit look like a contiguous same-document fragment and drop it."""
+    # doc-b chunk-b1 (ordinal 1) and doc-a chunk-a2 (ordinal 2) share version-a
+    # and differ by exactly one ordinal; their real documents differ, so the
+    # dedupe must NOT collapse them.
+    retrieval_scope.store.active["chunk-b1"] = _chunk_ref(
+        chunk_id="chunk-b1",
+        document_id="doc-b",
+        ordinal=1,
+        token_count=10,
+        content="另一个独立文档的高分片段",
+    )
+    retrieval_scope.vector.candidates = [
+        _candidate("chunk-b1", score=0.9, ordinal=1, document_id="doc-b"),
+        _candidate("chunk-a2", score=0.8, ordinal=2),
+    ]
+    # Both live in the same active version and their ordinals are adjacent
+    # (|1-2| == 1), yet they come from different documents -- the original
+    # (document-unaware) dedupe would have dropped chunk-a2 as "adjacent" to
+    # chunk-b1. Both must appear.
+    result = retrieval_scope.service.search(
+        organization_id="org-a",
+        question="退货",
+    )
+
+    ids = [c.chunk_id for c in result.citations]
+    assert ids == ["chunk-b1", "chunk-a2"]
 
 
 def test_rebuilds_order_from_candidate_scores_not_db_default_order(

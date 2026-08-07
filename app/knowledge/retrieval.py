@@ -172,12 +172,15 @@ class BaselineKnowledgeSearchService:
         candidate_by_id: dict[str, VectorCandidate],
     ) -> list[ChunkWithDocumentTitle]:
         """Order resolved chunks by candidate score descending, then drop the
-        lower-score member of any same-version, ordinal-difference-1 pair.
+        lower-score member of any same-document, same-version,
+        ordinal-difference-1 pair.
 
         Order is rebuilt from candidate scores (``candidate_by_id``), never from
         the store's default row order. Because we walk in descending score order,
         any already-kept neighbor always outranks the current candidate, so
-        "adjacent" correctly means "keep the higher score".
+        "adjacent" correctly means "keep the higher score". Adjacency is scoped
+        to a single document+version so chunks of different documents never
+        collide even if they share a version_id and differ by one ordinal.
         """
         ranked = sorted(
             resolved,
@@ -185,18 +188,25 @@ class BaselineKnowledgeSearchService:
             reverse=True,
         )
         kept: list[ChunkWithDocumentTitle] = []
-        kept_ver_ord: set[tuple[str, int]] = set()
+        # Collapse only CONTIGUOUS fragments of the SAME document+version, so
+        # key on document_id too -- otherwise chunks from different documents
+        # that share a version_id and differ by one ordinal would collide and a
+        # valid hit could be dropped.
+        kept_doc_ver_ord: set[tuple[str, str, int]] = set()
         for ref in ranked:
+            document = ref.document_id
             version = ref.version_id
             ordinal = ref.ordinal
             adjacent = any(
-                v == version and abs(o - ordinal) == 1
-                for (v, o) in kept_ver_ord
+                d == document
+                and v == version
+                and abs(o - ordinal) == 1
+                for (d, v, o) in kept_doc_ver_ord
             )
             if adjacent:
                 continue
             kept.append(ref)
-            kept_ver_ord.add((version, ordinal))
+            kept_doc_ver_ord.add((document, version, ordinal))
         return kept
 
     @classmethod
