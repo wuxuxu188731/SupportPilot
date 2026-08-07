@@ -29,6 +29,12 @@ PRODUCTION_COLLECTION = "supportpilot_knowledge_te4_1024_v1"
 _DENSE = tuple(0.5 for _ in range(1024))
 _DENSE_A = tuple(0.6 for _ in range(1024))
 _DENSE_B = tuple(0.7 for _ in range(1024))
+# A high-similarity-but-not-identical dense vector: same 0.5 normal as _DENSE,
+# but dim 1023 flipped to -0.5. Cosine w.r.t. _DENSE is ~0.998, so it ranks
+# strictly below _DENSE (1.0) on a dense prefetch while staying far above a
+# cosine of -1.0. Used as the dense-matching filler points in the RRF test so
+# ranking between them and an exactly-matching point is deterministic.
+_DENSE_FILLER = tuple(0.5 if i < (1024 - 1) else -0.5 for i in range(1024))
 
 
 def _chunk_id(label: str) -> str:
@@ -47,11 +53,11 @@ def _test_qdrant_url() -> str:
 
 
 @pytest.fixture
-def real_client() -> QdrantClient | None:
-    """Return a live QdrantClient, or None when the instance is unreachable.
+def real_client() -> QdrantClient:
+    """Return a live QdrantClient.
 
-    An unreachable instance means every dependent test is skipped, so a
-    developer without Qdrant can still run the non-integration suite.
+    An unreachable instance is skipped (never ``None``), so a developer
+    without Qdrant can still run the non-integration suite.
     """
     client = QdrantClient(
         url=_test_qdrant_url(),
@@ -66,11 +72,8 @@ def real_client() -> QdrantClient | None:
 
 
 @pytest.fixture
-def unique_collection(real_client):
+def unique_collection(real_client: QdrantClient):
     """A unique ``supportpilot_test_<uuid>`` collection, deleted in finally."""
-    if real_client is None:
-        yield None
-        return
     name = f"supportpilot_test_{uuid4().hex}"
     yield name
     try:
@@ -203,47 +206,74 @@ def test_org_b_version_cannot_bypass_org_filter(
 def test_sparse_and_dense_channels_both_feed_rrf(real_client, unique_collection):
     """A point whose DENSE vector is far but whose SPARSE indices match the
     query must still be returned: the sparse prefetch independently feeds the
-    native RRF fusion (it is not a no-op alongside the dense channel)."""
+    native RRF fusion (it is not a no-op alongside the dense channel).
+
+    This is deliberately designed to DISCRIMINATE the sparse channel. Qdrant
+    returns up to ``limit`` points per prefetch regardless of score, so with
+    too few points an orthogonal-dense point still leaks in through the dense
+    prefetch and the assertion would pass even if the sparse channel were
+    broken. We seed enough dense-matching points (9 > ``prefetch_limit`` 8) that
+    the dense prefetch is fully saturated by high-cosine points and can only
+    surface the orthogonal point through the sparse prefetch.
+    """
     store = QdrantVectorStore(client=real_client, collection_name=unique_collection)
     store.ensure_collection()
 
-    # dense_sparse_only: dense far from query in cosine terms, sparse hits.
     dense_far = tuple(-1.0 for _ in range(1024))
     dense_hit = _chunk_id("dense-hit")
     sparse_hit = _chunk_id("sparse-hit")
-    store.upsert(
-        points=[
-            _point("dense-hit", organization_id="org-a", version_id="v1",
-                   dense=_DENSE, sparse_idx=100),
-            # Orthogonal dense, exactly-matching sparse index.
-            VectorPoint(
-                chunk_id=sparse_hit,
-                organization_id="org-a",
-                document_id="doc-org-a",
-                version_id="v1",
-                ordinal=1,
-                embedding=EmbeddingVector(
-                    dense=dense_far,
-                    sparse=(SparseValue(index=777, value=1.0),),
-                    token_count=4,
-                ),
+
+    # Dense-matching filler points: same org-a / active v1 signature so they
+    # pass the tenant+version filter, and a dense vector (~0.998 cosine) that is
+    # strictly less similar than the exact _DENSE match (1.0) but far above the
+    # orthogonal sparse_hit (-1.0). 8 fillers + dense_hit = 9 dense-matching
+    # points, saturating the dense prefetch's limit=8 and pushing sparse_hit
+    # out. Their sparse indices never match the query's (777).
+    points = [
+        _point("dense-hit", organization_id="org-a", version_id="v1",
+               dense=_DENSE, sparse_idx=100),
+    ]
+    points += [
+        _point(f"filler-{i}", organization_id="org-a", version_id="v1",
+               dense=_DENSE_FILLER, sparse_idx=300 + i)
+        for i in range(8)
+    ]
+    # Orthogonal dense (cosine -1.0), exactly-matching sparse index 777: reachable
+    # ONLY via the sparse prefetch.
+    points.append(
+        VectorPoint(
+            chunk_id=sparse_hit,
+            organization_id="org-a",
+            document_id="doc-org-a",
+            version_id="v1",
+            ordinal=len(points),
+            embedding=EmbeddingVector(
+                dense=dense_far,
+                sparse=(SparseValue(index=777, value=1.0),),
+                token_count=4,
             ),
-        ]
+        )
     )
+    store.upsert(points=points)
 
     query = EmbeddingVector(
-        dense=_DENSE,  # matches the dense-hit point, far from sparse-hit
-        sparse=(SparseValue(index=777, value=1.0),),  # matches sparse-hit only
+        dense=_DENSE,  # exactly matches dense_hit, high for the fillers, -1.0 for sparse_hit
+        sparse=(SparseValue(index=777, value=1.0),),  # matches sparse_hit only
         token_count=4,
     )
+    # prefetch_limit=8 < 9 dense-matching points, so the dense prefetch is full
+    # and sparse_hit cannot ride in on it. result_limit=16 >= the 10 unique
+    # points, so every RRF candidate (including the sparse-borne sparse_hit) is
+    # present in the fused result.
     candidates = store.search(
         organization_id="org-a",
         active_version_ids=["v1"],
         query_embedding=query,
         prefetch_limit=8,
-        result_limit=8,
+        result_limit=16,
     )
     ids = {c.chunk_id for c in candidates}
+    assert len(candidates) >= 2
     assert dense_hit in ids
     assert sparse_hit in ids
 
