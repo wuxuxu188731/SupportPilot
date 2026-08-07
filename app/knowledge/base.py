@@ -189,6 +189,21 @@ class InsufficientEvidenceError(KnowledgeError):
         )
 
 
+class EmbeddingUnavailableError(KnowledgeError):
+    """Raised when the embedding provider cannot serve a request.
+
+    Covers temporary failures (retries exhausted: 429/5xx/connection/timeout)
+    and permanent contract violations (bad count, wrong dimension, non-finite
+    values, malformed sparse vectors, non-temporary 4xx). Callers should not
+    retry after this is raised.
+    """
+
+    code = "EMBEDDING_UNAVAILABLE"
+
+    def __init__(self, *, reason: str) -> None:
+        super().__init__("EMBEDDING_UNAVAILABLE", f"embedding unavailable: {reason}")
+
+
 class KnowledgeStore(Protocol):
     """Tenant-scoped document/version/chunk/job persistence boundary.
 
