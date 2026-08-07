@@ -21,6 +21,7 @@ from collections.abc import Sequence
 from typing import Callable
 
 import dashscope
+import requests
 
 from app.knowledge.base import EmbeddingUnavailableError
 from app.knowledge.embeddings import EmbeddingVector, SparseValue, count_tokens
@@ -114,7 +115,7 @@ class DashScopeEmbeddingClient:
                 return self._parse_response(response, texts)
             except EmbeddingUnavailableError:
                 raise
-            except (ConnectionError, TimeoutError) as exc:
+            except (requests.exceptions.RequestException, ConnectionError, TimeoutError) as exc:
                 if attempt < RETRIES_PER_CALL:
                     self._sleep(RETRY_SLEEP_SECONDS)
                     continue
@@ -178,8 +179,7 @@ class DashScopeEmbeddingClient:
 
         return vectors
 
-    @staticmethod
-    def _validate_dense(values: Sequence[object]) -> tuple[float, ...]:
+    def _validate_dense(self, values: Sequence[object]) -> tuple[float, ...]:
         if len(values) != TEXT_EMBEDDING_DIMENSION:
             raise EmbeddingUnavailableError(
                 reason=(
@@ -189,21 +189,25 @@ class DashScopeEmbeddingClient:
             )
         out = tuple(float(v) for v in values)
         for v in out:
-            try:
-                finite = v == v and v not in (float("inf"), float("-inf"))
-            except TypeError:
-                finite = False
-            if not finite:
+            if not self._is_finite(v):
                 raise EmbeddingUnavailableError(reason="dense vector has non-finite values")
         return out
 
     @staticmethod
-    def _validate_sparse(values: Sequence[object]) -> tuple[SparseValue, ...]:
+    def _is_finite(value: float) -> bool:
+        try:
+            return value == value and value not in (float("inf"), float("-inf"))
+        except TypeError:
+            return False
+
+    def _validate_sparse(self, values: Sequence[object]) -> tuple[SparseValue, ...]:
         seen: set[int] = set()
         out: list[SparseValue] = []
         for entry in values:
             index = int(entry["index"])
             value = float(entry["value"])
+            if not self._is_finite(value):
+                raise EmbeddingUnavailableError(reason="sparse value is non-finite")
             if index < 0:
                 raise EmbeddingUnavailableError(reason="sparse index is negative")
             if index in seen:
