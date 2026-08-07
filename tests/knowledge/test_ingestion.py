@@ -17,6 +17,7 @@ from app.knowledge.base import (
     DocumentSourceType,
     DocumentStatus,
     DocumentVersion,
+    EmbeddingUnavailableError,
     IngestionJob,
     IngestionStatus,
     InvalidDocumentError,
@@ -495,7 +496,10 @@ def test_title_is_stripped_and_length_validated(ingestion_scope):
         content=b"body",
     )
     from app.knowledge.base import KnowledgeDocument
-    assert isinstance(ingestion_scope.store.documents[receipt.document_id].title, str)
+    assert (
+        ingestion_scope.store.documents[receipt.document_id].title
+        == "Given title"
+    )
 
     # Blank title -> invalid.
     with pytest.raises(InvalidDocumentError):
@@ -515,3 +519,48 @@ def test_title_is_stripped_and_length_validated(ingestion_scope):
             source_type=DocumentSourceType.TEXT,
             content=b"body",
         )
+
+
+def test_embedding_vector_count_mismatch_fails_before_upsert_and_activate():
+    """A degraded embedding response (wrong vector count) must fail loudly
+    before any point is upserted or any version is activated, so a searchable
+    version can never be left with Qdrant points that don't mirror SQLite."""
+    events: list[str] = []
+    store = RecordingKnowledgeStore(events)
+    loader = RecordingLoader(events)
+    chunker = RecordingChunker(events)
+    active_state_at_upsert: list[bool] = []
+    vectors = RecordingVectorStore(events, store, active_state_at_upsert)
+
+    class SparseEmbedding(RecordingEmbedding):
+        """Embedding that silently drops the last vector (returns N-1)."""
+
+        def embed_documents(self, texts):
+            self.events.append("embed_documents")
+            full = super().embed_documents(texts)
+            return full[:-1]
+
+    embedding = SparseEmbedding(events)
+
+    service = KnowledgeIngestionService(
+        store=store,
+        loader=loader,
+        chunker=chunker,
+        embedding=embedding,
+        vector_store=vectors,
+    )
+
+    with pytest.raises(EmbeddingUnavailableError):
+        service.ingest_new_document(
+            organization_id="org-a",
+            uploaded_by_user_id="user-a",
+            title="T",
+            source_type=DocumentSourceType.TEXT,
+            content=b"first chunk content second chunk content",
+        )
+
+    # The failure happens after embed but before any chunk persistence in the
+    # vector store: no upsert, no activation, and no points written.
+    assert "vector_upsert" not in events
+    assert "activate_version" not in events
+    assert vectors.points == []

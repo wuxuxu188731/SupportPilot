@@ -18,6 +18,7 @@ from dataclasses import dataclass
 
 from app.knowledge.base import (
     DocumentSourceType,
+    EmbeddingUnavailableError,
     IngestionJob,
     IngestionStatus,
     InvalidDocumentError,
@@ -124,7 +125,7 @@ class KnowledgeIngestionService:
             organization_id=organization_id,
             document_id=document_id,
         )
-        if source_type is not document.source_type:
+        if source_type != document.source_type:
             raise InvalidDocumentError(
                 reason=(
                     f"source type {source_type.value} does not match document "
@@ -202,6 +203,18 @@ class KnowledgeIngestionService:
         vectors = self._embedding.embed_documents(
             [chunk.content for chunk in chunks]
         )
+
+        # The embedding response must mirror the chunk set 1:1. If it does
+        # not, points would be silently dropped (or mismatched), leaving a
+        # searchable version whose Qdrant points don't mirror its SQLite
+        # chunks. Fail loudly *before* any upsert and before any activation.
+        if len(vectors) != len(chunks):
+            raise EmbeddingUnavailableError(
+                reason=(
+                    f"embedding provider returned {len(vectors)} vectors for "
+                    f"{len(chunks)} chunks; expected a 1:1 match"
+                )
+            )
 
         # 4. persist chunks in SQLite.
         self._store.replace_chunks(
