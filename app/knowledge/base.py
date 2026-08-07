@@ -204,6 +204,20 @@ class EmbeddingUnavailableError(KnowledgeError):
         super().__init__("EMBEDDING_UNAVAILABLE", f"embedding unavailable: {reason}")
 
 
+class VectorStoreUnavailableError(KnowledgeError):
+    """Raised when a vector store (Qdrant) request cannot be served.
+
+    Covers connection/timeout failures and ``UnexpectedResponse`` from the
+    Qdrant transport. Never converted to an empty result: the caller must
+    treat inference as failed rather than silently dropping evidence.
+    """
+
+    code = "VECTOR_STORE_UNAVAILABLE"
+
+    def __init__(self, *, reason: str) -> None:
+        super().__init__("VECTOR_STORE_UNAVAILABLE", f"vector store unavailable: {reason}")
+
+
 class KnowledgeStore(Protocol):
     """Tenant-scoped document/version/chunk/job persistence boundary.
 
