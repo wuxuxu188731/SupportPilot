@@ -111,13 +111,20 @@ class QdrantVectorStore:
         return self._collection_name in names
 
     def _verify_collection_shape(self) -> None:
+        # Real qdrant-client (>= 1.18) exposes the vector config on
+        # ``CollectionInfo.config.params``: named dense vectors at
+        # ``params.vectors`` (dict name -> VectorParams) and named sparse at
+        # ``params.sparse_vectors``. Older/mis-build fakes that keep it at
+        # ``info.vectors`` are not the shape we validate against.
         try:
             info = self._client.get_collection(self._collection_name)
         except UnexpectedResponse as exc:
             raise VectorStoreUnavailableError(
                 reason=f"inspect collection: {exc}"
             ) from exc
-        vectors = getattr(info, "vectors", None) or {}
+        params = getattr(info, "config", None)
+        params = getattr(params, "params", None)
+        vectors = getattr(params, "vectors", None) or {}
         if DENSE_VECTOR_NAME not in vectors:
             raise VectorConfigurationError(
                 f"collection {self._collection_name} lacks {DENSE_VECTOR_NAME!r} vector"
@@ -127,7 +134,7 @@ class QdrantVectorStore:
             raise VectorConfigurationError(
                 f"collection {self._collection_name} dense size {size} != {self._dense_size}"
             )
-        sparse = getattr(info, "sparse_vectors", None) or {}
+        sparse = getattr(params, "sparse_vectors", None) or {}
         if SPARSE_VECTOR_NAME not in sparse:
             raise VectorConfigurationError(
                 f"collection {self._collection_name} lacks {SPARSE_VECTOR_NAME!r} vector"
@@ -265,6 +272,9 @@ class QdrantVectorStore:
 
     @staticmethod
     def _point_id(point: VectorPoint) -> str:
-        # Deterministic point id: unique per (org, version, chunk) so a re-
-        # upsert of the same chunk overwrites rather than duplicates.
-        return f"{point.organization_id}:{point.version_id}:{point.chunk_id}"
+        # The chunk_id is already a deterministic uuid5 (Task 4 chunker), so it
+        # doubles as the Qdrant point id. Real Qdrant only accepts an unsigned
+        # integer or a UUID as a point id; re-upserting the same chunk reuses the
+        # same UUID, so overwrite-idempotency is preserved without a lossy
+        # composite string.
+        return point.chunk_id

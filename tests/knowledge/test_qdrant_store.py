@@ -49,15 +49,11 @@ class FakeQdrantClient:
         self.payload_index_calls.append(kwargs)
 
     def get_collection(self, name):
-        default = type(
-            "C",
-            (),
-            {
-                "vectors": {
-                    "dense": type("V", (), {"size": 1024}),
-                },
-                "sparse_vectors": {"sparse": None},
-            },
+        # Mirrors the REAL CollectionInfo shape (qdrant-client >= 1.18): the
+        # vector config lives on CollectionInfo.config.params.vectors (dict
+        # name -> VectorParams) and ConfigurationInfo.config.params.sparse_vectors.
+        default = self._shape_info(
+            {"dense": type("V", (), {"size": 1024})}, sparse={"sparse": None}
         )
         return self._collections_info.get(name, default)
 
@@ -70,11 +66,21 @@ class FakeQdrantClient:
 
     # --- helpers for the mismatch tests ---
 
-    def _set_info(self, name, vectors, dense_size):
-        self._collections_info[name] = {
-            "vectors": vectors,
-            "dense_size": dense_size,
-        }
+    @staticmethod
+    def _shape_info(vectors, *, sparse):
+        """Build a CollectionInfo in the REAL shape (config.params.*)."""
+        config = type(
+            "Config",
+            (),
+            {
+                "params": type(
+                    "Params",
+                    (),
+                    {"vectors": vectors, "sparse_vectors": sparse},
+                )
+            },
+        )
+        return type("C", (), {"config": config})
 
 
 def embedding_vector():
@@ -114,7 +120,9 @@ def test_ensure_collection_is_idempotent_when_collection_exists():
 def test_ensure_collection_raises_on_dense_size_mismatch():
     client = FakeQdrantClient(points=[])
     client.collections.add(COLLECTION)
-    wrong = type("C", (), {"vectors": {"dense": type("V", (), {"size": 512})}, "sparse_vectors": {"sparse": None}})
+    wrong = FakeQdrantClient._shape_info(
+        {"dense": type("V", (), {"size": 512})}, sparse={"sparse": None}
+    )
     client._collections_info[COLLECTION] = wrong
     store = QdrantVectorStore(client=client, collection_name=COLLECTION)
 
@@ -125,14 +133,7 @@ def test_ensure_collection_raises_on_dense_size_mismatch():
 def test_ensure_collection_raises_when_lacking_dense_vector():
     client = FakeQdrantClient(points=[])
     client.collections.add(COLLECTION)
-    missing_dense = type(
-        "C",
-        (),
-        {
-            "vectors": {"sparse": None},
-            "sparse_vectors": {"sparse": None},
-        },
-    )
+    missing_dense = FakeQdrantClient._shape_info({}, sparse={"sparse": None})
     client._collections_info[COLLECTION] = missing_dense
     store = QdrantVectorStore(client=client, collection_name=COLLECTION)
 
@@ -143,13 +144,8 @@ def test_ensure_collection_raises_when_lacking_dense_vector():
 def test_ensure_collection_raises_when_lacking_sparse_vector():
     client = FakeQdrantClient(points=[])
     client.collections.add(COLLECTION)
-    missing_sparse = type(
-        "C",
-        (),
-        {
-            "vectors": {"dense": type("V", (), {"size": 1024})},
-            "sparse_vectors": {},
-        },
+    missing_sparse = FakeQdrantClient._shape_info(
+        {"dense": type("V", (), {"size": 1024})}, sparse={}
     )
     client._collections_info[COLLECTION] = missing_sparse
     store = QdrantVectorStore(client=client, collection_name=COLLECTION)
@@ -242,12 +238,19 @@ def test_upsert_point_payload_excludes_document_body():
 
 
 def test_upsert_point_id_is_deterministic_per_org_version_chunk():
+    from uuid import NAMESPACE_URL, uuid5
+
     client = FakeQdrantClient(points=[])
     store = QdrantVectorStore(client=client, collection_name=COLLECTION)
 
-    def point(chunk_id: str) -> VectorPoint:
+    def chunk_id(chunk: str) -> str:
+        # Mirror the Task 4 deterministic uuid5 chunk-id scheme.
+        return str(uuid5(NAMESPACE_URL, chunk))
+
+    def point(chunk: str) -> VectorPoint:
+        cid = chunk_id(chunk)
         return VectorPoint(
-            chunk_id=chunk_id,
+            chunk_id=cid,
             organization_id="org-a",
             document_id="doc-1",
             version_id="version-1",
@@ -262,12 +265,14 @@ def test_upsert_point_id_is_deterministic_per_org_version_chunk():
 
     first_id = client.upsert_calls[0]["points"][0].id
     second_id = client.upsert_calls[1]["points"][0].id
-    assert first_id == "org-a:version-1:chunk-1"
+    # The point id IS the deterministic uuid5 chunk_id (a real-Qdrant-valid
+    # UUID), not a composite string.
+    assert first_id == chunk_id("chunk-1")
     assert second_id == first_id
 
     # A different chunk maps to a distinct id.
     store.upsert(points=[point("chunk-2")])
-    assert client.upsert_calls[2]["points"][0].id == "org-a:version-1:chunk-2"
+    assert client.upsert_calls[2]["points"][0].id == chunk_id("chunk-2")
     assert client.upsert_calls[2]["points"][0].id != first_id
 
 
