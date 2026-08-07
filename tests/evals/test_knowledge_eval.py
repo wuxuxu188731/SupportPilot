@@ -35,6 +35,7 @@ from scripts.run_knowledge_baseline_eval import (
     load_eval_cases,
     percentile_nearest_rank,
     recall_at_5,
+    relevant_returned_count,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -396,6 +397,8 @@ def _metrics(
     citations_returned=1,
     expected_count=1,
     hit_count=1,
+    relevant_returned=None,
+    precision_override=None,
     should_have_answer=True,
     latency_ms=10,
     cost=0.1,
@@ -405,9 +408,17 @@ def _metrics(
         if expected_count
         else None
     )
-    precision = 1.0 if (citations_returned == 0 and not should_have_answer) else (
-        0.0 if citations_returned == 0 else hit_count / citations_returned
-    )
+    if precision_override is not None:
+        precision = precision_override
+    else:
+        precision = 1.0 if (citations_returned == 0 and not should_have_answer) else (
+            0.0 if citations_returned == 0 else hit_count / citations_returned
+        )
+    # Default relevant_returned to the exact integer that yields `precision`.
+    if relevant_returned is None:
+        relevant_returned = (
+            0 if citations_returned == 0 else round(precision * citations_returned)
+        )
     return CaseMetrics(
         category=category,
         tenant_key=tenant_key,
@@ -416,6 +427,7 @@ def _metrics(
         hit_count=hit_count,
         recall_at_5=recall,
         citation_precision=precision,
+        relevant_returned=relevant_returned,
         cross_tenant_leak=False,
         latency_ms=latency_ms,
         rounds=1,
@@ -465,3 +477,67 @@ def test_compile_report_aggregates():
     assert report["code_revision"] == "abc123"
     assert report["dataset_hash"] == "deadbeef"
     assert report["top_k"] > 0
+
+
+def test_compile_report_uses_exact_integer_aggregate_not_rounded_reconstruction():
+    # I1 regression: the aggregate citation_precision must be the sum of the
+    # EXACT per-case relevant_returned integers, never reconstructed from the
+    # pre-rounded citation_precision float (which can round-trip to an off-by-one).
+    #
+    # Each case is built so the OLD lossy reconstruction
+    # ``round(citation_precision * citations_returned)`` disagrees with the exact
+    # integer the runner actually stores:
+    #   * case a: precision=0.5, citations_returned=7 -> old round(0.5*7) = round(3.5)
+    #     = 4 (banker's rounding), but the exact relevant integer is 3.
+    #   * case b: precision=0.0 (empty/irrelevant), citations_returned=0, exact 0.
+    # Asserts the report uses the explicit integers (3 + 0 relevant over
+    # 7 + 0 returned), NOT the float reconstruction (which would over-count by 1).
+    cases = [
+        _case(case_id="a", category="simple_policy"),
+        _case(case_id="b", category="simple_policy"),
+    ]
+    per_case = [
+        _metrics(
+            citations_returned=7,
+            expected_count=3,
+            hit_count=3,
+            # exact integer relevant count (the ground truth the runner stores)
+            relevant_returned=3,
+            precision_override=0.5,
+        ),
+        _metrics(
+            citations_returned=0,
+            expected_count=0,
+            hit_count=0,
+            relevant_returned=0,
+            precision_override=0.0,
+        ),
+    ]
+    report = compile_report(
+        cases=cases,
+        per_case=per_case,
+        code_revision="abc123",
+        dataset_hash="deadbeef",
+        collection_name="col",
+        embedding_model="text-embedding-v4",
+        embedding_dimensions=1024,
+    )
+    # exact integers: (3 + 0) relevant over (7 + 0) returned.
+    assert report["aggregates"]["citation_precision"] == pytest.approx(3 / 7)
+    # Sanity: the old reconstruction would have produced round(3.5)=4 -> 4/7,
+    # so this regression guard genuinely catches the would-be off-by-one.
+    assert round(0.5 * 7) != 3
+
+
+def test_relevant_returned_count_matches_precision_semantics():
+    # The runner's explicit relevant_returned integer must equal what the
+    # precision primitive counts, so the aggregate can be derived from exact
+    # integers rather than a rounded float.
+    case = _case(expected_relevant=(("returns", "退货时限"),))
+    pairs = [
+        ("returns", "云舟商城退货政策（A 版）/退货时限"),  # relevant
+        ("warranty", "云舟商城保修政策（A 版）/保修期限"),  # not relevant
+        ("warranty", "云舟商城保修政策（A 版）/所需凭证"),  # not relevant
+    ]
+    assert relevant_returned_count(case, pairs) == 1
+    assert citation_precision(case, pairs, len(pairs)) == pytest.approx(1 / 3)

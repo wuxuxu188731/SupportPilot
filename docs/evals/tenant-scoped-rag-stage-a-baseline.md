@@ -8,7 +8,7 @@
 
 | 项目 | 值 |
 |---|---|
-| Git revision (`code_revision`) | `72cef7406b83da7f570a889518d8a4ebf24317ee` |
+| Git revision (`code_revision`) | `716abdbd6f7bebdc34322673b1fa032a854c36f2` |
 | 数据集 SHA-256 (`dataset_hash`) | `dc21a00f6503da8f01c69902765ef7f505c44abd2279bcbd7e442240bba6c412` |
 | Loader 版本 | `supportpilot-loader-v1` |
 | Chunker 版本 | `supportpilot-chunker-v1` |
@@ -33,12 +33,14 @@
 | `cross_tenant_leak_rate` | 0.000 | 必须 = 0 | 是 |
 | `average_search_rounds` | 1.00 | — | — |
 | `average_model_calls` | 0.00 | — | — |
-| `average_tokens` | 553.6 | — | — |
-| `p50_latency_ms` | 240 | — | — |
-| `p95_latency_ms` | 277 | — | — |
-| `estimated_embedding_cost_cny` | 0.0044285 | — | — |
+| `average_tokens` | 549.7 | — | — |
+| `p50_latency_ms` | 233 | — | — |
+| `p95_latency_ms` | 304 | — | — |
+| `estimated_embedding_cost_cny` | 0.0043975 | — | — |
 
 16 / 16 个样例全部完成；无任何样例被强转为“无命中”。本次运行通信下发的全部调用（16 条 query 嵌入 + 文档嵌入）均成功，无 embedding/Qdrant 基础设施失败——`model_calls = 0`、`average_search_rounds = 1.00`，与 Baseline 固定单轮、无模型判定的设计一致。
+
+> **成本口径（M5）**：`estimated_embedding_cost_cny` 只覆盖**检索嵌入**成本（每条 query 嵌入 + 选中的 citation chunk 嵌入，即 `input_tokens` 部分），**不包含**文档入库（ingestion）时的嵌入成本。JSON 中以 `"cost_scope": "retrieval_query_and_citations_only"` 显式标注此口径。
 
 ## 3. 分类指标表
 

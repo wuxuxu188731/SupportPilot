@@ -79,6 +79,11 @@ from app.users.sqlite_store import SQLiteUserStore
 # Fixed price snapshot. Cost is recomputed from this constant at runtime and
 # never fetched from the web, so results are reproducible offline. The snapshot
 # date identifies which price card the number comes from.
+#
+# Cost scope (see M5): `estimated_embedding_cost_cny` covers ONLY the retrieval
+# query + selected-chunk embeddings (input_tokens), NOT the document-ingestion
+# embedding cost. The report stamps this scope explicitly as:
+#   "cost_scope": "retrieval_query_and_citations_only"
 # --------------------------------------------------------------------------- #
 EMBEDDING_PRICE_CNY_PER_1K_TOKENS = 0.0005
 PRICE_SNAPSHOT_DATE = "2026-08-08"
@@ -155,6 +160,7 @@ class CaseMetrics:
     hit_count: int = 0
     recall_at_5: float | None = None
     citation_precision: float = 0.0
+    relevant_returned: int = 0
     cross_tenant_leak: bool = False
     latency_ms: int = 0
     rounds: int = 0
@@ -234,6 +240,20 @@ def recall_at_5(
     return _hit_count(returned_pairs, expected) / len(expected)
 
 
+def relevant_returned_count(case: EvalCase, returned_pairs) -> int:
+    """Exact integer count of returned pairs that match an expected pair.
+
+    Kept as its own integer (not reconstructed from the pre-rounded
+    ``citation_precision`` float) so the aggregate citation_precision is computed
+    from exact integers and never suffers a float round-trip off-by-one
+    (see I1). ``citation_precision()`` delegates here too, so the rules live
+    in exactly one place."""
+    expected = _expected_pairs(case)
+    return sum(
+        1 for p in returned_pairs if any(_matches_expected(p, e) for e in expected)
+    )
+
+
 def citation_precision(case: EvalCase, returned_pairs, returned_count: int) -> float:
     """relevant_returned / returned_count, with the brief's empty-citation rules:
     empty citations + should_have_answer=False -> 1.0; empty + positive -> 0.0.
@@ -242,10 +262,7 @@ def citation_precision(case: EvalCase, returned_pairs, returned_count: int) -> f
     the same path-segment rule as recall (:func:`_matches_expected`)."""
     if returned_count == 0:
         return 1.0 if not case.should_have_answer else 0.0
-    expected = _expected_pairs(case)
-    relevant_returned = sum(
-        1 for p in returned_pairs if any(_matches_expected(p, e) for e in expected)
-    )
+    relevant_returned = relevant_returned_count(case, returned_pairs)
     return relevant_returned / returned_count
 
 
@@ -279,6 +296,7 @@ def evaluate_case(case: EvalCase, result: dict) -> CaseMetrics:
     tenant_keys = result.get("tenant_keys", [case.tenant_key])
     expected = _expected_pairs(case)
     hit_count = _hit_count(pairs, expected)
+    exact_relevant = relevant_returned_count(case, pairs)
     return CaseMetrics(
         category=case.category,
         tenant_key=case.tenant_key,
@@ -287,6 +305,7 @@ def evaluate_case(case: EvalCase, result: dict) -> CaseMetrics:
         hit_count=hit_count,
         recall_at_5=recall_at_5(case, pairs),
         citation_precision=citation_precision(case, pairs, returned_count),
+        relevant_returned=exact_relevant,
         cross_tenant_leak=cross_tenant_leak(case, tenant_keys),
         latency_ms=int(result.get("latency_ms", 0)),
         rounds=int(result.get("rounds", 1)),
@@ -346,9 +365,11 @@ def compile_report(
     total_expected = sum(m.expected_count for m in per_case)
     total_hit = sum(m.hit_count for m in per_case)
     total_returned = sum(m.citations_returned for m in per_case)
-    total_relevant_returned = sum(
-        round(m.citation_precision * m.citations_returned) for m in per_case
-    )
+    # Aggregate citation precision is the exact sum of per-case relevant counts
+    # over returned counts -- NOT reconstructed from the pre-rounded
+    # citation_precision float (that would risk a float round-trip off-by-one,
+    # see I1). relevant_returned is accumulated as an integer per case.
+    total_relevant_returned = sum(m.relevant_returned for m in per_case)
     leak_cases = sum(1 for m in per_case if m.cross_tenant_leak)
 
     # retrieval_recall_at_5: weighted by expected_count (so multi-condition cases
@@ -387,6 +408,9 @@ def compile_report(
             "p95_latency_ms": percentile_nearest_rank(latencies, 0.95),
             "estimated_embedding_cost_cny": sum(
                 m.cost_cny for m in per_case
+            ),
+            "cost_scope": (
+                "retrieval_query_and_citations_only"
             ),
         },
     }
@@ -461,6 +485,7 @@ def build_services(
 
         embedding = DashScopeEmbeddingClient(
             api_key=settings.dashscope_api_key,
+            base_url=settings.dashscope_base_url,
         )
 
     if qdrant_client is None:
@@ -713,6 +738,7 @@ def run_baseline_eval(
             "hit_count": m.hit_count,
             "recall_at_5": m.recall_at_5,
             "citation_precision": m.citation_precision,
+            "relevant_returned": m.relevant_returned,
             "cross_tenant_leak": m.cross_tenant_leak,
             "latency_ms": m.latency_ms,
             "rounds": m.rounds,

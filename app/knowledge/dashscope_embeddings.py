@@ -53,10 +53,20 @@ class DashScopeEmbeddingClient:
         self,
         *,
         api_key: str,
+        base_url: str | None = None,
         call: _Call | None = None,
         sleep: Callable[[float], object] | None = None,
     ) -> None:
         self._api_key = api_key
+        if base_url:
+            # The dashscope SDK reads `dashscope.base_http_api_url` as a
+            # PROCESS-GLOBAL module attribute at request-build time (e.g.
+            # api_request_factory and base_api url builders). Setting it here
+            # once configures every subsequent HTTP call made through this
+            # SDK in the process. Because it is global, a single process that
+            # mixes clients must not point different clients at different
+            # DashScope-compatible endpoints.
+            dashscope.base_http_api_url = base_url
         self._call: _Call = call or dashscope.TextEmbedding.call
         self._sleep: Callable[[float], object] = (
             sleep if sleep is not None else time.sleep

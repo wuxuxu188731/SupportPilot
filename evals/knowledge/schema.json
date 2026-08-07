@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "supportpilot://eval/knowledge case/2026-08-08",
+  "$id": "supportpilot://eval/knowledge-case/2026-08-08",
   "title": "Knowledge RAG eval case",
   "description": "One line of evals/knowledge/cases.jsonl. A case fixes a tenant-scoped retrieval question, the policy document+heading it should ground on (expected_relevant), whether an answer is warranted, and which tenants must never leak in.",
   "type": "object",

@@ -12,6 +12,8 @@ import requests
 from requests.exceptions import ConnectionError as RequestsConnectionError
 from requests.exceptions import ConnectTimeout
 
+import dashscope
+
 from app.knowledge.base import EmbeddingUnavailableError
 from app.knowledge.dashscope_embeddings import (
     MODEL_NAME,
@@ -338,3 +340,31 @@ def test_non_temporary_four_xx_does_not_retry(status_code):
         client.embed_documents(["a"])
 
     assert len(call.kwargs) == 1  # no retry
+
+
+# --- I3: base_url wiring ------------------------------------------------
+
+
+def test_base_url_sets_sdk_global(monkeypatch):
+    # I3: an explicit base_url must configure the dashscope SDK's module-level
+    # base_http_api_url (read at request-build time), so a DASHSCOPE_BASE_URL
+    # override no longer silently has no effect.
+    monkeypatch.setattr(dashscope, "base_http_api_url", None)
+    DashScopeEmbeddingClient(
+        api_key="test-key",
+        base_url="https://proxy.example.com/api/v1",
+        call=RecordingCall(successful_response),
+        sleep=lambda _: None,
+    )
+    assert dashscope.base_http_api_url == "https://proxy.example.com/api/v1"
+
+
+def test_no_base_url_leaves_sdk_global_untouched(monkeypatch):
+    # Without an explicit base_url the client must NOT clobber the SDK default.
+    monkeypatch.setattr(dashscope, "base_http_api_url", "https://default.example.com")
+    DashScopeEmbeddingClient(
+        api_key="test-key",
+        call=RecordingCall(successful_response),
+        sleep=lambda _: None,
+    )
+    assert dashscope.base_http_api_url == "https://default.example.com"

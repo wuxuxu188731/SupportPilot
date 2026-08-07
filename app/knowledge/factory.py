@@ -65,6 +65,10 @@ def create_knowledge_services(
 
     embedding = DashScopeEmbeddingClient(
         api_key=settings.dashscope_api_key,
+        # Wire the configured DASHSCOPE_BASE_URL through to the SDK's
+        # process-global base_http_api_url so an override actually takes effect
+        # (see I3); a default value leaves the SDK's own default untouched.
+        base_url=settings.dashscope_base_url,
     )
 
     if qdrant_client is None:

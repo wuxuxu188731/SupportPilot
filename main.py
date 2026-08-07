@@ -71,6 +71,10 @@ get_current_tenant = create_current_tenant_dependency(
     get_current_user=get_current_user,
 )
 
+# NOTE (I4 / Stage A): `knowledge_services.baseline` (the Baseline retriever) is
+# deliberately NOT exposed over HTTP in Stage A. Only ingestion + store are wired
+# into create_knowledge_router below. Stage B registers the baseline retriever as
+# an agent tool.
 knowledge_services = create_knowledge_services(
     database_path=database_path,
     settings=get_knowledge_settings(),
