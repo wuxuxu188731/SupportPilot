@@ -14,6 +14,7 @@ from app.knowledge import (
     DocumentSourceType,
     DocumentStatus,
     DuplicateDocumentVersionError,
+    IngestionStatus,
 )
 from app.knowledge.sqlite_store import SQLiteKnowledgeStore
 from app.organizations.sqlite_store import SQLiteOrganizationStore
@@ -219,6 +220,36 @@ class TestVersionActivation:
 
         assert [chunk.chunk_id for chunk in chunks] == [new_chunk_id]
 
+    def test_activate_rejects_job_of_other_version(self, store_with_two_versions):
+        # The job passed to activate_version must belong to the version being
+        # activated. Passing the OTHER version's job must not silently mark
+        # that version's job succeeded and must raise DocumentNotFoundError.
+        store, context, document, old_version, new_version = (
+            store_with_two_versions
+        )
+        with pytest.raises(DocumentNotFoundError):
+            store.activate_version(
+                organization_id=context.organization_id,
+                document_id=document.document_id,
+                version_id=new_version.version_id,
+                # wrong job: it belongs to old_version
+                job_id=job_for(old_version).job_id,
+            )
+        # The document must NOT have been flipped to new_version.
+        doc = store.get_document(
+            organization_id=context.organization_id,
+            document_id=document.document_id,
+        )
+        assert doc.status is not DocumentStatus.ACTIVE
+
+        # And the old version's job must still be queued, not succeeded.
+        old_job = store.get_latest_job_for_version(
+            organization_id=context.organization_id,
+            document_id=document.document_id,
+            version_id=old_version.version_id,
+        )
+        assert old_job.status is IngestionStatus.QUEUED
+
     def test_disabled_document_is_not_returned(self, store_with_two_versions):
         store, context, document, _old, new_version = store_with_two_versions
         store.activate_version(
@@ -294,3 +325,52 @@ class TestVersionActivation:
             organization_id=context.organization_id,
             candidate_ids=[],
         ) == []
+
+    def test_list_active_chunks_preserves_order_across_two_active_versions(
+        self, store_with_document
+    ):
+        # Two documents, each with its own active version/chunk, so TWO chunks
+        # are simultaneously active. Exercises the candidate-order-preservation
+        # path (previously only ever one active chunk was asserted).
+        store, context, document_a = store_with_document
+        version_a = create_version(
+            store,
+            context,
+            document_a,
+            content_hash="sha256:a",
+            chunk_id="chunk-a",
+        )
+        document_b = store.create_document(
+            organization_id=context.organization_id,
+            uploaded_by_user_id=context.user_id,
+            title="第二文档",
+            source_type=DocumentSourceType.MARKDOWN,
+        )
+        version_b = create_version(
+            store,
+            context,
+            document_b,
+            content_hash="sha256:b",
+            chunk_id="chunk-b",
+        )
+        store.activate_version(
+            organization_id=context.organization_id,
+            document_id=document_a.document_id,
+            version_id=version_a.version_id,
+            job_id=job_for(version_a).job_id,
+        )
+        store.activate_version(
+            organization_id=context.organization_id,
+            document_id=document_b.document_id,
+            version_id=version_b.version_id,
+            job_id=job_for(version_b).job_id,
+        )
+
+        chunks = store.list_active_chunks(
+            organization_id=context.organization_id,
+            candidate_ids=["chunk-b", "chunk-a"],
+        )
+
+        # Both chunks are active; the returned order must follow candidate_ids
+        # (chunk-b first), not insertion/autoincrement order.
+        assert [chunk.chunk_id for chunk in chunks] == ["chunk-b", "chunk-a"]

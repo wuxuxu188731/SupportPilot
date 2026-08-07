@@ -731,17 +731,23 @@ class SQLiteKnowledgeStore(KnowledgeStore):
                         document_id,
                     ),
                 )
-                connection.execute(
+                job_cursor = connection.execute(
                     """
                     UPDATE ingestion_jobs
                     SET status = 'succeeded',
                         finished_at = ?,
                         error_code = NULL,
                         error_message = NULL
-                    WHERE organization_id = ? AND id = ?
+                    WHERE organization_id = ?
+                      AND id = ?
+                      AND version_id = ?
                     """,
-                    (finished_at, organization_id, job_id),
+                    (finished_at, organization_id, job_id, version_id),
                 )
+                if job_cursor.rowcount == 0:
+                    # The job does not belong to the version being activated;
+                    # do not silently mark another version's job succeeded.
+                    raise DocumentNotFoundError(organization_id, document_id)
         except sqlite3.IntegrityError as exc:
             raise DocumentNotFoundError(organization_id, document_id) from exc
         return self.get_document(
