@@ -328,6 +328,62 @@ class TestVersionActivation:
             candidate_ids=[],
         ) == []
 
+    def test_resolve_active_citations_joins_title_and_filters_old_version(
+        self, store_with_two_versions
+    ):
+        """Task 10: resolve_active_citations joins each chunk with its document
+        title after re-validating status='active' AND active_version_id ==
+        chunk.version_id. Only the ACTIVE new-version chunk is accepted; the
+        stale old-version chunk and a cross-org lookup yield nothing."""
+        store, context, document, _old, new_version = store_with_two_versions
+        store.activate_version(
+            organization_id=context.organization_id,
+            document_id=document.document_id,
+            version_id=new_version.version_id,
+            job_id=job_for(new_version).job_id,
+        )
+
+        chunks = store.resolve_active_citations(
+            organization_id=context.organization_id,
+            candidate_ids=[old_chunk_id, new_chunk_id],
+        )
+        assert [c.chunk_id for c in chunks] == [new_chunk_id]
+        assert chunks[0].document_title == "退货政策"
+        assert chunks[0].content == "some policy body"
+        assert chunks[0].version_id == new_version.version_id
+        # Citation content comes ONLY from SQLite; document title populated.
+        assert chunks[0].document_id == document.document_id
+        # A cross-org org id can never match the four-level ids.
+        assert store.resolve_active_citations(
+            organization_id="nonexistent-org",
+            candidate_ids=[new_chunk_id],
+        ) == []
+        # Empty candidate list is a no-op.
+        assert store.resolve_active_citations(
+            organization_id=context.organization_id,
+            candidate_ids=[],
+        ) == []
+
+    def test_resolve_active_citations_excludes_disabled_document(
+        self, store_with_two_versions
+    ):
+        store, context, document, _old, new_version = store_with_two_versions
+        store.activate_version(
+            organization_id=context.organization_id,
+            document_id=document.document_id,
+            version_id=new_version.version_id,
+            job_id=job_for(new_version).job_id,
+        )
+        store.set_document_status(
+            organization_id=context.organization_id,
+            document_id=document.document_id,
+            status=DocumentStatus.DISABLED,
+        )
+        assert store.resolve_active_citations(
+            organization_id=context.organization_id,
+            candidate_ids=[new_chunk_id],
+        ) == []
+
     def test_list_active_chunks_preserves_order_across_two_active_versions(
         self, store_with_document
     ):

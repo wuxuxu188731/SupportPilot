@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from app.db.migrations import upgrade_database
 from app.knowledge.base import (
+    ChunkWithDocumentTitle,
     DocumentChunk,
     DocumentNotFoundError,
     DocumentSourceType,
@@ -99,6 +100,20 @@ class SQLiteKnowledgeStore(KnowledgeStore):
             start_offset=row["start_offset"],
             end_offset=row["end_offset"],
             created_at=row["created_at"],
+        )
+
+    @staticmethod
+    def _to_chunk_with_title(row: sqlite3.Row) -> ChunkWithDocumentTitle:
+        return ChunkWithDocumentTitle(
+            chunk_id=row["id"],
+            organization_id=row["organization_id"],
+            document_id=row["document_id"],
+            version_id=row["version_id"],
+            ordinal=row["ordinal"],
+            heading_path=row["heading_path"],
+            content=row["content"],
+            token_count=row["token_count"],
+            document_title=row["title"],
         )
 
     @staticmethod
@@ -633,6 +648,40 @@ class SQLiteKnowledgeStore(KnowledgeStore):
             ).fetchall()
         chunk_by_id = {row["id"]: self._to_chunk(row) for row in rows}
         return [chunk_by_id[cid] for cid in candidate_ids if cid in chunk_by_id]
+
+    def resolve_active_citations(
+        self,
+        *,
+        organization_id: str,
+        candidate_ids: Sequence[str],
+    ) -> list[ChunkWithDocumentTitle]:
+        """Second-pass citation validation joining chunks to their active doc.
+
+        A candidate is accepted only when all four ids line up for the caller's
+        organization AND the document is currently ``status='active'`` with
+        ``active_version_id`` equal to the chunk's ``version_id``. Citation
+        content (and the document ``title``) come only from SQLite here, never
+        from a vector-store payload.
+        """
+        if not candidate_ids:
+            return []
+        placeholders = ", ".join("?" for _ in candidate_ids)
+        with self._connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT c.*, d.title
+                FROM document_chunks AS c
+                JOIN documents AS d
+                  ON d.organization_id = c.organization_id
+                 AND d.id = c.document_id
+                 AND d.status = 'active'
+                 AND d.active_version_id = c.version_id
+                WHERE c.organization_id = ?
+                  AND c.id IN ({placeholders})
+                """,
+                (organization_id, *candidate_ids),
+            ).fetchall()
+        return [self._to_chunk_with_title(row) for row in rows]
 
     # ----------------------------------------------------- retrieval events
     def record_retrieval_event(

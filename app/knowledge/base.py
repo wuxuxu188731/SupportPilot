@@ -66,6 +66,27 @@ class DocumentChunk:
 
 
 @dataclass(frozen=True)
+class ChunkWithDocumentTitle:
+    """A chunk joined with its active document's title.
+
+    Produced by ``KnowledgeStore.resolve_active_citations`` so retrieval can
+    build structured citations whose ``title`` comes from SQLite (never from
+    the vector-store payload) after the four-level id and document status/version
+    have been re-validated.
+    """
+
+    chunk_id: str
+    organization_id: str
+    document_id: str
+    version_id: str
+    ordinal: int
+    heading_path: str | None
+    content: str
+    token_count: int
+    document_title: str
+
+
+@dataclass(frozen=True)
 class IngestionJob:
     job_id: str
     organization_id: str
@@ -292,4 +313,20 @@ class KnowledgeStore(Protocol):
         organization_id: str,
         candidate_ids: Sequence[str],
     ) -> list[DocumentChunk]:
+        raise NotImplementedError
+
+    def resolve_active_citations(
+        self,
+        *,
+        organization_id: str,
+        candidate_ids: Sequence[str],
+    ) -> list[ChunkWithDocumentTitle]:
+        """Second-pass validation of retrieval candidates against SQLite.
+
+        Only candidates whose four-level ids (organization + document + version
+        + chunk) match AND whose document is ``status='active'`` with
+        ``active_version_id == chunk.version_id`` are returned, each joined
+        with the document's title. Citation content comes only from here, never
+        from a vector-store payload.
+        """
         raise NotImplementedError
