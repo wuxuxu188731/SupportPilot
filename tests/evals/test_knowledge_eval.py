@@ -28,6 +28,7 @@ from scripts.run_knowledge_baseline_eval import (
     ExpectedRelevant,
     _hit_count,
     _matches_expected,
+    case_report_dict,
     compile_report,
     cross_tenant_leak,
     evaluate_case,
@@ -578,3 +579,61 @@ def test_relevant_returned_count_matches_precision_semantics():
     ]
     assert relevant_returned_count(case, pairs) == 1
     assert retrieval_precision_at_5(case, pairs, len(pairs)) == pytest.approx(1 / 3)
+
+
+def test_case_report_emits_content_free_citations_and_retrieval_trace():
+    case = _case(
+        case_id="diagnostic-case",
+        expected_behavior="answer_grounded",
+    )
+    metrics = evaluate_case(
+        case,
+        {
+            "pairs": [("returns", "云舟商城退货政策（A 版）/退货时限")],
+            "citations_returned": 1,
+            "returned_citations": [
+                {
+                    "document_key": "returns",
+                    "heading_path": "云舟商城退货政策（A 版）/退货时限",
+                    "chunk_id": "chunk-a",
+                    "citation_rank": 1,
+                }
+            ],
+            "retrieval_trace": {
+                "schema_version": 2,
+                "candidates": [
+                    {
+                        "chunk_id": "chunk-a",
+                        "fused_rank": 1,
+                        "fused_score": 0.9,
+                        "resolution_status": "selected",
+                        "selection_reason": "selected",
+                    }
+                ],
+            },
+        },
+    )
+
+    payload = case_report_dict(case, metrics)
+
+    assert payload["expected_behavior"] == "answer_grounded"
+    assert payload["returned_citations"] == [
+        {
+            "document_key": "returns",
+            "heading_path": "云舟商城退货政策（A 版）/退货时限",
+            "chunk_id": "chunk-a",
+            "citation_rank": 1,
+        }
+    ]
+    assert payload["retrieval_trace"]["candidates"][0]["fused_rank"] == 1
+
+    def all_keys(value):
+        if isinstance(value, dict):
+            return set(value) | set().union(
+                *(all_keys(item) for item in value.values())
+            )
+        if isinstance(value, list):
+            return set().union(*(all_keys(item) for item in value), set())
+        return set()
+
+    assert "content" not in all_keys(payload)

@@ -171,6 +171,8 @@ class CaseMetrics:
     cost_cny: float = 0.0
     should_have_answer: bool = False
     got_citations: bool = False
+    returned_citations: tuple[dict, ...] = ()
+    retrieval_trace: dict | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -323,7 +325,37 @@ def evaluate_case(case: EvalCase, result: dict) -> CaseMetrics:
         cost_cny=float(result.get("cost_cny", 0.0)),
         should_have_answer=should_have_answer,
         got_citations=returned_count > 0,
+        returned_citations=tuple(result.get("returned_citations", ())),
+        retrieval_trace=result.get("retrieval_trace"),
     )
+
+
+def case_report_dict(case: EvalCase, metrics: CaseMetrics) -> dict:
+    """Serialize one case's metrics and content-free retrieval diagnostics."""
+    return {
+        "case_id": case.case_id,
+        "category": metrics.category,
+        "tenant_key": metrics.tenant_key,
+        "expected_behavior": case.expected_behavior,
+        "should_have_answer": metrics.should_have_answer,
+        "citations_returned": metrics.citations_returned,
+        "expected_count": metrics.expected_count,
+        "hit_count": metrics.hit_count,
+        "recall_at_5": metrics.recall_at_5,
+        "retrieval_precision_at_5": metrics.retrieval_precision_at_5,
+        "relevant_returned": metrics.relevant_returned,
+        "cross_tenant_leak": metrics.cross_tenant_leak,
+        "latency_ms": metrics.latency_ms,
+        "rounds": metrics.rounds,
+        "model_calls": metrics.model_calls,
+        "input_tokens": metrics.input_tokens,
+        "cost_cny": metrics.cost_cny,
+        "returned_citations": list(metrics.returned_citations),
+        "retrieval_trace": metrics.retrieval_trace or {
+            "schema_version": 2,
+            "candidates": [],
+        },
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -655,8 +687,9 @@ def run_case(
 
     # Map each returned citation back to (document_key, heading_path).
     returned_pairs: list[tuple[str, str]] = []
+    returned_citations: list[dict] = []
     returned_tenant_keys: set[str] = {case.tenant_key}
-    for citation in result.citations:
+    for citation_rank, citation in enumerate(result.citations, start=1):
         document_key = doc_key_by_id.get(citation.document_id)
         # A citation whose document_id is unknown to THIS org means its points
         # leaked from another tenant (or was ingested by a different run's doc
@@ -667,6 +700,14 @@ def run_case(
             )
             continue
         returned_pairs.append((document_key, citation.heading_path or ""))
+        returned_citations.append(
+            {
+                "document_key": document_key,
+                "heading_path": citation.heading_path or "",
+                "chunk_id": citation.chunk_id,
+                "citation_rank": citation_rank,
+            }
+        )
 
     returned_count = len(result.citations)
     input_tokens = count_tokens(case.question) + sum(
@@ -684,6 +725,8 @@ def run_case(
         "rounds": result.retrieval_summary.round_count,
         "input_tokens": input_tokens,
         "cost_cny": cost_cny,
+        "returned_citations": returned_citations,
+        "retrieval_trace": result.retrieval_trace.to_dict(),
     })
 
 
@@ -741,25 +784,8 @@ def run_baseline_eval(
         embedding_dimensions=settings.embedding_dimensions,
     )
     report["cases"] = [
-        {
-            "case_id": c.case_id,
-            "category": m.category,
-            "tenant_key": m.tenant_key,
-            "should_have_answer": m.should_have_answer,
-            "citations_returned": m.citations_returned,
-            "expected_count": m.expected_count,
-            "hit_count": m.hit_count,
-            "recall_at_5": m.recall_at_5,
-            "retrieval_precision_at_5": m.retrieval_precision_at_5,
-            "relevant_returned": m.relevant_returned,
-            "cross_tenant_leak": m.cross_tenant_leak,
-            "latency_ms": m.latency_ms,
-            "rounds": m.rounds,
-            "model_calls": m.model_calls,
-            "input_tokens": m.input_tokens,
-            "cost_cny": m.cost_cny,
-        }
-        for c, m in zip(cases, per_case)
+        case_report_dict(case, metrics)
+        for case, metrics in zip(cases, per_case)
     ]
     return report
 
