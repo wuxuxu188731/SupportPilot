@@ -27,8 +27,23 @@ pip install -r requirements.txt
 | `DASHSCOPE_API_KEY` | 是 | DashScope API Key，用于文本嵌入 | — |
 | `DASHSCOPE_BASE_URL` | 否 | DashScope 服务地址 | `https://dashscope.aliyuncs.com/api/v1` |
 | `QDRANT_URL` | 否 | Qdrant HTTP 地址 | `http://localhost:6333` |
+| `KNOWLEDGE_MIN_FUSED_SCORE` | 否 | Stage B 确定性最低融合分阈值 | `0.0` |
+| `KNOWLEDGE_SEARCH_TIMEOUT_SECONDS` | 否 | 单次知识工具总预算（秒） | `15` |
 
 Windows 下 `os.getenv(...)` 对环境变量大小写不敏感。缺失 `DASHSCOPE_API_KEY` 时配置初始化会直接抛错（防止把“无法嵌入”误当作“无命中”）。
+
+## Stage B 自适应检索与错误语义
+
+`search_knowledge` 只接受 `question`。服务端固定最多两轮：首轮最多 3 条查询，只有 MULTI 且证据不足时才允许最多 2 条新补充查询；结构化模型调用总数最多 3，最终证据最多 6 段且不超过 3,000 tokens。15 秒总预算逐次向 Planner、Embedding、Qdrant 和 Assessor 下传，模型不能修改这些限制。
+
+- `SEARCH_NOT_NEEDED`：`ok=true`，`data.result_code="SEARCH_NOT_NEEDED"`，`data.evidence_status="not_needed"`，表示纯业务事实问题不需要知识检索。
+- `INSUFFICIENT_EVIDENCE`：检索正常完成但依据不足，必须拒绝肯定陈述并建议人工核实。
+- `SEARCH_BUDGET_EXCEEDED`：总时间、轮数、查询数或模型调用预算耗尽。
+- `EMBEDDING_UNAVAILABLE`：Embedding provider 或响应契约失败。
+- `VECTOR_STORE_UNAVAILABLE`：Qdrant 连接、超时或请求失败；不得当作无命中。
+- `SEARCH_INTERNAL_ERROR`：Planner/Assessor 的模型调用或结构化 provider 响应失败。
+
+Retrieval event 只保存查询 SHA-256、片段 ID、分数、轮次和稳定错误阶段，不保存原始问题、prompt、模型原始输出或知识正文。聊天引用只从服务器返回的 C1..Cn 映射；未知编号和充分证据完全漏引会产生 `citation.invalid` 并设置 `answer_incomplete=true`。
 
 ## 3. 启动 Qdrant
 
