@@ -18,6 +18,9 @@ SupportPilot 是一个面向电商售后客服团队的多租户工单处理 Age
 - 已完成企业范围的 Markdown/TXT 知识入库、版本管理和停用/启用。
 - 已完成 DashScope dense+sparse + Qdrant RRF 的传统 RAG Baseline。
 - 当前尚未把知识检索注册到客服 Agent；自适应规划、证据检查和聊天引用属于下一阶段。
+- 阶段 A 已修正 ordinal 邻接误删互补章节的问题，并将 raw Top-K precision 与阶段 B
+  最终 citation precision 分开。历史候选的无网络回放为 20/20 黄金章节命中；真实
+  DashScope/Qdrant 重跑命令见 `docs/evals/tenant-scoped-rag-stage-a-baseline.md`。
 
 当前不包含：
 

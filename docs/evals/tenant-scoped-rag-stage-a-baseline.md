@@ -1,5 +1,39 @@
 # 阶段 A 知识库 RAG Baseline 指标报告（Task 14）
 
+> **2026-08-12 纠正说明**：本文主体保存 2026-08-08 的历史真实运行数据，
+> 但第 5、7、8 节关于 recall 失败原因和 `citation_precision` 阈值的解释已被
+> 后续候选回放推翻。请先阅读下方“后续纠正”，不要再将 `0.579` 归因为 embedding、
+> RRF 或固定 Top-K 没有召回黄金章节。
+
+## 后续纠正（2026-08-12，本地确定性回放）
+
+- 历史 SQLite event 表明，原 19 个黄金章节全部已经进入各 query 的融合 Top-5。
+- `app/knowledge/retrieval.py` 将同文档、同版本且 ordinal 相差 1 的 chunk 当作重复项，
+  错误删除了不同 Markdown heading 下的互补政策证据。
+- 去除 ordinal 邻接裁剪后，历史融合候选对当前黄金集的确定性回放为 **20/20**：
+  原 19 个黄金章节全部命中，另加重新标注为 `answer_grounded` 的 Prompt Injection
+  样例 `returns / 退货时限`。
+- 这个 **20/20 是本地候选回放结果，不是新的 DashScope/Qdrant 真实运行**；
+  latency、cost、融合分数和实时基础设施行为仍需按本文末尾命令重新实测。
+- 原 `citation_precision` 实际计算的是 raw Top-K chunk precision。修正后命名为
+  `retrieval_precision_at_5`，且只聚合有黄金证据的 case。最终回答使用了哪些 citation
+  与正确拒答都属于阶段 B，因此 `citation_precision` 和 `correct_abstention_rate` 在
+  阶段 A 报告中为 `null / stage_b_not_measured`，不再与 `0.95` 阈值直接比较。
+- 四个安全样例现区分 `abstain`、`deny_cross_tenant`、`answer_grounded` 和 `clarify`，
+  避免把“忽略恶意指令后仍依据 A 企业政策回答”错误计为无答案。
+
+真实重跑请使用新文件名，保留历史 artifact：
+
+```powershell
+python scripts/run_knowledge_baseline_eval.py `
+  --database .artifacts/knowledge-eval-corrected.db `
+  --cases evals/knowledge/cases.jsonl `
+  --output .artifacts/knowledge-baseline-corrected.json
+```
+
+若代理/VPN 导致 Qdrant 返回 `503 Bad Gateway`，本次运行应以非零状态中止；关闭代理
+或恢复网络后重跑，不要将 503 解释为“无命中”。
+
 > 本文档由 `scripts/run_knowledge_baseline_eval.py` 的真实运行结果整理而来。
 > 除文字说明外，所有数值均从 `.artifacts/knowledge-baseline.json` 逐字复制，未做任何重算或美化。
 > 评测集、Runner、黄金答案与语料均未修改；本次运行已修复评分层的 heading_path 匹配约定（见第 5 节）。
@@ -79,7 +113,7 @@
 
 修复后真实分数为 **recall@5 = 0.579、citation_precision = 0.155**（见第 2、3 节），验证了此前关于“检索链实际定位到正确文档与章节、0 分主要由评分约定导致”的推断——简单/mixed 类多为召回满分，检索质量本身有效。
 
-### 5.2 当前真实失败样例（≥3，每个恰选一个主因）
+### 5.2 历史报告中的失败归因（已被 2026-08-12 候选回放纠正）
 
 | 样例 | 分类 | 主因 | 说明 |
 |---|---|---|---|
@@ -88,7 +122,8 @@
 | `safety-unknown-exchange-01` | safety_no_answer | citation | `citation_precision=0.0`：无期望样例被 Baseline 返回 5 条非空 citations（未做到正确拒答），按规则计 0。这是阶段 A 固定 Top-K Baseline 的预期行为，正确拒答属阶段 B `EvidenceAssessor` 的 `INSUFFICIENT_EVIDENCE` 能力。 |
 | `simple-return-window-01` | simple_policy | citation | `recall@5=1.0`（命中唯一黄金章节）但 `citation_precision=0.25`：Top-5 返回 4 条里仅 1 条是黄金答案——单章节召回正确，但非黄金 citations 拉低了精度，即“有据可依但非精确”的精度损耗，反映固定 Top-K 对引用精度的固有开销。 |
 
-> 共性：召回分主要由多条件卡点的 retrieval 缺漏主导；精度分普遍偏低（0.2~0.25）是固定 Top-K（无论相关与否都返回 5 条）的既定行为——阶段 A 只测检索召回，不评答案依据度（见第 6 节）。
+> 上表保留用于解释历史 `0.579` 的形成过程，但“黄金章节未进入 Top-5”的表述不正确：
+> 黄金章节已经进入融合 Top-5，只是在项目层 ordinal 邻接裁剪后没有进入最终 citations。
 
 ## 6. 阶段 A 边界声明
 
@@ -102,12 +137,12 @@
 
 ## 7. 与最终 MVP 阈值的差距
 
-- `retrieval_recall@5 = 0.579` vs 阈值 `>= 0.85`：未达标（差 0.271）。
-- `citation_precision = 0.155` vs 阈值 `>= 0.95`：未达标。
-- 差距来源已不再是评分约定不一致（已修复）：召回差距主要由多条件样例的检索缺漏（`multi-condition-compensation-01`）拉低；精度差距是固定 Top-K 非相关引用造成的 Baseline 固有开销。跨租户泄漏与基础设施均无问题（隔离 = 0）。
+- 历史真实运行 `retrieval_recall@5 = 0.579` 未达阈值；确定性候选回放在修正选择逻辑后为 20/20，真实阈值状态等待外部重跑。
+- 历史 `0.155` 应称为 raw Top-K `retrieval_precision_at_5`，不能与阶段 B 最终回答的 `citation_precision >= 0.95` 直接比较。
+- 跨租户历史实测仍为 `0`；修复没有改变租户或 active-version 过滤。
 
 ## 8. 结论与后续
 
 - 跨租户隔离（`cross_tenant_leak_rate = 0`）与单轮固定预算 Baseline 语义在本真实运行中成立。
-- 修复评分层 heading_path 匹配后，真实召回 **0.579** 表明检索链对“答案落在单章节”的查询准确（simple/mixed 类多为 1.0），剩余主要损失在多条件跨章节召回与固定 Top-K 的引用精度。
-- 阶段 B 应优先补足多条件证据聚合与 `EvidenceAssessor` 的拒答/依据判定能力，再据此作为阶段 B/C 的有效对照组。
+- 历史真实召回 **0.579** 的主要损失发生在融合后的错误 ordinal 邻接裁剪，而不是 embedding、RRF 或 Top-K 候选不足。
+- 阶段 B 仍应实现 QueryPlanner/EvidenceAssessor，但不应依赖阶段 B 掩盖阶段 A 已确认的候选选择缺陷。
