@@ -8,6 +8,7 @@ other result dataclasses serialize to their stable public shape.
 from app.knowledge.base import VectorStoreUnavailableError
 from app.knowledge.results import (
     BaselineSearchResult,
+    AdaptiveSearchResult,
     Citation,
     RetrievalCandidateTrace,
     QueryRetrievalResult,
@@ -143,3 +144,27 @@ def test_query_retrieval_result_keeps_internal_ranked_values():
 
     assert result.ranked_chunks == (scored,)
     assert result.query_tokens == 2
+
+
+def test_adaptive_result_public_shape_separates_success_and_error():
+    result = AdaptiveSearchResult(
+        ok=True,
+        citations=[_citation()],
+        retrieval_summary=RetrievalSummary("single", 1, "sufficient", 4),
+        error=None,
+        selected_chunks=(),
+    )
+    payload = result.public_dict()
+    assert payload["ok"] is True
+    assert payload["data"]["result_code"] == "KNOWLEDGE_FOUND"
+    assert "selected_chunks" not in str(payload)
+
+    failed = AdaptiveSearchResult(
+        ok=False,
+        citations=[],
+        retrieval_summary=RetrievalSummary("single", 1, "insufficient", 4),
+        error=VectorStoreUnavailableError(reason="secret transport"),
+        selected_chunks=(),
+    ).public_dict()
+    assert failed["ok"] is False
+    assert failed["error"]["code"] == "VECTOR_STORE_UNAVAILABLE"

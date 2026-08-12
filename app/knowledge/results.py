@@ -158,3 +158,43 @@ class BaselineSearchResult:
                 }
             ),
         }
+
+
+@dataclass(frozen=True)
+class AdaptiveSearchResult:
+    """Public adaptive result with all raw chunks and trace kept internal."""
+
+    ok: bool
+    citations: Sequence[Citation]
+    retrieval_summary: RetrievalSummary
+    error: KnowledgeError | None
+    selected_chunks: Sequence[ChunkWithDocumentTitle]
+    retrieval_trace: dict = field(default_factory=dict)
+
+    def public_dict(self) -> dict:
+        summary = self.retrieval_summary.public_dict()
+        data = {
+            "strategy": summary["strategy"],
+            "evidence_status": summary["evidence_status"],
+            "citations": [item.public_dict() for item in self.citations],
+            "retrieval_summary": summary,
+        }
+        if self.ok:
+            data["result_code"] = (
+                "SEARCH_NOT_NEEDED"
+                if summary["evidence_status"] == "not_needed"
+                else "KNOWLEDGE_FOUND"
+            )
+            return {"ok": True, "data": data}
+        return {
+            "ok": False,
+            "error": {
+                "code": self.error.code if self.error else "SEARCH_INTERNAL_ERROR",
+                "message": (
+                    self.error.safe_message
+                    if self.error
+                    else "knowledge search could not be completed"
+                ),
+            },
+            "data": data,
+        }
