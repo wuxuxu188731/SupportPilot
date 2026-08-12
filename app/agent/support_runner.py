@@ -8,7 +8,7 @@ from app.agent.runner import (
 from app.application.organization_service import TenantContext
 from app.core.config import MODEL_NAME
 from app.schemas.chat import LLMResponse
-from app.tools.support_gateway import CustomerSupportToolGateway
+from app.tools.composite_gateway import ToolGateway
 
 
 class RunTurn(Protocol):
@@ -31,7 +31,7 @@ class CustomerSupportAgentRunner:
         self,
         *,
         client: Any,
-        gateway: CustomerSupportToolGateway,
+        gateway: ToolGateway,
         model_name: str = MODEL_NAME,
         max_tool_rounds: int = DEFAULT_MAX_TOOL_ROUNDS,
         on_event: Any = None,
