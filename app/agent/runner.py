@@ -1,14 +1,70 @@
 from typing import Any, Callable, Protocol
+from dataclasses import dataclass
+import re
 
 from app.agent.events import AgentEvent
 from app.core.config import MODEL_NAME
 from app.schemas.chat import LLMResponse
+from app.knowledge.results import Citation, RetrievalSummary
 
 import json
 import time
 
 
 DEFAULT_MAX_TOOL_ROUNDS = 20
+_CITATION_PATTERN = re.compile(r"\[(C[1-9]\d*)\]")
+
+
+@dataclass(frozen=True)
+class CitationValidationResult:
+  citations: tuple[Citation, ...]
+  retrieval_summary: RetrievalSummary | None
+  unknown_citation_ids: tuple[str, ...]
+  missing_required_citation: bool
+  answer_incomplete: bool
+
+
+def validate_final_citations(
+  answer: str | None,
+  knowledge_payload: dict | None,
+) -> CitationValidationResult:
+  found: list[str] = []
+  for citation_id in _CITATION_PATTERN.findall(answer or ""):
+    if citation_id not in found:
+      found.append(citation_id)
+  data = (knowledge_payload or {}).get("data") or {}
+  allowed = {
+    item.get("citation_id"): item
+    for item in data.get("citations", [])
+    if isinstance(item, dict) and item.get("citation_id")
+  }
+  citations = tuple(
+    Citation(**allowed[citation_id])
+    for citation_id in found
+    if citation_id in allowed
+  )
+  unknown = tuple(
+    citation_id for citation_id in found if citation_id not in allowed
+  )
+  summary_payload = data.get("retrieval_summary")
+  summary = (
+    RetrievalSummary(**summary_payload)
+    if isinstance(summary_payload, dict)
+    else None
+  )
+  missing_required = (
+    data.get("evidence_status") == "sufficient"
+    and bool(allowed)
+    and not citations
+  )
+  incomplete = bool(unknown) or missing_required
+  return CitationValidationResult(
+    citations=citations,
+    retrieval_summary=summary,
+    unknown_citation_ids=unknown,
+    missing_required_citation=missing_required,
+    answer_incomplete=incomplete,
+  )
 
 
 class AgentToolRoundLimitError(RuntimeError):
@@ -67,6 +123,8 @@ def run_one_turn(
     raise ValueError("max_tool_rounds must be positive")
   tool_rounds = 0
   events : list[AgentEvent] = []
+  knowledge_payload: dict | None = None
+  knowledge_call_id: str | None = None
 
   #this function is used to add agent_event into events && extension operation
   def emit(event : AgentEvent):
@@ -100,7 +158,27 @@ def run_one_turn(
           "reasoning_content":reason_content,
         }
       )
-      return LLMResponse(llm_answer=llm_res,llm_reasoning_content=reason_content,events=events) 
+      validation = validate_final_citations(llm_res, knowledge_payload)
+      if validation.answer_incomplete:
+        emit(AgentEvent(
+          type="citation.invalid",
+          tool_call_id=knowledge_call_id or "final-answer",
+          tool_call_name=(
+            "search_knowledge" if knowledge_call_id else "citation_validation"
+          ),
+          result={
+            "unknown_citation_ids": list(validation.unknown_citation_ids),
+            "missing_required_citation": validation.missing_required_citation,
+          },
+        ))
+      return LLMResponse(
+        llm_answer=llm_res,
+        llm_reasoning_content=reason_content,
+        events=events,
+        citations=list(validation.citations),
+        retrieval_summary=validation.retrieval_summary,
+        answer_incomplete=validation.answer_incomplete,
+      )
     
     if tool_rounds >= max_tool_rounds:
       raise AgentToolRoundLimitError("maximum tool rounds exceeded")
@@ -202,6 +280,14 @@ def run_one_turn(
         )
         messages.append(build_error_result(tool_call_id=tool_call.id,error_message=error_message))
         continue
+      if (
+        func_name == "search_knowledge"
+        and knowledge_payload is None
+        and isinstance(func_result, dict)
+        and isinstance((func_result.get("data") or {}).get("retrieval_summary"), dict)
+      ):
+        knowledge_payload = func_result
+        knowledge_call_id = tool_call.id
       
       #执行工具没有抛出异常，工具正常执行，添加事件，将消息append进入messages
       emit(

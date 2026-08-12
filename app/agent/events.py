@@ -7,7 +7,8 @@ class AgentEvent(BaseModel):
     "tool_call.requested",
     "tool_call.started",
     "tool_call.completed",
-    "tool_call.failed"
+    "tool_call.failed",
+    "citation.invalid"
   ]
   timestamp : datetime = Field(default_factory=datetime.now)
   tool_call_id : str

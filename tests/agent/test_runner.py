@@ -19,7 +19,11 @@ agent编排测试，覆盖路径：
 9.每条路径的 messages 顺序和事件顺序都正确。
 """
 
-from app.agent.runner import AgentToolRoundLimitError, run_one_turn
+from app.agent.runner import (
+  AgentToolRoundLimitError,
+  run_one_turn,
+  validate_final_citations,
+)
 
 
 def test_run_one_turn_uses_requested_model_name():
@@ -143,6 +147,153 @@ def test_run_one_turn_requires_positive_tool_round_limit(max_tool_rounds):
       tool_functions={},
       max_tool_rounds=max_tool_rounds,
     )
+
+
+def _knowledge_payload(*citation_ids, sufficient=True):
+  citations = [
+    {
+      "citation_id": citation_id,
+      "document_id": "doc-1",
+      "version_id": "version-1",
+      "chunk_id": f"chunk-{citation_id}",
+      "title": "Returns",
+      "heading_path": "/window",
+      "content": "trusted policy",
+    }
+    for citation_id in citation_ids
+  ]
+  return {
+    "ok": sufficient,
+    "data": {
+      "result_code": "KNOWLEDGE_FOUND" if sufficient else None,
+      "strategy": "multi",
+      "evidence_status": "sufficient" if sufficient else "insufficient",
+      "citations": citations if sufficient else [],
+      "retrieval_summary": {
+        "strategy": "multi",
+        "round_count": 1,
+        "evidence_status": "sufficient" if sufficient else "insufficient",
+        "latency_ms": 3,
+      },
+    },
+  }
+
+
+def test_validate_final_citations_maps_known_ids_in_answer_order():
+  validation = validate_final_citations(
+    "Window [C2], packaging [C1], repeated [C2].",
+    _knowledge_payload("C1", "C2"),
+  )
+  assert [item.citation_id for item in validation.citations] == ["C2", "C1"]
+  assert validation.answer_incomplete is False
+
+
+def test_validate_final_citations_rejects_unknown_and_missing_required():
+  unknown = validate_final_citations(
+    "Policy [C1] [C9]", _knowledge_payload("C1")
+  )
+  assert [item.citation_id for item in unknown.citations] == ["C1"]
+  assert unknown.unknown_citation_ids == ("C9",)
+  assert unknown.answer_incomplete is True
+
+  missing = validate_final_citations(
+    "The return window is seven days.", _knowledge_payload("C1")
+  )
+  assert missing.missing_required_citation is True
+  assert missing.answer_incomplete is True
+
+
+def test_runner_emits_content_free_citation_invalid_event():
+  tool_call = SimpleNamespace(
+    id="knowledge-call",
+    function=SimpleNamespace(
+      name="search_knowledge", arguments='{"question":"returns"}'
+    ),
+  )
+  responses = iter([
+    SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+      content="", reasoning_content=None, tool_calls=[tool_call]
+    ))]),
+    SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+      content="Policy [C1] [C9]", reasoning_content=None, tool_calls=None
+    ))]),
+  ])
+  client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+    create=lambda **kwargs: next(responses)
+  )))
+  result = run_one_turn(
+    messages=[{"role": "user", "content": "returns"}],
+    client=client,
+    tool_definitions=[],
+    tool_functions={"search_knowledge": lambda **kwargs: _knowledge_payload("C1")},
+  )
+  assert [item.citation_id for item in result.citations] == ["C1"]
+  assert result.answer_incomplete is True
+  invalid = [event for event in result.events if event.type == "citation.invalid"]
+  assert invalid[0].tool_call_id == "knowledge-call"
+  assert invalid[0].result == {
+    "unknown_citation_ids": ["C9"],
+    "missing_required_citation": False,
+  }
+  assert "Policy" not in str(invalid[0].result)
+
+
+def test_runner_flags_citation_without_knowledge_tool_with_fixed_identity():
+  message = SimpleNamespace(
+    content="Unsupported [C7]", reasoning_content=None, tool_calls=None
+  )
+  client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+    create=lambda **kwargs: SimpleNamespace(
+      choices=[SimpleNamespace(message=message)]
+    )
+  )))
+  result = run_one_turn(
+    messages=[{"role": "user", "content": "guess"}],
+    client=client,
+    tool_definitions=[],
+    tool_functions={},
+  )
+  invalid = [event for event in result.events if event.type == "citation.invalid"]
+  assert invalid[0].tool_call_id == "final-answer"
+  assert invalid[0].tool_call_name == "citation_validation"
+
+
+def test_second_budget_denial_does_not_overwrite_first_knowledge_payload():
+  tool_calls = [
+    SimpleNamespace(id="call-1", function=SimpleNamespace(
+      name="search_knowledge", arguments='{"question":"returns"}'
+    )),
+    SimpleNamespace(id="call-2", function=SimpleNamespace(
+      name="search_knowledge", arguments='{"question":"again"}'
+    )),
+  ]
+  responses = iter([
+    SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+      content="", reasoning_content=None, tool_calls=[tool_calls[0]]
+    ))]),
+    SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+      content="", reasoning_content=None, tool_calls=[tool_calls[1]]
+    ))]),
+    SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+      content="Policy [C1]", reasoning_content=None, tool_calls=None
+    ))]),
+  ])
+  service_results = iter([
+    _knowledge_payload("C1"),
+    {"ok": False, "error": {"code": "SEARCH_BUDGET_EXCEEDED", "message": "budget"}},
+  ])
+  client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+    create=lambda **kwargs: next(responses)
+  )))
+  result = run_one_turn(
+    messages=[{"role": "user", "content": "returns"}],
+    client=client,
+    tool_definitions=[],
+    tool_functions={"search_knowledge": lambda **kwargs: next(service_results)},
+  )
+  assert [item.citation_id for item in result.citations] == ["C1"]
+  assert result.retrieval_summary.evidence_status == "sufficient"
+  assert result.answer_incomplete is False
 
 
 #测试工具------------------
