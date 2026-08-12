@@ -176,6 +176,64 @@ class TestErrors:
 
 
 class TestKnowledgeStoreProtocol:
+    def test_rag_service_methods_raise_not_implemented(self):
+        event = kb.RetrievalEvent(
+            event_id="event-a",
+            organization_id="org-a",
+            conversation_id=None,
+            strategy="baseline",
+            original_query="refund policy",
+            planned_queries_json='["refund policy"]',
+            round_count=1,
+            candidate_json="{}",
+            selected_chunk_ids_json="[]",
+            outcome="no_candidates",
+            latency_ms=1,
+            model_calls=0,
+            estimated_tokens=0,
+            created_at="2026-08-12T00:00:00+00:00",
+        )
+        calls = [
+            (
+                kb.KnowledgeStore.get_version_by_id,
+                dict(
+                    organization_id="org-a",
+                    document_id="doc-a",
+                    version_id="v1",
+                ),
+            ),
+            (
+                kb.KnowledgeStore.get_version_by_hash,
+                dict(
+                    organization_id="org-a",
+                    document_id="doc-a",
+                    content_hash="sha256:abc",
+                ),
+            ),
+            (
+                kb.KnowledgeStore.mark_job_running,
+                dict(organization_id="org-a", job_id="job-a"),
+            ),
+            (
+                kb.KnowledgeStore.fail_ingestion,
+                dict(
+                    organization_id="org-a",
+                    document_id="doc-a",
+                    version_id="v1",
+                    job_id="job-a",
+                    error_code="INGESTION_FAILED",
+                    error_message="knowledge ingestion failed",
+                ),
+            ),
+            (
+                kb.KnowledgeStore.record_retrieval_event,
+                dict(organization_id="org-a", event=event),
+            ),
+        ]
+        for method, kwargs in calls:
+            with pytest.raises(NotImplementedError):
+                method(object(), **kwargs)
+
     def test_missing_methods_raise_not_implemented(self):
         calls = [
             (

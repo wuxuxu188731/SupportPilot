@@ -314,6 +314,24 @@ class KnowledgeStore(Protocol):
     ) -> DocumentVersion:
         raise NotImplementedError
 
+    def get_version_by_id(
+        self,
+        *,
+        organization_id: str,
+        document_id: str,
+        version_id: str,
+    ) -> DocumentVersion:
+        raise NotImplementedError
+
+    def get_version_by_hash(
+        self,
+        *,
+        organization_id: str,
+        document_id: str,
+        content_hash: str,
+    ) -> DocumentVersion:
+        raise NotImplementedError
+
     def create_job(
         self,
         *,
@@ -334,6 +352,26 @@ class KnowledgeStore(Protocol):
         """Return the latest job for a document's version (or by id, when
         ``job_id`` is provided). The id-only lookup is scoped SOLELY by
         ``organization_id``; a missing or cross-tenant job is None."""
+        raise NotImplementedError
+
+    def mark_job_running(
+        self,
+        *,
+        organization_id: str,
+        job_id: str,
+    ) -> IngestionJob | None:
+        raise NotImplementedError
+
+    def fail_ingestion(
+        self,
+        *,
+        organization_id: str,
+        document_id: str,
+        version_id: str,
+        job_id: str,
+        error_code: str,
+        error_message: str,
+    ) -> KnowledgeDocument:
         raise NotImplementedError
 
     def replace_chunks(
@@ -385,4 +423,12 @@ class KnowledgeStore(Protocol):
         with the document's title. Citation content comes only from here, never
         from a vector-store payload.
         """
+        raise NotImplementedError
+
+    def record_retrieval_event(
+        self,
+        *,
+        organization_id: str,
+        event: RetrievalEvent,
+    ) -> RetrievalEvent:
         raise NotImplementedError
