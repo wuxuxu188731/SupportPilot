@@ -385,3 +385,29 @@ def test_deadline_is_checked_after_external_call_before_next_stage():
     assert result.error.code == "SEARCH_BUDGET_EXCEEDED"
     assert assessor.calls == []
     assert json.loads(store.events[0].candidate_json)["failure_stage"] == "budget"
+
+
+def test_expired_before_planner_does_not_count_or_start_model_call():
+    class Clock:
+        calls = 0
+
+        def __call__(self):
+            self.calls += 1
+            return 0.0 if self.calls <= 2 else 14.5
+
+    clock = Clock()
+    store, planner = _Store(), _Planner()
+    service = AdaptiveKnowledgeSearchService(
+        store=store,
+        retriever=_Retriever(),
+        planner=planner,
+        assessor=_Assessor(),
+        timeout_seconds=15,
+        clock=clock,
+    )
+
+    result = service.search(organization_id="org-a", question="returns")
+
+    assert result.error.code == "SEARCH_BUDGET_EXCEEDED"
+    assert planner.calls == []
+    assert store.events[0].model_calls == 0

@@ -66,6 +66,16 @@ def test_empty_or_non_positive_evidence_is_insufficient_without_model():
     assert decision.model_calls == 0
     assert client.calls == []
 
+    zero_score = assessor.assess(
+        plan=multi_plan("packaging", "window"),
+        evidence=[evidence(score=0.0)],
+        round_number=1,
+        timeout_seconds=5,
+    )
+    assert zero_score.assessment.status is EvidenceStatus.INSUFFICIENT
+    assert zero_score.model_calls == 0
+    assert client.calls == []
+
 
 def test_low_score_and_uncovered_multi_query_use_deterministic_gate():
     client = FakeStructuredClient()

@@ -174,10 +174,11 @@ class AdaptiveKnowledgeSearchService:
         outcome = "failed"
 
         try:
+            planner_timeout = budget.external_timeout_seconds()
             budget.consume_planner_call()
             decision = self._planner.plan(
                 question=clean_question,
-                timeout_seconds=budget.external_timeout_seconds(),
+                timeout_seconds=planner_timeout,
             )
             budget.ensure_time()
             estimated_tokens += decision.estimated_tokens
@@ -258,12 +259,13 @@ class AdaptiveKnowledgeSearchService:
                         )
 
                 selected = self._select_evidence(evidence_by_id.values())
+                assessor_timeout = budget.external_timeout_seconds()
                 budget.consume_assessor_call()
                 assessment_decision = self._assessor.assess(
                     plan=plan,
                     evidence=selected,
                     round_number=round_number,
-                    timeout_seconds=budget.external_timeout_seconds(),
+                    timeout_seconds=assessor_timeout,
                 )
                 if assessment_decision.model_calls == 0:
                     budget.assessor_calls -= 1

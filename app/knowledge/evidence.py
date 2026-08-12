@@ -142,7 +142,10 @@ class EvidenceAssessor:
         plan: SearchPlan,
         evidence: Sequence[RoundEvidence],
     ) -> EvidenceAssessment | None:
-        if not evidence or max(item.fused_score for item in evidence) < self._min_fused_score:
+        if not evidence:
+            return self._insufficient(("no_evidence",))
+        highest_score = max(item.fused_score for item in evidence)
+        if highest_score <= 0 or highest_score < self._min_fused_score:
             return self._insufficient(("no_evidence",))
         if plan.strategy is SearchStrategy.MULTI:
             covered = {
