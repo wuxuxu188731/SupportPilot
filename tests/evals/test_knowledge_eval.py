@@ -20,8 +20,10 @@ from pathlib import Path
 import pytest
 from jsonschema import Draft202012Validator
 
-from app.knowledge.base import DocumentSourceType
+from app.knowledge.base import ChunkWithDocumentTitle, DocumentSourceType
 from app.knowledge.document_loader import DocumentLoader
+from app.knowledge.retrieval import BaselineKnowledgeSearchService
+from app.knowledge.vector_store import VectorCandidate
 from scripts.run_knowledge_baseline_eval import (
     CaseMetrics,
     EvalCase,
@@ -43,6 +45,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CASES_PATH = REPO_ROOT / "evals" / "knowledge" / "cases.jsonl"
 SCHEMA_PATH = REPO_ROOT / "evals" / "knowledge" / "schema.json"
 DOCS_ROOT = REPO_ROOT / "evals" / "knowledge" / "documents"
+HISTORICAL_CANDIDATES_PATH = (
+    REPO_ROOT / "tests" / "evals" / "fixtures" /
+    "stage_a_fused_candidates.json"
+)
 
 EXPECTED_CATEGORIES = {
     "simple_policy",
@@ -637,3 +643,64 @@ def test_case_report_emits_content_free_citations_and_retrieval_trace():
         return set()
 
     assert "content" not in all_keys(payload)
+
+
+def test_historical_fused_candidate_replay_recalls_every_golden_section():
+    import json
+
+    fixture = json.loads(
+        HISTORICAL_CANDIDATES_PATH.read_text(encoding="utf-8")
+    )
+    cases = {case.case_id: case for case in load_eval_cases(CASES_PATH)}
+    total_hits = 0
+    total_expected = 0
+
+    for replay in fixture["cases"]:
+        case = cases[replay["case_id"]]
+        resolved = []
+        candidate_by_id = {}
+        document_key_by_chunk = {}
+        for item in replay["candidates"]:
+            candidate_by_id[item["chunk_id"]] = VectorCandidate(
+                chunk_id=item["chunk_id"],
+                document_id=item["document_key"],
+                version_id="historical-version",
+                ordinal=item["ordinal"],
+                score=item["fused_score"],
+            )
+            resolved.append(
+                ChunkWithDocumentTitle(
+                    chunk_id=item["chunk_id"],
+                    organization_id="historical-org-a",
+                    document_id=item["document_key"],
+                    version_id="historical-version",
+                    ordinal=item["ordinal"],
+                    heading_path=item["heading_path"],
+                    content="",
+                    token_count=item["token_count"],
+                    document_title=item["document_key"],
+                )
+            )
+            document_key_by_chunk[item["chunk_id"]] = item["document_key"]
+
+        ranked = BaselineKnowledgeSearchService._rank_unique(
+            resolved, candidate_by_id
+        )
+        selected, _ = BaselineKnowledgeSearchService._select_within_budget(
+            ranked
+        )
+        returned_pairs = [
+            (document_key_by_chunk[chunk.chunk_id], chunk.heading_path or "")
+            for chunk in selected
+        ]
+        expected = {
+            (item.document_key, item.heading_path)
+            for item in case.expected_relevant
+        }
+        total_hits += _hit_count(returned_pairs, expected)
+        total_expected += len(expected)
+
+    assert set(cases) == {item["case_id"] for item in fixture["cases"]}
+    assert total_expected == 20
+    assert total_hits == 20
+    assert total_hits / total_expected == 1.0

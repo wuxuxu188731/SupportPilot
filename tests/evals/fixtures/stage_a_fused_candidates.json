@@ -1,0 +1,102 @@
+{
+  "schema_version": 1,
+  "source_code_revision": "716abdbd6f7bebdc34322673b1fa032a854c36f2",
+  "source_artifact_sha256": "8cd1aa1b4039d7f915df95ec804bba68a6ad8492e5f5bb188edb40e5769002ce",
+  "candidate_scope": "historical_fused_top_5_for_scored_cases",
+  "cases": [
+    {"case_id":"simple-return-window-01","candidates":[
+      {"chunk_id":"simple-return-window-01-r1","document_key":"returns","heading_path":"云舟商城退货政策（A 版）/退货时限","ordinal":1,"token_count":135,"fused_score":1.0},
+      {"chunk_id":"simple-return-window-01-r2","document_key":"returns","heading_path":"云舟商城退货政策（A 版）/例外商品","ordinal":4,"token_count":102,"fused_score":0.6666667},
+      {"chunk_id":"simple-return-window-01-r3","document_key":"returns","heading_path":"云舟商城退货政策（A 版）","ordinal":0,"token_count":42,"fused_score":0.5},
+      {"chunk_id":"simple-return-window-01-r4","document_key":"logistics_compensation","heading_path":"云舟商城物流赔偿政策（A 版）/赔偿标准","ordinal":2,"token_count":134,"fused_score":0.34285715},
+      {"chunk_id":"simple-return-window-01-r5","document_key":"logistics_compensation","heading_path":"云舟商城物流赔偿政策（A 版）/排除条款","ordinal":3,"token_count":80,"fused_score":0.325}
+    ]},
+    {"case_id":"simple-logistics-compensation-01","candidates":[
+      {"chunk_id":"simple-logistics-compensation-01-r1","document_key":"logistics_compensation","heading_path":"云舟商城物流赔偿政策（A 版）/赔偿标准","ordinal":2,"token_count":134,"fused_score":1.0},
+      {"chunk_id":"simple-logistics-compensation-01-r2","document_key":"logistics_compensation","heading_path":"云舟商城物流赔偿政策（A 版）/排除条款","ordinal":3,"token_count":80,"fused_score":0.6666667},
+      {"chunk_id":"simple-logistics-compensation-01-r3","document_key":"logistics_compensation","heading_path":"云舟商城物流赔偿政策（A 版）/赔偿条件","ordinal":1,"token_count":123,"fused_score":0.45},
+      {"chunk_id":"simple-logistics-compensation-01-r4","document_key":"logistics_compensation","heading_path":"云舟商城物流赔偿政策（A 版）","ordinal":0,"token_count":50,"fused_score":0.45},
+      {"chunk_id":"simple-logistics-compensation-01-r5","document_key":"returns","heading_path":"云舟商城退货政策（A 版）/例外商品","ordinal":4,"token_count":102,"fused_score":0.2361111}
+    ]},
+    {"case_id":"simple-warranty-length-01","candidates":[
+      {"chunk_id":"simple-warranty-length-01-r1","document_key":"warranty","heading_path":"云舟商城保修政策（A 版）/保修期限","ordinal":1,"token_count":193,"fused_score":1.0},
+      {"chunk_id":"simple-warranty-length-01-r2","document_key":"warranty","heading_path":"云舟商城保修政策（A 版）/所需凭证","ordinal":2,"token_count":131,"fused_score":0.6666667},
+      {"chunk_id":"simple-warranty-length-01-r3","document_key":"warranty","heading_path":"云舟商城保修政策（A 版）","ordinal":0,"token_count":46,"fused_score":0.45},
+      {"chunk_id":"simple-warranty-length-01-r4","document_key":"returns","heading_path":"云舟商城退货政策（A 版）/商品状态","ordinal":2,"token_count":89,"fused_score":0.25},
+      {"chunk_id":"simple-warranty-length-01-r5","document_key":"returns","heading_path":"云舟商城退货政策（A 版）/退货时限","ordinal":1,"token_count":135,"fused_score":0.16666667}
+    ]},
+    {"case_id":"simple-warranty-proof-01","candidates":[
+      {"chunk_id":"simple-warranty-proof-01-r1","document_key":"warranty","heading_path":"云舟商城保修政策（A 版）/所需凭证","ordinal":2,"token_count":131,"fused_score":1.0},
+      {"chunk_id":"simple-warranty-proof-01-r2","document_key":"warranty","heading_path":"云舟商城保修政策（A 版）/保修期限","ordinal":1,"token_count":193,"fused_score":0.6666667},
+      {"chunk_id":"simple-warranty-proof-01-r3","document_key":"warranty","heading_path":"云舟商城保修政策（A 版）","ordinal":0,"token_count":46,"fused_score":0.45},
+      {"chunk_id":"simple-warranty-proof-01-r4","document_key":"returns","heading_path":"云舟商城退货政策（A 版）/退货时限","ordinal":1,"token_count":135,"fused_score":0.325},
+      {"chunk_id":"simple-warranty-proof-01-r5","document_key":"returns","heading_path":"云舟商城退货政策（A 版）/商品状态","ordinal":2,"token_count":89,"fused_score":0.25}
+    ]},
+    {"case_id":"multi-condition-return-01","candidates":[
+      {"chunk_id":"multi-condition-return-01-r1","document_key":"returns","heading_path":"云舟商城退货政策（A 版）/例外商品","ordinal":4,"token_count":102,"fused_score":0.8333334},
+      {"chunk_id":"multi-condition-return-01-r2","document_key":"returns","heading_path":"云舟商城退货政策（A 版）/退货时限","ordinal":1,"token_count":135,"fused_score":0.8333334},
+      {"chunk_id":"multi-condition-return-01-r3","document_key":"returns","heading_path":"云舟商城退货政策（A 版）/商品状态","ordinal":2,"token_count":89,"fused_score":0.5},
+      {"chunk_id":"multi-condition-return-01-r4","document_key":"returns","heading_path":"云舟商城退货政策（A 版）/包装要求","ordinal":3,"token_count":81,"fused_score":0.33333334},
+      {"chunk_id":"multi-condition-return-01-r5","document_key":"logistics_compensation","heading_path":"云舟商城物流赔偿政策（A 版）/排除条款","ordinal":3,"token_count":80,"fused_score":0.31111112}
+    ]},
+    {"case_id":"multi-condition-compensation-01","candidates":[
+      {"chunk_id":"multi-condition-compensation-01-r1","document_key":"logistics_compensation","heading_path":"云舟商城物流赔偿政策（A 版）/赔偿标准","ordinal":2,"token_count":134,"fused_score":0.8333334},
+      {"chunk_id":"multi-condition-compensation-01-r2","document_key":"logistics_compensation","heading_path":"云舟商城物流赔偿政策（A 版）/排除条款","ordinal":3,"token_count":80,"fused_score":0.75},
+      {"chunk_id":"multi-condition-compensation-01-r3","document_key":"logistics_compensation","heading_path":"云舟商城物流赔偿政策（A 版）","ordinal":0,"token_count":50,"fused_score":0.5833334},
+      {"chunk_id":"multi-condition-compensation-01-r4","document_key":"logistics_compensation","heading_path":"云舟商城物流赔偿政策（A 版）/赔偿条件","ordinal":1,"token_count":123,"fused_score":0.4},
+      {"chunk_id":"multi-condition-compensation-01-r5","document_key":"warranty","heading_path":"云舟商城保修政策（A 版）/所需凭证","ordinal":2,"token_count":131,"fused_score":0.30952382}
+    ]},
+    {"case_id":"multi-condition-warranty-01","candidates":[
+      {"chunk_id":"multi-condition-warranty-01-r1","document_key":"warranty","heading_path":"云舟商城保修政策（A 版）/所需凭证","ordinal":2,"token_count":131,"fused_score":1.0},
+      {"chunk_id":"multi-condition-warranty-01-r2","document_key":"warranty","heading_path":"云舟商城保修政策（A 版）/保修期限","ordinal":1,"token_count":193,"fused_score":0.6666667},
+      {"chunk_id":"multi-condition-warranty-01-r3","document_key":"returns","heading_path":"云舟商城退货政策（A 版）/商品状态","ordinal":2,"token_count":89,"fused_score":0.4166667},
+      {"chunk_id":"multi-condition-warranty-01-r4","document_key":"returns","heading_path":"云舟商城退货政策（A 版）/包装要求","ordinal":3,"token_count":81,"fused_score":0.34285715},
+      {"chunk_id":"multi-condition-warranty-01-r5","document_key":"logistics_compensation","heading_path":"云舟商城物流赔偿政策（A 版）/排除条款","ordinal":3,"token_count":80,"fused_score":0.2916667}
+    ]},
+    {"case_id":"multi-condition-exception-01","candidates":[
+      {"chunk_id":"multi-condition-exception-01-r1","document_key":"returns","heading_path":"云舟商城退货政策（A 版）/退货时限","ordinal":1,"token_count":135,"fused_score":0.75},
+      {"chunk_id":"multi-condition-exception-01-r2","document_key":"returns","heading_path":"云舟商城退货政策（A 版）/例外商品","ordinal":4,"token_count":102,"fused_score":0.6666667},
+      {"chunk_id":"multi-condition-exception-01-r3","document_key":"returns","heading_path":"云舟商城退货政策（A 版）/商品状态","ordinal":2,"token_count":89,"fused_score":0.64285713},
+      {"chunk_id":"multi-condition-exception-01-r4","document_key":"returns","heading_path":"云舟商城退货政策（A 版）/包装要求","ordinal":3,"token_count":81,"fused_score":0.45},
+      {"chunk_id":"multi-condition-exception-01-r5","document_key":"warranty","heading_path":"云舟商城保修政策（A 版）/所需凭证","ordinal":2,"token_count":131,"fused_score":0.31111112}
+    ]},
+    {"case_id":"mixed-fact-window-01","candidates":[
+      {"chunk_id":"mixed-fact-window-01-r1","document_key":"returns","heading_path":"云舟商城退货政策（A 版）/退货时限","ordinal":1,"token_count":135,"fused_score":1.0},
+      {"chunk_id":"mixed-fact-window-01-r2","document_key":"returns","heading_path":"云舟商城退货政策（A 版）/例外商品","ordinal":4,"token_count":102,"fused_score":0.6666667},
+      {"chunk_id":"mixed-fact-window-01-r3","document_key":"logistics_compensation","heading_path":"云舟商城物流赔偿政策（A 版）/赔偿标准","ordinal":2,"token_count":134,"fused_score":0.45},
+      {"chunk_id":"mixed-fact-window-01-r4","document_key":"returns","heading_path":"云舟商城退货政策（A 版）","ordinal":0,"token_count":42,"fused_score":0.4166667},
+      {"chunk_id":"mixed-fact-window-01-r5","document_key":"logistics_compensation","heading_path":"云舟商城物流赔偿政策（A 版）/排除条款","ordinal":3,"token_count":80,"fused_score":0.31111112}
+    ]},
+    {"case_id":"mixed-fact-compensation-01","candidates":[
+      {"chunk_id":"mixed-fact-compensation-01-r1","document_key":"logistics_compensation","heading_path":"云舟商城物流赔偿政策（A 版）/赔偿标准","ordinal":2,"token_count":134,"fused_score":0.8333334},
+      {"chunk_id":"mixed-fact-compensation-01-r2","document_key":"logistics_compensation","heading_path":"云舟商城物流赔偿政策（A 版）/赔偿条件","ordinal":1,"token_count":123,"fused_score":0.75},
+      {"chunk_id":"mixed-fact-compensation-01-r3","document_key":"logistics_compensation","heading_path":"云舟商城物流赔偿政策（A 版）/排除条款","ordinal":3,"token_count":80,"fused_score":0.5833334},
+      {"chunk_id":"mixed-fact-compensation-01-r4","document_key":"returns","heading_path":"云舟商城退货政策（A 版）/退货时限","ordinal":1,"token_count":135,"fused_score":0.4},
+      {"chunk_id":"mixed-fact-compensation-01-r5","document_key":"logistics_compensation","heading_path":"云舟商城物流赔偿政策（A 版）","ordinal":0,"token_count":50,"fused_score":0.33333334}
+    ]},
+    {"case_id":"mixed-fact-return-01","candidates":[
+      {"chunk_id":"mixed-fact-return-01-r1","document_key":"returns","heading_path":"云舟商城退货政策（A 版）/例外商品","ordinal":4,"token_count":102,"fused_score":1.0},
+      {"chunk_id":"mixed-fact-return-01-r2","document_key":"returns","heading_path":"云舟商城退货政策（A 版）/商品状态","ordinal":2,"token_count":89,"fused_score":0.5833334},
+      {"chunk_id":"mixed-fact-return-01-r3","document_key":"returns","heading_path":"云舟商城退货政策（A 版）/退货时限","ordinal":1,"token_count":135,"fused_score":0.5833334},
+      {"chunk_id":"mixed-fact-return-01-r4","document_key":"returns","heading_path":"云舟商城退货政策（A 版）","ordinal":0,"token_count":42,"fused_score":0.34285715},
+      {"chunk_id":"mixed-fact-return-01-r5","document_key":"logistics_compensation","heading_path":"云舟商城物流赔偿政策（A 版）/排除条款","ordinal":3,"token_count":80,"fused_score":0.2777778}
+    ]},
+    {"case_id":"mixed-fact-warranty-01","candidates":[
+      {"chunk_id":"mixed-fact-warranty-01-r1","document_key":"warranty","heading_path":"云舟商城保修政策（A 版）/保修期限","ordinal":1,"token_count":193,"fused_score":1.0},
+      {"chunk_id":"mixed-fact-warranty-01-r2","document_key":"warranty","heading_path":"云舟商城保修政策（A 版）/所需凭证","ordinal":2,"token_count":131,"fused_score":0.6666667},
+      {"chunk_id":"mixed-fact-warranty-01-r3","document_key":"returns","heading_path":"云舟商城退货政策（A 版）/退货时限","ordinal":1,"token_count":135,"fused_score":0.45},
+      {"chunk_id":"mixed-fact-warranty-01-r4","document_key":"warranty","heading_path":"云舟商城保修政策（A 版）","ordinal":0,"token_count":46,"fused_score":0.45},
+      {"chunk_id":"mixed-fact-warranty-01-r5","document_key":"logistics_compensation","heading_path":"云舟商城物流赔偿政策（A 版）/排除条款","ordinal":3,"token_count":80,"fused_score":0.2916667}
+    ]},
+    {"case_id":"safety-unknown-exchange-01","candidates":[]},
+    {"case_id":"safety-orgb-policy-01","candidates":[]},
+    {"case_id":"safety-ignore-rule-01","candidates":[
+      {"chunk_id":"safety-ignore-rule-01-r1","document_key":"returns","heading_path":"云舟商城退货政策（A 版）/退货时限","ordinal":1,"token_count":135,"fused_score":1.0},
+      {"chunk_id":"safety-ignore-rule-01-r2","document_key":"returns","heading_path":"云舟商城退货政策（A 版）","ordinal":0,"token_count":42,"fused_score":0.6666667},
+      {"chunk_id":"safety-ignore-rule-01-r3","document_key":"returns","heading_path":"云舟商城退货政策（A 版）/例外商品","ordinal":4,"token_count":102,"fused_score":0.5},
+      {"chunk_id":"safety-ignore-rule-01-r4","document_key":"logistics_compensation","heading_path":"云舟商城物流赔偿政策（A 版）/赔偿标准","ordinal":2,"token_count":134,"fused_score":0.33333334},
+      {"chunk_id":"safety-ignore-rule-01-r5","document_key":"logistics_compensation","heading_path":"云舟商城物流赔偿政策（A 版）/排除条款","ordinal":3,"token_count":80,"fused_score":0.325}
+    ]},
+    {"case_id":"safety-vague-return-01","candidates":[]}
+  ]
+}
