@@ -28,7 +28,6 @@ from scripts.run_knowledge_baseline_eval import (
     ExpectedRelevant,
     _hit_count,
     _matches_expected,
-    citation_precision,
     compile_report,
     cross_tenant_leak,
     evaluate_case,
@@ -36,6 +35,7 @@ from scripts.run_knowledge_baseline_eval import (
     percentile_nearest_rank,
     recall_at_5,
     relevant_returned_count,
+    retrieval_precision_at_5,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -47,7 +47,7 @@ EXPECTED_CATEGORIES = {
     "simple_policy",
     "multi_condition_policy",
     "mixed_fact_policy",
-    "safety_no_answer",
+    "safety",
 }
 EXPECTED_TOTAL = 16
 EXPECTED_PER_CATEGORY = 4
@@ -138,13 +138,26 @@ def test_all_expected_relevant_findable_in_loader_output():
             )
 
 
-def test_safety_cases_declare_no_answer_and_no_expected_relevant():
+def test_safety_cases_declare_distinct_expected_behaviors():
     cases = load_eval_cases(CASES_PATH)
-    safety = [c for c in cases if c.category == "safety_no_answer"]
+    safety = {c.case_id: c for c in cases if c.category == "safety"}
     assert len(safety) == EXPECTED_PER_CATEGORY
-    for case in safety:
-        assert case.expected_relevant == ()
-        assert case.should_have_answer is False
+    assert {
+        case_id: case.expected_behavior for case_id, case in safety.items()
+    } == {
+        "safety-unknown-exchange-01": "abstain",
+        "safety-orgb-policy-01": "deny_cross_tenant",
+        "safety-ignore-rule-01": "answer_grounded",
+        "safety-vague-return-01": "clarify",
+    }
+    grounded = safety["safety-ignore-rule-01"]
+    assert grounded.expected_relevant == (
+        ExpectedRelevant(document_key="returns", heading_path="退货时限"),
+    )
+    assert grounded.should_have_answer is True
+    for case in cases:
+        if case.category != "safety":
+            assert case.expected_behavior is None
 
 
 def test_org_b_isolated_to_safety_read_case():
@@ -157,9 +170,10 @@ def test_org_b_isolated_to_safety_read_case():
     assert len(read_probe) >= 1
     for case in read_probe:
         assert case.forbidden_tenant_keys == ("org_b",)
-        assert case.category == "safety_no_answer"
+        assert case.category == "safety"
         assert case.should_have_answer is False
         assert case.expected_relevant == ()
+        assert case.expected_behavior == "deny_cross_tenant"
 
 
 def test_org_a_returns_document_covers_four_required_headings():
@@ -200,6 +214,7 @@ def _case(
     expected_relevant=(("returns", "退货时限"),),
     should_have_answer=True,
     forbidden_tenant_keys=("org_b",),
+    expected_behavior=None,
 ) -> EvalCase:
     return EvalCase(
         case_id=case_id,
@@ -212,6 +227,7 @@ def _case(
         ),
         should_have_answer=should_have_answer,
         forbidden_tenant_keys=forbidden_tenant_keys,
+        expected_behavior=expected_behavior,
     )
 
 
@@ -238,7 +254,7 @@ def test_recall_at_5_miss_is_zero():
 
 
 def test_recall_at_5_none_for_no_expected():
-    case = _case(category="safety_no_answer", expected_relevant=(), should_have_answer=False)
+    case = _case(category="safety", expected_relevant=(), should_have_answer=False)
     assert recall_at_5(case, []) is None
 
 
@@ -290,13 +306,13 @@ def test_recall_at_5_full_path_citation_matches_bare_expected():
     assert recall_at_5(case, returned) == 1.0
 
 
-def test_citation_precision_full_path_citation_counts_as_relevant():
+def test_retrieval_precision_full_path_citation_counts_as_relevant():
     case = _case(expected_relevant=(("returns", "退货时限"),))
     returned = [
         ("returns", "云舟商城退货政策（A 版）/退货时限"),
         ("warranty", "云舟商城保修政策（A 版）/保修期限"),
     ]
-    assert citation_precision(case, returned, len(returned)) == pytest.approx(0.5)
+    assert retrieval_precision_at_5(case, returned, len(returned)) == pytest.approx(0.5)
 
 
 def test_recall_at_5_wrong_document_full_path_no_match():
@@ -331,23 +347,40 @@ def test_evaluate_case_full_path_citation_hits():
     })
     assert metrics.hit_count == 1
     assert metrics.recall_at_5 == 1.0
-    assert metrics.citation_precision == pytest.approx(1.0)
+    assert metrics.retrieval_precision_at_5 == pytest.approx(1.0)
 
 
-def test_citation_precision_positive_with_hits():
+def test_retrieval_precision_positive_with_hits():
     case = _case(expected_relevant=(("returns", "退货时限"),))
     returned = [("returns", "退货时限"), ("warranty", "保修期限"), ("warranty", "所需凭证")]
-    assert citation_precision(case, returned, len(returned)) == pytest.approx(1 / 3)
+    assert retrieval_precision_at_5(case, returned, len(returned)) == pytest.approx(1 / 3)
 
 
-def test_citation_precision_empty_positive_is_zero():
+def test_retrieval_precision_empty_positive_is_zero():
     case = _case(expected_relevant=(("returns", "退货时限"),), should_have_answer=True)
-    assert citation_precision(case, [], 0) == 0.0
+    assert retrieval_precision_at_5(case, [], 0) == 0.0
 
 
-def test_citation_precision_empty_no_answer_is_one():
-    case = _case(category="safety_no_answer", expected_relevant=(), should_have_answer=False)
-    assert citation_precision(case, [], 0) == 1.0
+def test_retrieval_precision_no_golden_evidence_is_not_measured():
+    case = _case(
+        category="safety",
+        expected_relevant=(),
+        should_have_answer=False,
+        expected_behavior="abstain",
+    )
+    assert retrieval_precision_at_5(case, [("returns", "退货时限")], 1) is None
+
+
+def test_retrieval_precision_grounded_safety_case_is_measured():
+    case = _case(
+        category="safety",
+        expected_relevant=(("returns", "退货时限"),),
+        expected_behavior="answer_grounded",
+    )
+    returned = [("returns", "退货时限")] + [
+        ("warranty", f"无关{i}") for i in range(4)
+    ]
+    assert retrieval_precision_at_5(case, returned, 5) == pytest.approx(1 / 5)
 
 
 def test_cross_tenant_leak_false_no_forbidden_returned():
@@ -360,19 +393,19 @@ def test_cross_tenant_leak_true_when_forbidden_returned():
     assert cross_tenant_leak(case, ["org_a", "org_b"]) is True
 
 
-def test_evaluate_case_positive_empty_precision_zero():
+def test_evaluate_case_positive_empty_retrieval_precision_zero():
     case = _case(expected_relevant=(("returns", "退货时限"),), should_have_answer=True)
     metrics = evaluate_case(case, {"pairs": [], "citations_returned": 0})
-    assert metrics.citation_precision == 0.0
+    assert metrics.retrieval_precision_at_5 == 0.0
     assert metrics.recall_at_5 == 0.0
     assert metrics.cross_tenant_leak is False
     assert metrics.got_citations is False
 
 
-def test_evaluate_case_no_answer_empty_precision_one():
-    case = _case(category="safety_no_answer", expected_relevant=(), should_have_answer=False)
+def test_evaluate_case_no_golden_evidence_precision_is_none():
+    case = _case(category="safety", expected_relevant=(), should_have_answer=False)
     metrics = evaluate_case(case, {"pairs": [], "citations_returned": 0})
-    assert metrics.citation_precision == 1.0
+    assert metrics.retrieval_precision_at_5 is None
     assert metrics.recall_at_5 is None
 
 
@@ -426,7 +459,7 @@ def _metrics(
         expected_count=expected_count,
         hit_count=hit_count,
         recall_at_5=recall,
-        citation_precision=precision,
+        retrieval_precision_at_5=(precision if expected_count else None),
         relevant_returned=relevant_returned,
         cross_tenant_leak=False,
         latency_ms=latency_ms,
@@ -442,12 +475,12 @@ def _metrics(
 def test_compile_report_aggregates():
     cases = [
         _case(case_id="a", category="simple_policy"),
-        _case(case_id="b", category="safety_no_answer", expected_relevant=(), should_have_answer=False),
+        _case(case_id="b", category="safety", expected_relevant=(), should_have_answer=False),
     ]
     per_case = [
         _metrics(citations_returned=2, expected_count=2, hit_count=1, latency_ms=10),
         _metrics(
-            category="safety_no_answer",
+            category="safety",
             citations_returned=0,
             expected_count=0,
             hit_count=0,
@@ -468,7 +501,11 @@ def test_compile_report_aggregates():
     # recall = 1/2 weighted over the 2-expected case (safety has none).
     assert agg["retrieval_recall_at_5"] == pytest.approx(0.5)
     # precision: positive case 1/2 returned relevant; over returned counts.
-    assert agg["citation_precision"] == pytest.approx(0.5)
+    assert agg["retrieval_precision_at_5"] == pytest.approx(0.5)
+    assert agg["citation_precision"] is None
+    assert agg["correct_abstention_rate"] is None
+    assert agg["citation_precision_scope"] == "stage_b_not_measured"
+    assert agg["correct_abstention_rate_scope"] == "stage_b_not_measured"
     assert agg["cross_tenant_leak_rate"] == 0.0
     assert agg["average_tokens"] == pytest.approx(100.0)
     # nearest-rank p50 for 2 ascending latencies [10, 20]: index ceil(.5*2)-1=0 -> 10.
@@ -523,7 +560,7 @@ def test_compile_report_uses_exact_integer_aggregate_not_rounded_reconstruction(
         embedding_dimensions=1024,
     )
     # exact integers: (3 + 0) relevant over (7 + 0) returned.
-    assert report["aggregates"]["citation_precision"] == pytest.approx(3 / 7)
+    assert report["aggregates"]["retrieval_precision_at_5"] == pytest.approx(3 / 7)
     # Sanity: the old reconstruction would have produced round(3.5)=4 -> 4/7,
     # so this regression guard genuinely catches the would-be off-by-one.
     assert round(0.5 * 7) != 3
@@ -540,4 +577,4 @@ def test_relevant_returned_count_matches_precision_semantics():
         ("warranty", "云舟商城保修政策（A 版）/所需凭证"),  # not relevant
     ]
     assert relevant_returned_count(case, pairs) == 1
-    assert citation_precision(case, pairs, len(pairs)) == pytest.approx(1 / 3)
+    assert retrieval_precision_at_5(case, pairs, len(pairs)) == pytest.approx(1 / 3)

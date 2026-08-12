@@ -132,6 +132,7 @@ class EvalCase:
     expected_relevant: tuple[ExpectedRelevant, ...]
     should_have_answer: bool
     forbidden_tenant_keys: tuple[str, ...]
+    expected_behavior: str | None = None
 
     @classmethod
     def from_dict(cls, raw: dict) -> "EvalCase":
@@ -145,6 +146,7 @@ class EvalCase:
             ),
             should_have_answer=bool(raw["should_have_answer"]),
             forbidden_tenant_keys=tuple(raw["forbidden_tenant_keys"]),
+            expected_behavior=raw.get("expected_behavior"),
         )
 
 
@@ -159,7 +161,7 @@ class CaseMetrics:
     expected_count: int = 0
     hit_count: int = 0
     recall_at_5: float | None = None
-    citation_precision: float = 0.0
+    retrieval_precision_at_5: float | None = None
     relevant_returned: int = 0
     cross_tenant_leak: bool = False
     latency_ms: int = 0
@@ -244,9 +246,9 @@ def relevant_returned_count(case: EvalCase, returned_pairs) -> int:
     """Exact integer count of returned pairs that match an expected pair.
 
     Kept as its own integer (not reconstructed from the pre-rounded
-    ``citation_precision`` float) so the aggregate citation_precision is computed
+    ``retrieval_precision_at_5`` float) so aggregate precision is computed
     from exact integers and never suffers a float round-trip off-by-one
-    (see I1). ``citation_precision()`` delegates here too, so the rules live
+    (see I1). ``retrieval_precision_at_5()`` delegates here too, so the rules live
     in exactly one place."""
     expected = _expected_pairs(case)
     return sum(
@@ -254,14 +256,19 @@ def relevant_returned_count(case: EvalCase, returned_pairs) -> int:
     )
 
 
-def citation_precision(case: EvalCase, returned_pairs, returned_count: int) -> float:
-    """relevant_returned / returned_count, with the brief's empty-citation rules:
-    empty citations + should_have_answer=False -> 1.0; empty + positive -> 0.0.
+def retrieval_precision_at_5(
+    case: EvalCase, returned_pairs, returned_count: int
+) -> float | None:
+    """Relevant raw Top-K chunks divided by returned chunks for golden cases.
 
-    ``relevant_returned`` counts returned pairs that match an expected pair under
-    the same path-segment rule as recall (:func:`_matches_expected`)."""
+    Cases with no golden evidence require routing, abstention, denial, or
+    clarification behavior that Stage A does not implement, so their retrieval
+    precision is not measured.
+    """
+    if not case.expected_relevant:
+        return None
     if returned_count == 0:
-        return 1.0 if not case.should_have_answer else 0.0
+        return 0.0
     relevant_returned = relevant_returned_count(case, returned_pairs)
     return relevant_returned / returned_count
 
@@ -283,7 +290,7 @@ def evaluate_case(case: EvalCase, result: dict) -> CaseMetrics:
 
     This is the pure seam the runner uses and unit tests reuse with hand-built
     descriptors, so the exact metric rules live here exactly once.
-    ``recall_at_5``/``citation_precision``/``cross_tenant_leak`` all delegate to
+    ``recall_at_5``/``retrieval_precision_at_5``/``cross_tenant_leak`` delegate to
     the primitive functions below.
     """
     pairs = result["pairs"]
@@ -304,7 +311,9 @@ def evaluate_case(case: EvalCase, result: dict) -> CaseMetrics:
         expected_count=len(case.expected_relevant),
         hit_count=hit_count,
         recall_at_5=recall_at_5(case, pairs),
-        citation_precision=citation_precision(case, pairs, returned_count),
+        retrieval_precision_at_5=retrieval_precision_at_5(
+            case, pairs, returned_count
+        ),
         relevant_returned=exact_relevant,
         cross_tenant_leak=cross_tenant_leak(case, tenant_keys),
         latency_ms=int(result.get("latency_ms", 0)),
@@ -364,12 +373,11 @@ def compile_report(
 
     total_expected = sum(m.expected_count for m in per_case)
     total_hit = sum(m.hit_count for m in per_case)
-    total_returned = sum(m.citations_returned for m in per_case)
-    # Aggregate citation precision is the exact sum of per-case relevant counts
-    # over returned counts -- NOT reconstructed from the pre-rounded
-    # citation_precision float (that would risk a float round-trip off-by-one,
-    # see I1). relevant_returned is accumulated as an integer per case.
-    total_relevant_returned = sum(m.relevant_returned for m in per_case)
+    precision_cases = [
+        m for m in per_case if m.retrieval_precision_at_5 is not None
+    ]
+    precision_returned = sum(m.citations_returned for m in precision_cases)
+    precision_relevant = sum(m.relevant_returned for m in precision_cases)
     leak_cases = sum(1 for m in per_case if m.cross_tenant_leak)
 
     # retrieval_recall_at_5: weighted by expected_count (so multi-condition cases
@@ -397,9 +405,14 @@ def compile_report(
         "case_count": len(cases),
         "aggregates": {
             "retrieval_recall_at_5": retrieval_recall,
-            "citation_precision": (
-                total_relevant_returned / total_returned if total_returned else 0.0
+            "retrieval_precision_at_5": (
+                precision_relevant / precision_returned
+                if precision_returned else 0.0
             ),
+            "citation_precision": None,
+            "citation_precision_scope": "stage_b_not_measured",
+            "correct_abstention_rate": None,
+            "correct_abstention_rate_scope": "stage_b_not_measured",
             "cross_tenant_leak_rate": leak_cases / len(cases) if cases else 0.0,
             "average_search_rounds": _safe_mean([m.rounds for m in per_case]),
             "average_model_calls": _safe_mean([m.model_calls for m in per_case]),
@@ -737,7 +750,7 @@ def run_baseline_eval(
             "expected_count": m.expected_count,
             "hit_count": m.hit_count,
             "recall_at_5": m.recall_at_5,
-            "citation_precision": m.citation_precision,
+            "retrieval_precision_at_5": m.retrieval_precision_at_5,
             "relevant_returned": m.relevant_returned,
             "cross_tenant_leak": m.cross_tenant_leak,
             "latency_ms": m.latency_ms,
@@ -814,7 +827,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"code_revision        {report['code_revision']}",
             f"dataset_hash         {report['dataset_hash']}",
             f"retrieval_recall@5   {aggregates['retrieval_recall_at_5']:.3f}",
-            f"citation_precision   {aggregates['citation_precision']:.3f}",
+            (
+                "retrieval_precision@5 "
+                f"{aggregates['retrieval_precision_at_5']:.3f}"
+            ),
+            "citation_precision   not measured (Stage B)",
+            "correct_abstention   not measured (Stage B)",
             f"cross_tenant_leak    {aggregates['cross_tenant_leak_rate']:.3f}",
             f"avg_search_rounds    {aggregates['average_search_rounds']:.2f}",
             f"avg_model_calls      {aggregates['average_model_calls']:.2f}",

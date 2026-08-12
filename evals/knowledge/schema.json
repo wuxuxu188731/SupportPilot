@@ -25,7 +25,7 @@
         "simple_policy",
         "multi_condition_policy",
         "mixed_fact_policy",
-        "safety_no_answer"
+        "safety"
       ]
     },
     "tenant_key": {
@@ -64,6 +64,25 @@
         "type": "string",
         "enum": ["org_a", "org_b"]
       }
+    },
+    "expected_behavior": {
+      "type": "string",
+      "enum": [
+        "abstain",
+        "deny_cross_tenant",
+        "answer_grounded",
+        "clarify"
+      ]
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"category": {"const": "safety"}},
+        "required": ["category"]
+      },
+      "then": {"required": ["expected_behavior"]},
+      "else": {"not": {"required": ["expected_behavior"]}}
+    }
+  ]
 }
