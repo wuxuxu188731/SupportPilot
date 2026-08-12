@@ -55,3 +55,30 @@ def test_knowledge_settings_have_fixed_vector_contract(monkeypatch):
         "supportpilot_knowledge_te4_1024_v1"
     )
     assert settings.qdrant_url == "http://qdrant.test:6333"
+
+
+def test_stage_b_settings_are_server_owned(monkeypatch):
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "key")
+    monkeypatch.setenv("KNOWLEDGE_MIN_FUSED_SCORE", "0.25")
+    monkeypatch.setenv("KNOWLEDGE_SEARCH_TIMEOUT_SECONDS", "15")
+
+    settings = get_knowledge_settings()
+
+    assert settings.min_fused_score == 0.25
+    assert settings.search_timeout_seconds == 15.0
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("KNOWLEDGE_MIN_FUSED_SCORE", "nan"),
+        ("KNOWLEDGE_MIN_FUSED_SCORE", "-0.1"),
+        ("KNOWLEDGE_SEARCH_TIMEOUT_SECONDS", "0"),
+    ],
+)
+def test_stage_b_settings_reject_invalid_numbers(monkeypatch, name, value):
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "key")
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(RuntimeError):
+        get_knowledge_settings()

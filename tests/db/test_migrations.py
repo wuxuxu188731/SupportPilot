@@ -558,3 +558,66 @@ def test_knowledge_schema_rejects_cross_tenant_version(tmp_path):
                 )
                 """
             )
+
+
+def _insert_retrieval_event(connection, event_id, strategy):
+    connection.execute(
+        """
+        INSERT INTO retrieval_events(
+            id, organization_id, conversation_id, strategy, original_query,
+            planned_queries_json, round_count, candidate_json,
+            selected_chunk_ids_json, outcome, latency_ms, model_calls,
+            estimated_tokens, created_at
+        ) VALUES (?, 'org-a', NULL, ?, 'digest', '[]', 0, '{}', '[]',
+                  'insufficient', 1, 0, 0, '2026-08-13T00:00:00Z')
+        """,
+        (event_id, strategy),
+    )
+
+
+def test_unplanned_strategy_migration_preserves_rows_and_index(tmp_path):
+    database_path = tmp_path / "unplanned-upgrade.db"
+    config = alembic_config(database_path)
+    command.upgrade(config, "0009_knowledge_base")
+    with sqlite3.connect(database_path) as connection:
+        _insert_retrieval_event(connection, "event-baseline", "baseline")
+
+    command.upgrade(config, "0010_retrieval_event_unplanned")
+
+    with sqlite3.connect(database_path) as connection:
+        _insert_retrieval_event(connection, "event-unplanned", "unplanned")
+        strategies = connection.execute(
+            "SELECT strategy FROM retrieval_events ORDER BY id"
+        ).fetchall()
+        indexes = connection.execute(
+            "PRAGMA index_list(retrieval_events)"
+        ).fetchall()
+    assert strategies == [("baseline",), ("unplanned",)]
+    assert "idx_retrieval_events_org_created" in {row[1] for row in indexes}
+
+
+def test_unplanned_strategy_downgrade_restores_check_when_safe(tmp_path):
+    database_path = tmp_path / "unplanned-safe-downgrade.db"
+    config = alembic_config(database_path)
+    command.upgrade(config, "0010_retrieval_event_unplanned")
+    command.downgrade(config, "0009_knowledge_base")
+
+    with sqlite3.connect(database_path) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_retrieval_event(connection, "event-unplanned", "unplanned")
+
+
+def test_unplanned_strategy_downgrade_refuses_data_loss(tmp_path):
+    database_path = tmp_path / "unplanned-protected-downgrade.db"
+    config = alembic_config(database_path)
+    command.upgrade(config, "0010_retrieval_event_unplanned")
+    with sqlite3.connect(database_path) as connection:
+        _insert_retrieval_event(connection, "event-unplanned", "unplanned")
+
+    with pytest.raises(RuntimeError, match="unplanned"):
+        command.downgrade(config, "0009_knowledge_base")
+
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT strategy FROM retrieval_events WHERE id='event-unplanned'"
+        ).fetchone() == ("unplanned",)

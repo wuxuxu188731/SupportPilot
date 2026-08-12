@@ -239,6 +239,26 @@ class VectorStoreUnavailableError(KnowledgeError):
         super().__init__("VECTOR_STORE_UNAVAILABLE", f"vector store unavailable: {reason}")
 
 
+class SearchBudgetExceededError(KnowledgeError):
+    code = "SEARCH_BUDGET_EXCEEDED"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "SEARCH_BUDGET_EXCEEDED",
+            "knowledge search budget exceeded",
+        )
+
+
+class SearchInternalError(KnowledgeError):
+    code = "SEARCH_INTERNAL_ERROR"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "SEARCH_INTERNAL_ERROR",
+            "knowledge search could not be completed",
+        )
+
+
 class KnowledgeStore(Protocol):
     """Tenant-scoped document/version/chunk/job persistence boundary.
 

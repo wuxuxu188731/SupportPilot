@@ -1,6 +1,7 @@
 from openai import OpenAI
 
 import os
+import math
 from dataclasses import dataclass
 
 MODEL_NAME = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
@@ -43,12 +44,26 @@ class KnowledgeSettings:
     qdrant_collection: str = "supportpilot_knowledge_te4_1024_v1"
     embedding_model: str = "text-embedding-v4"
     embedding_dimensions: int = 1024
+    min_fused_score: float = 0.0
+    search_timeout_seconds: float = 15.0
 
 
 def get_knowledge_settings() -> KnowledgeSettings:
     api_key = os.getenv("DASHSCOPE_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError("DASHSCOPE_API_KEY is required")
+    min_fused_score = _finite_float(
+        "KNOWLEDGE_MIN_FUSED_SCORE", default="0.0"
+    )
+    search_timeout_seconds = _finite_float(
+        "KNOWLEDGE_SEARCH_TIMEOUT_SECONDS", default="15"
+    )
+    if min_fused_score < 0:
+        raise RuntimeError("KNOWLEDGE_MIN_FUSED_SCORE must be non-negative")
+    if search_timeout_seconds <= 0:
+        raise RuntimeError(
+            "KNOWLEDGE_SEARCH_TIMEOUT_SECONDS must be positive"
+        )
     return KnowledgeSettings(
         dashscope_api_key=api_key,
         dashscope_base_url=os.getenv(
@@ -58,4 +73,17 @@ def get_knowledge_settings() -> KnowledgeSettings:
         qdrant_url=os.getenv(
             "QDRANT_URL", "http://localhost:6333"
         ).rstrip("/"),
+        min_fused_score=min_fused_score,
+        search_timeout_seconds=search_timeout_seconds,
     )
+
+
+def _finite_float(name: str, *, default: str) -> float:
+    raw_value = os.getenv(name, default)
+    try:
+        value = float(raw_value)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be a number") from exc
+    if not math.isfinite(value):
+        raise RuntimeError(f"{name} must be finite")
+    return value
