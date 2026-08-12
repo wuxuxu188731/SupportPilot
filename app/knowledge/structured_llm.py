@@ -1,0 +1,82 @@
+"""Shared non-thinking JSON completion boundary for adaptive retrieval."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Protocol
+
+from app.knowledge.base import SearchInternalError
+from app.knowledge.embeddings import count_tokens
+
+STRUCTURED_MAX_TOKENS = 800
+
+
+@dataclass(frozen=True)
+class StructuredCompletion:
+    raw_json: str
+    estimated_tokens: int
+
+
+class StructuredJSONClient(Protocol):
+    def complete(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        timeout_seconds: float,
+    ) -> StructuredCompletion:
+        raise NotImplementedError
+
+
+class OpenAIStructuredJSONClient:
+    """Call an OpenAI-compatible SDK with a fixed JSON-only contract."""
+
+    def __init__(self, client, *, model_name: str) -> None:
+        self._client = client
+        self._model_name = model_name
+
+    def complete(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+        timeout_seconds: float,
+    ) -> StructuredCompletion:
+        try:
+            response = self._client.chat.completions.create(
+                model=self._model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                response_format={"type": "json_object"},
+                extra_body={"thinking": {"type": "disabled"}},
+                max_tokens=STRUCTURED_MAX_TOKENS,
+                timeout=timeout_seconds,
+            )
+        except Exception as exc:
+            raise SearchInternalError() from exc
+
+        choices = getattr(response, "choices", None)
+        if not isinstance(choices, (list, tuple)) or len(choices) != 1:
+            raise SearchInternalError()
+        choice = choices[0]
+        if getattr(choice, "finish_reason", None) == "length":
+            raise SearchInternalError()
+        message = getattr(choice, "message", None)
+        if message is None or not hasattr(message, "content"):
+            raise SearchInternalError()
+        content = message.content
+        if content is None:
+            raw_json = ""
+        elif isinstance(content, str):
+            raw_json = content
+        else:
+            raise SearchInternalError()
+
+        return StructuredCompletion(
+            raw_json=raw_json,
+            estimated_tokens=count_tokens(
+                system_prompt + user_prompt + raw_json
+            ),
+        )
