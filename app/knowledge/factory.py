@@ -24,7 +24,11 @@ from app.knowledge.dashscope_embeddings import DashScopeEmbeddingClient
 from app.knowledge.document_loader import DocumentLoader
 from app.knowledge.ingestion import KnowledgeIngestionService
 from app.knowledge.qdrant_store import QdrantVectorStore
-from app.knowledge.retrieval import BaselineKnowledgeSearchService
+from app.knowledge.retrieval import BaselineKnowledgeSearchService, HybridRetriever
+from app.knowledge.service import AdaptiveKnowledgeSearchService
+from app.knowledge.structured_llm import OpenAIStructuredJSONClient
+from app.knowledge.planning import QueryPlanner
+from app.knowledge.evidence import EvidenceAssessor
 from app.knowledge.sqlite_store import SQLiteKnowledgeStore
 
 # Guard against an accidental eager probe. Keep in sync with the client
@@ -40,6 +44,8 @@ class KnowledgeServices:
     store: SQLiteKnowledgeStore
     ingestion: KnowledgeIngestionService
     baseline: BaselineKnowledgeSearchService
+    retriever: HybridRetriever
+    adaptive: AdaptiveKnowledgeSearchService
 
 
 def create_knowledge_services(
@@ -47,6 +53,8 @@ def create_knowledge_services(
     settings: KnowledgeSettings,
     *,
     qdrant_client: QdrantClient | None = None,
+    llm_client=None,
+    model_name: str = "deepseek-v4-flash",
 ) -> KnowledgeServices:
     """Build the production knowledge service graph.
 
@@ -96,14 +104,38 @@ def create_knowledge_services(
         embedding_dimensions=settings.embedding_dimensions,
     )
 
+    retriever = HybridRetriever(
+        store=store,
+        embedding=embedding,
+        vector_store=vector_store,
+    )
     baseline = BaselineKnowledgeSearchService(
         store=store,
         embedding=embedding,
         vector_store=vector_store,
+        retriever=retriever,
+    )
+    if llm_client is None:
+        from app.core.config import create_llm_client
+        llm_client = create_llm_client()
+    structured = OpenAIStructuredJSONClient(
+        llm_client, model_name=model_name
+    )
+    adaptive = AdaptiveKnowledgeSearchService(
+        store=store,
+        retriever=retriever,
+        planner=QueryPlanner(structured),
+        assessor=EvidenceAssessor(
+            client=structured,
+            min_fused_score=settings.min_fused_score,
+        ),
+        timeout_seconds=settings.search_timeout_seconds,
     )
 
     return KnowledgeServices(
         store=store,
         ingestion=ingestion,
         baseline=baseline,
+        retriever=retriever,
+        adaptive=adaptive,
     )

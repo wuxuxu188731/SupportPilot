@@ -38,6 +38,13 @@ def test_main_wires_sqlite_service_without_global_messages(
       "create_ticket",
       "add_ticket_note",
   }
+  assert [
+      item["function"]["name"]
+      for item in main.composite_tool_gateway.definitions
+  ] == [
+      "get_order", "get_logistics", "create_ticket",
+      "add_ticket_note", "search_knowledge",
+  ]
   assert not hasattr(main, "messages")
   assert not hasattr(main, "TOOL_FUNCTIONS")
   assert not hasattr(main, "TOOL_DEFINITIONS")

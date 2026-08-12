@@ -24,6 +24,8 @@ from app.organizations.sqlite_store import SQLiteOrganizationStore
 from app.sessions.sqlite_store import SQLiteSessionStore
 from app.users.sqlite_store import SQLiteUserStore
 from app.tools.support_factory import create_customer_support_tool_gateway
+from app.tools.knowledge_gateway import KnowledgeToolGateway
+from app.tools.composite_gateway import CompositeToolGateway
 
 
 
@@ -43,18 +45,6 @@ organization_service = OrganizationService(
 
 support_tool_gateway = create_customer_support_tool_gateway(
   database_path,
-)
-support_agent_runner = CustomerSupportAgentRunner(
-  client=client,
-  gateway=support_tool_gateway,
-  model_name=MODEL_NAME,
-)
-
-chat_service = ChatService(
-  store=session_store,
-  run_agent=support_agent_runner,
-  locks=ConversationLockRegistry(),
-  base_system_prompt=SUPPORT_SYSTEM_PROMPT,
 )
 token_service = AccessTokenService(
   secret_key=get_auth_secret_key(),
@@ -78,6 +68,26 @@ get_current_tenant = create_current_tenant_dependency(
 knowledge_services = create_knowledge_services(
     database_path=database_path,
     settings=get_knowledge_settings(),
+    llm_client=client,
+    model_name=MODEL_NAME,
+)
+knowledge_tool_gateway = KnowledgeToolGateway(
+  service=knowledge_services.adaptive,
+)
+composite_tool_gateway = CompositeToolGateway([
+  support_tool_gateway,
+  knowledge_tool_gateway,
+])
+support_agent_runner = CustomerSupportAgentRunner(
+  client=client,
+  gateway=composite_tool_gateway,
+  model_name=MODEL_NAME,
+)
+chat_service = ChatService(
+  store=session_store,
+  run_agent=support_agent_runner,
+  locks=ConversationLockRegistry(),
+  base_system_prompt=SUPPORT_SYSTEM_PROMPT,
 )
 
 app.include_router(

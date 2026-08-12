@@ -58,12 +58,17 @@ def test_factory_wires_real_adapters_without_network(tmp_path, monkeypatch):
     qdrant = RecordingQdrantClient()
 
     services = create_knowledge_services(
-        tmp_path / "app.db", settings, qdrant_client=qdrant
+        tmp_path / "app.db", settings, qdrant_client=qdrant,
+        llm_client=object(), model_name="test-model"
     )
 
     assert isinstance(services.store, SQLiteKnowledgeStore)
     assert isinstance(services.ingestion, KnowledgeIngestionService)
     assert isinstance(services.baseline, BaselineKnowledgeSearchService)
+    from app.knowledge.service import AdaptiveKnowledgeSearchService
+    from app.knowledge.retrieval import HybridRetriever
+    assert isinstance(services.adaptive, AdaptiveKnowledgeSearchService)
+    assert isinstance(services.retriever, HybridRetriever)
 
     # The injected dashscope client + qdrant vector store are real (not fakes),
     # yet assembly touched the network zero times.
@@ -86,7 +91,9 @@ def test_factory_without_injected_qdrant_never_probes_network(tmp_path, monkeypa
         qdrant_url="http://qdrant.invalid:6333",
     )
 
-    services = create_knowledge_services(tmp_path / "app.db", settings)
+    services = create_knowledge_services(
+        tmp_path / "app.db", settings, llm_client=object()
+    )
 
     # Construction succeeded without connecting: the vector store is wired but
     # collection init is deferred.

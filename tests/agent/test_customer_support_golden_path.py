@@ -15,6 +15,8 @@ from app.organizations.sqlite_store import SQLiteOrganizationStore
 from app.sessions.sqlite_store import SQLiteSessionStore
 from app.tickets.sqlite_store import SQLiteTicketStore
 from app.tools.support_factory import create_customer_support_tool_gateway
+from app.tools.knowledge_gateway import KnowledgeToolGateway
+from app.tools.composite_gateway import CompositeToolGateway
 from app.users.sqlite_store import SQLiteUserStore
 
 
@@ -301,6 +303,73 @@ def test_same_agent_runner_rebinds_between_tenants(tmp_path):
     assert "企业B键盘 x1" in second_messages[2]["content"]
     assert "企业B键盘 x1" not in first_messages[2]["content"]
     assert "企业A耳机 x1" not in second_messages[2]["content"]
+
+
+def test_business_and_knowledge_tools_share_one_grounded_turn(tmp_path):
+    scope = build_golden_path(tmp_path)
+
+    class FakeAdaptiveService:
+        calls = []
+
+        def search(self, **kwargs):
+            self.calls.append(kwargs)
+            payload = {
+                "ok": True,
+                "data": {
+                    "result_code": "KNOWLEDGE_FOUND",
+                    "strategy": "multi",
+                    "evidence_status": "sufficient",
+                    "citations": [{
+                        "citation_id": "C1",
+                        "document_id": "doc-a",
+                        "version_id": "version-a",
+                        "chunk_id": "chunk-a",
+                        "title": "Delay compensation",
+                        "heading_path": "/eligibility",
+                        "content": "Compensation applies after the promised date.",
+                    }],
+                    "retrieval_summary": {
+                        "strategy": "multi",
+                        "round_count": 1,
+                        "evidence_status": "sufficient",
+                        "latency_ms": 2,
+                    },
+                },
+            }
+            return SimpleNamespace(public_dict=lambda: payload)
+
+    adaptive = FakeAdaptiveService()
+    composite = CompositeToolGateway([
+        create_customer_support_tool_gateway(scope["database_path"]),
+        KnowledgeToolGateway(service=adaptive),
+    ])
+    client = FakeCompletionClient([
+        tool_call_response("call-order", "get_order", {"order_no": "ORD-GOLDEN-001"}),
+        tool_call_response("call-logistics", "get_logistics", {"order_no": "ORD-GOLDEN-001"}),
+        tool_call_response(
+            "call-knowledge", "search_knowledge",
+            {"question": "delay compensation eligibility and exclusions"},
+        ),
+        final_response("The delay compensation policy may apply [C1]."),
+    ])
+    agent = CustomerSupportAgentRunner(
+        client=client, gateway=composite, model_name="fake-model"
+    )
+
+    result = agent(
+        messages=[{"role": "user", "content": "Does this delayed order qualify?"}],
+        context=scope["context"],
+    )
+
+    assert [
+        event.tool_call_name
+        for event in result.events
+        if event.type == "tool_call.completed"
+    ] == ["get_order", "get_logistics", "search_knowledge"]
+    assert [item.citation_id for item in result.citations] == ["C1"]
+    assert result.retrieval_summary.strategy == "multi"
+    assert result.answer_incomplete is False
+    assert adaptive.calls[0]["organization_id"] == scope["context"].organization_id
 
 
 def test_agent_can_retry_after_gateway_validation_failure(tmp_path):
