@@ -229,16 +229,14 @@ def test_sqlite_second_pass_filters_old_version_and_cross_org(
     ]
 
 
-def test_adjacent_same_document_chunks_keep_only_the_higher_score_one(
+def test_adjacent_ordinals_with_distinct_headings_are_all_kept(
     retrieval_scope,
 ):
-    """Same document + version, ordinal difference of 1: only the higher-score
-    candidate survives dedupe. Ordinal-5 chunk differs by more than 1 from every
-    kept ordinal, so it survives."""
+    """Ordinal adjacency is document order, not evidence duplication."""
     retrieval_scope.vector.candidates = [
         _candidate("chunk-a0", score=0.9, ordinal=0),
-        _candidate("chunk-a1", score=0.8, ordinal=1),   # |0-1| == 1, lower
-        _candidate("chunk-a2", score=0.7, ordinal=2),   # |2-1| == 1... but the
+        _candidate("chunk-a1", score=0.8, ordinal=1),
+        _candidate("chunk-a2", score=0.7, ordinal=2),
         _candidate("chunk-a5", score=0.6, ordinal=5, document_id="doc-b"),
     ]
 
@@ -247,14 +245,12 @@ def test_adjacent_same_document_chunks_keep_only_the_higher_score_one(
         question="退货",
     )
 
-    ids = [c.chunk_id for c in result.citations]
-    # chunk-a0 (score 0.9) beats chunk-a1 (score 0.8) since they are adjacent;
-    # chunk-a2 (score 0.7) is adjacent to chunk-a1 (dropped) but NOT to
-    # chunk-a0 (difference 2), so it survives (still same document doc-a).
-    # chunk-a5 (doc-b, ordinal 5) is a DIFFERENT document: it survives because
-    # adjacency is document-scoped AND its ordinal is not adjacent to any kept
-    # ordinal in doc-a.
-    assert ids == ["chunk-a0", "chunk-a2", "chunk-a5"]
+    assert [c.chunk_id for c in result.citations] == [
+        "chunk-a0",
+        "chunk-a1",
+        "chunk-a2",
+        "chunk-a5",
+    ]
 
 
 def test_adjacent_chunks_from_different_documents_are_both_kept(
@@ -289,6 +285,19 @@ def test_adjacent_chunks_from_different_documents_are_both_kept(
 
     ids = [c.chunk_id for c in result.citations]
     assert ids == ["chunk-b1", "chunk-a2"]
+
+
+def test_rank_unique_collapses_duplicate_resolved_chunk_ids():
+    """A duplicated SQLite resolution row cannot duplicate final evidence."""
+    ref = _chunk_ref(chunk_id="chunk-a0", ordinal=0)
+    candidate = _candidate("chunk-a0", score=0.9, ordinal=0)
+
+    ranked = BaselineKnowledgeSearchService._rank_unique(
+        [ref, ref],
+        {candidate.chunk_id: candidate},
+    )
+
+    assert ranked == [ref]
 
 
 def test_rebuilds_order_from_candidate_scores_not_db_default_order(

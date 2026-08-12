@@ -117,7 +117,7 @@ class BaselineKnowledgeSearchService:
                     candidate_ids=list(candidate_by_id.keys()),
                 )
 
-                ranked = self._rank_and_dedupe(resolved, candidate_by_id)
+                ranked = self._rank_unique(resolved, candidate_by_id)
                 selected = self._select_within_budget(ranked)
                 if selected:
                     outcome = "sufficient"
@@ -167,20 +167,15 @@ class BaselineKnowledgeSearchService:
     # ------------------------------------------------------------- private
 
     @staticmethod
-    def _rank_and_dedupe(
+    def _rank_unique(
         resolved: Sequence[ChunkWithDocumentTitle],
         candidate_by_id: dict[str, VectorCandidate],
     ) -> list[ChunkWithDocumentTitle]:
-        """Order resolved chunks by candidate score descending, then drop the
-        lower-score member of any same-document, same-version,
-        ordinal-difference-1 pair.
+        """Order active chunks by fused score and retain each chunk ID once.
 
-        Order is rebuilt from candidate scores (``candidate_by_id``), never from
-        the store's default row order. Because we walk in descending score order,
-        any already-kept neighbor always outranks the current candidate, so
-        "adjacent" correctly means "keep the higher score". Adjacency is scoped
-        to a single document+version so chunks of different documents never
-        collide even if they share a version_id and differ by one ordinal.
+        Ordinal describes document order, not semantic duplication. In
+        particular, consecutive Markdown sections commonly have adjacent
+        ordinals while carrying complementary policy evidence.
         """
         ranked = sorted(
             resolved,
@@ -188,25 +183,12 @@ class BaselineKnowledgeSearchService:
             reverse=True,
         )
         kept: list[ChunkWithDocumentTitle] = []
-        # Collapse only CONTIGUOUS fragments of the SAME document+version, so
-        # key on document_id too -- otherwise chunks from different documents
-        # that share a version_id and differ by one ordinal would collide and a
-        # valid hit could be dropped.
-        kept_doc_ver_ord: set[tuple[str, str, int]] = set()
+        seen_ids: set[str] = set()
         for ref in ranked:
-            document = ref.document_id
-            version = ref.version_id
-            ordinal = ref.ordinal
-            adjacent = any(
-                d == document
-                and v == version
-                and abs(o - ordinal) == 1
-                for (d, v, o) in kept_doc_ver_ord
-            )
-            if adjacent:
+            if ref.chunk_id in seen_ids:
                 continue
+            seen_ids.add(ref.chunk_id)
             kept.append(ref)
-            kept_doc_ver_ord.add((document, version, ordinal))
         return kept
 
     @classmethod
