@@ -198,7 +198,14 @@ class QdrantVectorStore:
         query_embedding: EmbeddingVector,
         prefetch_limit: int,
         result_limit: int,
+        timeout_seconds: int = 5,
     ) -> list[VectorCandidate]:
+        if (
+            isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, int)
+            or timeout_seconds <= 0
+        ):
+            raise ValueError("timeout_seconds must be a positive integer")
         versions = list(active_version_ids)
         if not versions:
             return []
@@ -229,6 +236,7 @@ class QdrantVectorStore:
                 limit=result_limit,
                 with_payload=True,
                 with_vectors=False,
+                timeout=timeout_seconds,
             )
         except (UnexpectedResponse, ConnectionError, TimeoutError) as exc:
             raise VectorStoreUnavailableError(

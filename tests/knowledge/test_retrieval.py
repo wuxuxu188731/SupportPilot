@@ -19,7 +19,7 @@ from app.knowledge.base import (
     VectorStoreUnavailableError,
 )
 from app.knowledge.embeddings import EmbeddingVector
-from app.knowledge.retrieval import BaselineKnowledgeSearchService
+from app.knowledge.retrieval import BaselineKnowledgeSearchService, HybridRetriever
 
 
 def _chunk_ref(
@@ -84,9 +84,11 @@ class _Store:
 class _Embedding:
     def __init__(self):
         self.query_calls = []
+        self.query_timeouts = []
 
-    def embed_query(self, text):
+    def embed_query(self, text, *, timeout_seconds=5):
         self.query_calls.append(text)
+        self.query_timeouts.append(timeout_seconds)
         # token_count grows with each query so tests can detect extra calls.
         return EmbeddingVector(
             dense=(0.1,) * 3,
@@ -155,6 +157,56 @@ def _candidate(chunk_id, *, score, version_id="version-a", ordinal=0,
         ordinal=ordinal,
         score=score,
     )
+
+
+def test_hybrid_retriever_returns_ranked_active_chunks_without_event(
+    retrieval_scope,
+):
+    retrieval_scope.vector.candidates = [
+        _candidate("chunk-a2", score=0.91, ordinal=2),
+        _candidate("chunk-old", score=0.90, version_id="old"),
+        _candidate("chunk-a0", score=0.80, ordinal=0),
+    ]
+    retriever = HybridRetriever(
+        store=retrieval_scope.store,
+        embedding=retrieval_scope.embedding,
+        vector_store=retrieval_scope.vector,
+    )
+    timeout_values = iter([4, 3])
+
+    result = retriever.retrieve(
+        organization_id="org-a",
+        query="return conditions",
+        timeout_provider=lambda: next(timeout_values),
+    )
+
+    assert [item.chunk.chunk_id for item in result.ranked_chunks] == [
+        "chunk-a2",
+        "chunk-a0",
+    ]
+    assert [item.fused_score for item in result.ranked_chunks] == [0.91, 0.80]
+    assert result.query_tokens == 3
+    assert retrieval_scope.embedding.query_timeouts == [4]
+    assert retrieval_scope.vector.search_calls[0]["timeout_seconds"] == 3
+    assert retrieval_scope.store.events == []
+
+
+def test_baseline_using_shared_retriever_still_records_exactly_one_event(
+    retrieval_scope,
+):
+    retrieval_scope.vector.candidates = [
+        _candidate("chunk-a0", score=0.9, ordinal=0)
+    ]
+
+    result = retrieval_scope.service.search(
+        organization_id="org-a", question="returns"
+    )
+
+    assert [item.chunk_id for item in result.citations] == ["chunk-a0"]
+    assert len(retrieval_scope.store.events) == 1
+    assert retrieval_scope.store.events[0].strategy == "baseline"
+    assert retrieval_scope.embedding.query_timeouts == [5]
+    assert retrieval_scope.vector.search_calls[0]["timeout_seconds"] == 5
 
 
 # ------------------------------------------------------------------ Step 1
@@ -380,11 +432,15 @@ def test_qdrant_failure_is_not_converted_to_empty_result(retrieval_scope):
 
 def test_embedding_failure_maps_to_embedding_unavailable(retrieval_scope):
     class _BoomEmbedding(_Embedding):
-        def embed_query(self, text):
-            super().embed_query(text)
+        def embed_query(self, text, *, timeout_seconds=5):
+            super().embed_query(text, timeout_seconds=timeout_seconds)
             raise EmbeddingUnavailableError(reason="provider down")
 
-    retrieval_scope.service._embedding = _BoomEmbedding()
+    retrieval_scope.service = BaselineKnowledgeSearchService(
+        store=retrieval_scope.store,
+        embedding=_BoomEmbedding(),
+        vector_store=retrieval_scope.vector,
+    )
     result = retrieval_scope.service.search(
         organization_id="org-a",
         question="退货",

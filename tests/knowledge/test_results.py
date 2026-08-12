@@ -10,8 +10,10 @@ from app.knowledge.results import (
     BaselineSearchResult,
     Citation,
     RetrievalCandidateTrace,
+    QueryRetrievalResult,
     RetrievalSummary,
     RetrievalTrace,
+    ScoredChunk,
 )
 
 
@@ -127,3 +129,17 @@ def test_error_serialization_exposes_only_stable_code_and_safe_message():
     assert payload["error"]["code"] == "VECTOR_STORE_UNAVAILABLE"
     assert payload["error"]["message"] == error.safe_message
     assert payload["error"]["message"].startswith("vector store unavailable")
+
+
+def test_query_retrieval_result_keeps_internal_ranked_values():
+    chunk = object()
+    scored = ScoredChunk(chunk=chunk, fused_score=0.75)
+    result = QueryRetrievalResult(
+        query="returns",
+        ranked_chunks=(scored,),
+        raw_candidates=(),
+        query_tokens=2,
+    )
+
+    assert result.ranked_chunks == (scored,)
+    assert result.query_tokens == 2

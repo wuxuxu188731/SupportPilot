@@ -14,6 +14,7 @@ from dataclasses import dataclass, field, fields
 from typing import Literal, Sequence
 
 from app.knowledge.base import ChunkWithDocumentTitle, KnowledgeError
+from app.knowledge.vector_store import VectorCandidate
 
 
 def _public_dict(instance) -> dict:
@@ -103,6 +104,24 @@ class RetrievalTrace:
             "schema_version": self.schema_version,
             "candidates": [candidate.to_dict() for candidate in self.candidates],
         }
+
+
+@dataclass(frozen=True)
+class ScoredChunk:
+    """One SQLite-validated chunk paired with its fused vector score."""
+
+    chunk: ChunkWithDocumentTitle
+    fused_score: float
+
+
+@dataclass(frozen=True)
+class QueryRetrievalResult:
+    """Internal result of one event-free hybrid retrieval query."""
+
+    query: str
+    ranked_chunks: tuple[ScoredChunk, ...]
+    raw_candidates: tuple[VectorCandidate, ...]
+    query_tokens: int
 
 
 @dataclass(frozen=True)

@@ -40,5 +40,7 @@ class EmbeddingClient(Protocol):
     def embed_documents(self, texts: Sequence[str]) -> list[EmbeddingVector]:
         raise NotImplementedError
 
-    def embed_query(self, text: str) -> EmbeddingVector:
+    def embed_query(
+        self, text: str, *, timeout_seconds: int = 5
+    ) -> EmbeddingVector:
         raise NotImplementedError

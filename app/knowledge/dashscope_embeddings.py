@@ -17,6 +17,7 @@ errors are never retried.
 from __future__ import annotations
 
 import time
+from math import floor
 from collections.abc import Sequence
 from typing import Callable
 
@@ -56,6 +57,7 @@ class DashScopeEmbeddingClient:
         base_url: str | None = None,
         call: _Call | None = None,
         sleep: Callable[[float], object] | None = None,
+        monotonic: Callable[[], float] | None = None,
     ) -> None:
         self._api_key = api_key
         if base_url:
@@ -71,6 +73,7 @@ class DashScopeEmbeddingClient:
         self._sleep: Callable[[float], object] = (
             sleep if sleep is not None else time.sleep
         )
+        self._monotonic = monotonic or time.monotonic
 
     def embed_documents(
         self, texts: Sequence[str]
@@ -81,9 +84,12 @@ class DashScopeEmbeddingClient:
             vectors.extend(self._embed_batch(list(batch), text_type="document", timeout=None))
         return vectors
 
-    def embed_query(self, text: str) -> EmbeddingVector:
+    def embed_query(
+        self, text: str, *, timeout_seconds: int = QUERY_TIMEOUT_SECONDS
+    ) -> EmbeddingVector:
+        self._validate_timeout(timeout_seconds)
         vectors = self._embed_batch(
-            [text], text_type="query", timeout=QUERY_TIMEOUT_SECONDS
+            [text], text_type="query", timeout=timeout_seconds
         )
         return vectors[0]
 
@@ -104,10 +110,22 @@ class DashScopeEmbeddingClient:
         }
         if text_type == "query":
             kwargs["instruct"] = QUERY_INSTRUCT
+        deadline = None
         if timeout is not None:
-            kwargs["timeout"] = timeout
+            deadline = self._monotonic() + timeout
 
         for attempt in range(RETRIES_PER_CALL + 1):
+            if deadline is not None:
+                attempt_timeout = (
+                    timeout
+                    if attempt == 0
+                    else floor(deadline - self._monotonic())
+                )
+                if attempt_timeout < 1:
+                    raise EmbeddingUnavailableError(
+                        reason="query embedding deadline exhausted"
+                    )
+                kwargs["timeout"] = attempt_timeout
             try:
                 response = self._call(**kwargs)
                 if self._is_temporary_failure(response):
@@ -135,6 +153,15 @@ class DashScopeEmbeddingClient:
 
         # Unreachable: the loop always returns or raises.
         raise RuntimeError("unreachable")  # pragma: no cover
+
+    @staticmethod
+    def _validate_timeout(timeout_seconds: int) -> None:
+        if (
+            isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, int)
+            or timeout_seconds <= 0
+        ):
+            raise ValueError("timeout_seconds must be a positive integer")
 
     @staticmethod
     def _is_temporary_failure(response: object) -> bool:

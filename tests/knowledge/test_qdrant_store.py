@@ -304,6 +304,38 @@ def test_search_filters_both_prefetches_by_tenant_and_active_versions():
     )
 
 
+def test_search_passes_timeout_to_query_points():
+    client = FakeQdrantClient(points=[])
+    store = QdrantVectorStore(client=client, collection_name=COLLECTION)
+
+    store.search(
+        organization_id="org-a",
+        active_version_ids=["version-1"],
+        query_embedding=embedding_vector(),
+        prefetch_limit=8,
+        result_limit=8,
+        timeout_seconds=3,
+    )
+
+    assert client.query_calls[0]["timeout"] == 3
+
+
+@pytest.mark.parametrize("timeout_seconds", [0, -1, 1.5, True])
+def test_search_rejects_non_positive_integer_timeout(timeout_seconds):
+    client = FakeQdrantClient(points=[])
+    store = QdrantVectorStore(client=client, collection_name=COLLECTION)
+
+    with pytest.raises(ValueError):
+        store.search(
+            organization_id="org-a",
+            active_version_ids=["version-1"],
+            query_embedding=embedding_vector(),
+            prefetch_limit=8,
+            result_limit=8,
+            timeout_seconds=timeout_seconds,
+        )
+
+
 def test_search_returns_empty_without_calling_qdrant_for_no_active_versions():
     client = FakeQdrantClient(points=[])
     store = QdrantVectorStore(client=client, collection_name=COLLECTION)

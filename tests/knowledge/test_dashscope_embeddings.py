@@ -98,6 +98,67 @@ def test_query_uses_query_mode_instruction_and_timeout():
     }]
 
 
+def test_query_retry_shares_deadline_and_uses_remaining_whole_seconds():
+    responses = [
+        SimpleNamespace(
+            status_code=503,
+            output={},
+            usage={},
+            code="ServiceUnavailable",
+            message="retry",
+        ),
+        successful_response(1),
+    ]
+    call = RecordingCall(lambda _: responses.pop(0))
+    clock_values = iter([0.0, 1.2])
+    client = DashScopeEmbeddingClient(
+        api_key="test-key",
+        call=call,
+        sleep=lambda _: None,
+        monotonic=lambda: next(clock_values),
+    )
+
+    client.embed_query("returns", timeout_seconds=5)
+
+    assert [request["timeout"] for request in call.kwargs] == [5, 3]
+
+
+def test_query_does_not_retry_when_less_than_one_second_remains():
+    call = RecordingCall(
+        lambda _: SimpleNamespace(
+            status_code=503,
+            output={},
+            usage={},
+            code="ServiceUnavailable",
+            message="retry",
+        )
+    )
+    clock_values = iter([0.0, 4.2])
+    client = DashScopeEmbeddingClient(
+        api_key="test-key",
+        call=call,
+        sleep=lambda _: None,
+        monotonic=lambda: next(clock_values),
+    )
+
+    with pytest.raises(EmbeddingUnavailableError):
+        client.embed_query("returns", timeout_seconds=5)
+
+    assert [request["timeout"] for request in call.kwargs] == [5]
+
+
+@pytest.mark.parametrize("timeout_seconds", [0, -1, 1.5, True])
+def test_query_rejects_non_positive_integer_timeout(timeout_seconds):
+    client = DashScopeEmbeddingClient(
+        api_key="test-key",
+        call=RecordingCall(successful_response),
+        sleep=lambda _: None,
+    )
+
+    with pytest.raises(ValueError):
+        client.embed_query("returns", timeout_seconds=timeout_seconds)
+
+
 # --- Step 2: response validation and error conversion --------------------
 
 

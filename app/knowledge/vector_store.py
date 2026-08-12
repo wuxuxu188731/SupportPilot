@@ -55,5 +55,6 @@ class VectorStore(Protocol):
         query_embedding: EmbeddingVector,
         prefetch_limit: int,
         result_limit: int,
+        timeout_seconds: int = 5,
     ) -> list[VectorCandidate]:
         raise NotImplementedError

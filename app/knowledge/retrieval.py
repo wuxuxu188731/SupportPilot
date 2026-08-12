@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import time
 from datetime import datetime, timezone
+from collections.abc import Callable
 from typing import Sequence
 from uuid import uuid4
 
@@ -39,9 +40,11 @@ from app.knowledge.embeddings import EmbeddingClient
 from app.knowledge.results import (
     BaselineSearchResult,
     Citation,
+    QueryRetrievalResult,
     RetrievalCandidateTrace,
     RetrievalSummary,
     RetrievalTrace,
+    ScoredChunk,
     SelectionReason,
 )
 from app.knowledge.vector_store import VectorCandidate, VectorStore
@@ -53,6 +56,80 @@ TOKEN_BUDGET = 3000
 PREFETCH_LIMIT = 8
 RESULT_LIMIT = 8
 MODEL_CALLS = 0
+
+
+class HybridRetriever:
+    """Perform one tenant-scoped hybrid query without top-level side effects."""
+
+    def __init__(
+        self,
+        *,
+        store: KnowledgeStore,
+        embedding: EmbeddingClient,
+        vector_store: VectorStore,
+    ) -> None:
+        self._store = store
+        self._embedding = embedding
+        self._vector_store = vector_store
+
+    def retrieve(
+        self,
+        *,
+        organization_id: str,
+        query: str,
+        timeout_provider: Callable[[], int] | None = None,
+    ) -> QueryRetrievalResult:
+        clean_query = query.strip()
+        if not clean_query:
+            raise InvalidDocumentError(reason="query must not be blank")
+
+        active_versions = self._store.list_active_version_ids(
+            organization_id=organization_id
+        )
+        if not active_versions:
+            return QueryRetrievalResult(
+                query=clean_query,
+                ranked_chunks=(),
+                raw_candidates=(),
+                query_tokens=0,
+            )
+
+        get_timeout = timeout_provider or (lambda: 5)
+        query_embedding = self._embedding.embed_query(
+            clean_query,
+            timeout_seconds=get_timeout(),
+        )
+        candidates = self._vector_store.search(
+            organization_id=organization_id,
+            active_version_ids=active_versions,
+            query_embedding=query_embedding,
+            prefetch_limit=PREFETCH_LIMIT,
+            result_limit=RESULT_LIMIT,
+            timeout_seconds=get_timeout(),
+        )
+
+        candidate_by_id, _ = BaselineKnowledgeSearchService._canonical_candidates(
+            candidates
+        )
+        resolved = self._store.resolve_active_citations(
+            organization_id=organization_id,
+            candidate_ids=list(candidate_by_id),
+        )
+        ranked = BaselineKnowledgeSearchService._rank_unique(
+            resolved, candidate_by_id
+        )
+        return QueryRetrievalResult(
+            query=clean_query,
+            ranked_chunks=tuple(
+                ScoredChunk(
+                    chunk=chunk,
+                    fused_score=candidate_by_id[chunk.chunk_id].score,
+                )
+                for chunk in ranked
+            ),
+            raw_candidates=tuple(candidates),
+            query_tokens=query_embedding.token_count,
+        )
 
 
 class BaselineKnowledgeSearchService:
@@ -70,10 +147,14 @@ class BaselineKnowledgeSearchService:
         store: KnowledgeStore,
         embedding: EmbeddingClient,
         vector_store: VectorStore,
+        retriever: HybridRetriever | None = None,
     ) -> None:
         self._store = store
-        self._embedding = embedding
-        self._vector_store = vector_store
+        self._retriever = retriever or HybridRetriever(
+            store=store,
+            embedding=embedding,
+            vector_store=vector_store,
+        )
 
     # -------------------------------------------------------------- public
 
@@ -101,36 +182,24 @@ class BaselineKnowledgeSearchService:
         selected_chunks: list[ChunkWithDocumentTitle] = []
 
         try:
-            active_versions = self._store.list_active_version_ids(
-                organization_id=organization_id
+            retrieval = self._retriever.retrieve(
+                organization_id=organization_id,
+                query=clean_question,
             )
-            if active_versions:
-                query_embedding = self._embedding.embed_query(clean_question)
-                query_tokens = query_embedding.token_count
-                candidates: list[VectorCandidate] = self._vector_store.search(
-                    organization_id=organization_id,
-                    active_version_ids=active_versions,
-                    query_embedding=query_embedding,
-                    prefetch_limit=PREFETCH_LIMIT,
-                    result_limit=RESULT_LIMIT,
-                )
-
+            query_tokens = retrieval.query_tokens
+            candidates = list(retrieval.raw_candidates)
+            if candidates:
                 candidate_by_id, canonical_rank_by_id = (
                     self._canonical_candidates(candidates)
                 )
-                resolved = self._store.resolve_active_citations(
-                    organization_id=organization_id,
-                    candidate_ids=list(candidate_by_id.keys()),
-                )
-
-                ranked = self._rank_unique(resolved, candidate_by_id)
+                ranked = [item.chunk for item in retrieval.ranked_chunks]
                 selected, selection_reason_by_id = self._select_within_budget(
                     ranked
                 )
                 retrieval_trace = self._build_trace(
                     candidates=candidates,
                     canonical_rank_by_id=canonical_rank_by_id,
-                    resolved=resolved,
+                    resolved=ranked,
                     selection_reason_by_id=selection_reason_by_id,
                 )
                 if selected:
