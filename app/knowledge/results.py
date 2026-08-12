@@ -10,8 +10,8 @@ the retriever.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
-from typing import Sequence
+from dataclasses import dataclass, field, fields
+from typing import Literal, Sequence
 
 from app.knowledge.base import ChunkWithDocumentTitle, KnowledgeError
 
@@ -59,6 +59,52 @@ class RetrievalSummary:
         return _public_dict(self)
 
 
+ResolutionStatus = Literal[
+    "selected",
+    "active",
+    "filtered_inactive_or_invalid",
+]
+SelectionReason = Literal[
+    "selected",
+    "top_k_exceeded",
+    "token_budget_exceeded",
+    "filtered_inactive_or_invalid",
+    "duplicate_chunk_id",
+]
+
+
+@dataclass(frozen=True)
+class RetrievalCandidateTrace:
+    """Content-free diagnostic decision for one fused candidate occurrence."""
+
+    chunk_id: str
+    fused_rank: int
+    fused_score: float
+    resolution_status: ResolutionStatus
+    selection_reason: SelectionReason
+
+    def to_dict(self) -> dict:
+        return _public_dict(self)
+
+
+@dataclass(frozen=True)
+class RetrievalTrace:
+    """Versioned, metadata-only retrieval trace used by eval and audit logs."""
+
+    candidates: Sequence[RetrievalCandidateTrace] = ()
+    schema_version: int = 2
+
+    @classmethod
+    def empty(cls) -> "RetrievalTrace":
+        return cls()
+
+    def to_dict(self) -> dict:
+        return {
+            "schema_version": self.schema_version,
+            "candidates": [candidate.to_dict() for candidate in self.candidates],
+        }
+
+
 @dataclass(frozen=True)
 class BaselineSearchResult:
     """Top-level outcome of a baseline knowledge search.
@@ -74,6 +120,7 @@ class BaselineSearchResult:
     retrieval_summary: RetrievalSummary
     error: KnowledgeError | None
     selected_chunks: Sequence[ChunkWithDocumentTitle]
+    retrieval_trace: RetrievalTrace = field(default_factory=RetrievalTrace.empty)
 
     def public_dict(self) -> dict:
         """HTTP/report-safe shape that never exposes ``selected_chunks``."""

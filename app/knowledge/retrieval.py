@@ -36,7 +36,14 @@ from app.knowledge.base import (
     VectorStoreUnavailableError,
 )
 from app.knowledge.embeddings import EmbeddingClient
-from app.knowledge.results import BaselineSearchResult, Citation, RetrievalSummary
+from app.knowledge.results import (
+    BaselineSearchResult,
+    Citation,
+    RetrievalCandidateTrace,
+    RetrievalSummary,
+    RetrievalTrace,
+    SelectionReason,
+)
 from app.knowledge.vector_store import VectorCandidate, VectorStore
 
 STRATEGY = "baseline"
@@ -84,7 +91,7 @@ class BaselineKnowledgeSearchService:
         start = time.perf_counter()
 
         # State shared between the happy path and the finally-event writer.
-        candidate_json: dict[str, float] = {}
+        retrieval_trace = RetrievalTrace.empty()
         query_tokens = 0
         outcome = "insufficient"
         evidence_status = "insufficient"
@@ -108,17 +115,24 @@ class BaselineKnowledgeSearchService:
                     result_limit=RESULT_LIMIT,
                 )
 
-                candidate_by_id = {c.chunk_id: c for c in candidates}
-                candidate_json = {
-                    c.chunk_id: c.score for c in candidates
-                }
+                candidate_by_id, canonical_rank_by_id = (
+                    self._canonical_candidates(candidates)
+                )
                 resolved = self._store.resolve_active_citations(
                     organization_id=organization_id,
                     candidate_ids=list(candidate_by_id.keys()),
                 )
 
                 ranked = self._rank_unique(resolved, candidate_by_id)
-                selected = self._select_within_budget(ranked)
+                selected, selection_reason_by_id = self._select_within_budget(
+                    ranked
+                )
+                retrieval_trace = self._build_trace(
+                    candidates=candidates,
+                    canonical_rank_by_id=canonical_rank_by_id,
+                    resolved=resolved,
+                    selection_reason_by_id=selection_reason_by_id,
+                )
                 if selected:
                     outcome = "sufficient"
                     evidence_status = "sufficient"
@@ -143,7 +157,7 @@ class BaselineKnowledgeSearchService:
                 organization_id=organization_id,
                 conversation_id=conversation_id,
                 question=clean_question,
-                candidate_json=candidate_json,
+                retrieval_trace=retrieval_trace,
                 selected_ids=[ref.chunk_id for ref in selected_chunks],
                 outcome=outcome,
                 latency_ms=latency_ms,
@@ -162,9 +176,24 @@ class BaselineKnowledgeSearchService:
             retrieval_summary=summary,
             error=error,
             selected_chunks=selected_chunks,
+            retrieval_trace=retrieval_trace,
         )
 
     # ------------------------------------------------------------- private
+
+    @staticmethod
+    def _canonical_candidates(
+        candidates: Sequence[VectorCandidate],
+    ) -> tuple[dict[str, VectorCandidate], dict[str, int]]:
+        """Choose the highest-scored occurrence of each chunk ID."""
+        candidate_by_id: dict[str, VectorCandidate] = {}
+        canonical_rank_by_id: dict[str, int] = {}
+        for rank, candidate in enumerate(candidates, start=1):
+            current = candidate_by_id.get(candidate.chunk_id)
+            if current is None or candidate.score > current.score:
+                candidate_by_id[candidate.chunk_id] = candidate
+                canonical_rank_by_id[candidate.chunk_id] = rank
+        return candidate_by_id, canonical_rank_by_id
 
     @staticmethod
     def _rank_unique(
@@ -194,19 +223,61 @@ class BaselineKnowledgeSearchService:
     @classmethod
     def _select_within_budget(
         cls, ranked: Sequence[ChunkWithDocumentTitle]
-    ) -> list[ChunkWithDocumentTitle]:
+    ) -> tuple[list[ChunkWithDocumentTitle], dict[str, SelectionReason]]:
         """Walk in final order, taking at most ``TOP_K`` chunks whose combined
         token count stays within ``TOKEN_BUDGET``."""
         selected: list[ChunkWithDocumentTitle] = []
+        reasons: dict[str, SelectionReason] = {}
         total = 0
         for ref in ranked:
             if len(selected) >= TOP_K:
-                break
+                reasons[ref.chunk_id] = "top_k_exceeded"
+                continue
             if total + ref.token_count > TOKEN_BUDGET:
+                reasons[ref.chunk_id] = "token_budget_exceeded"
                 continue
             selected.append(ref)
+            reasons[ref.chunk_id] = "selected"
             total += ref.token_count
-        return selected
+        return selected, reasons
+
+    @staticmethod
+    def _build_trace(
+        *,
+        candidates: Sequence[VectorCandidate],
+        canonical_rank_by_id: dict[str, int],
+        resolved: Sequence[ChunkWithDocumentTitle],
+        selection_reason_by_id: dict[str, SelectionReason],
+    ) -> RetrievalTrace:
+        resolved_ids = {ref.chunk_id for ref in resolved}
+        traced: list[RetrievalCandidateTrace] = []
+        for rank, candidate in enumerate(candidates, start=1):
+            is_canonical = canonical_rank_by_id[candidate.chunk_id] == rank
+            if not is_canonical:
+                resolution_status = (
+                    "active"
+                    if candidate.chunk_id in resolved_ids
+                    else "filtered_inactive_or_invalid"
+                )
+                reason: SelectionReason = "duplicate_chunk_id"
+            elif candidate.chunk_id not in resolved_ids:
+                resolution_status = "filtered_inactive_or_invalid"
+                reason = "filtered_inactive_or_invalid"
+            else:
+                reason = selection_reason_by_id[candidate.chunk_id]
+                resolution_status = (
+                    "selected" if reason == "selected" else "active"
+                )
+            traced.append(
+                RetrievalCandidateTrace(
+                    chunk_id=candidate.chunk_id,
+                    fused_rank=rank,
+                    fused_score=candidate.score,
+                    resolution_status=resolution_status,
+                    selection_reason=reason,
+                )
+            )
+        return RetrievalTrace(candidates=tuple(traced))
 
     @staticmethod
     def _build_citations(
@@ -231,7 +302,7 @@ class BaselineKnowledgeSearchService:
         organization_id: str,
         conversation_id: str | None,
         question: str,
-        candidate_json: dict[str, float],
+        retrieval_trace: RetrievalTrace,
         selected_ids: list[str],
         outcome: str,
         latency_ms: int,
@@ -245,7 +316,7 @@ class BaselineKnowledgeSearchService:
             original_query=question,
             planned_queries_json=json.dumps([question]),
             round_count=ROUND_COUNT,
-            candidate_json=json.dumps(candidate_json),
+            candidate_json=json.dumps(retrieval_trace.to_dict()),
             selected_chunk_ids_json=json.dumps(selected_ids),
             outcome=outcome,
             latency_ms=latency_ms,

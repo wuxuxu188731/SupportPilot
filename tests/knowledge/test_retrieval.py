@@ -8,6 +8,7 @@ validation exactly like the real SQLite store (only active, same-org, current-
 version chunks survive).
 """
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -402,23 +403,100 @@ def test_event_records_only_ids_and_scores_not_content(retrieval_scope):
     ]
     retrieval_scope.service.search(organization_id="org-a", question="退货")
 
-    import json
-
     event = retrieval_scope.store.events[-1]
     assert event.strategy == "baseline"
     assert event.round_count == 1
     assert event.model_calls == 0
     # planned_queries_json records the fixed baseline plan: the original query.
     assert json.loads(event.planned_queries_json) == ["退货"]
-    # candidate_json holds only chunk_id -> score pairs (ALL scored candidates).
-    candidates = json.loads(event.candidate_json)
-    assert candidates == {"chunk-a0": 0.9, "chunk-a2": 0.8}
+    trace = json.loads(event.candidate_json)
+    assert trace == {
+        "schema_version": 2,
+        "candidates": [
+            {
+                "chunk_id": "chunk-a0",
+                "fused_rank": 1,
+                "fused_score": 0.9,
+                "resolution_status": "selected",
+                "selection_reason": "selected",
+            },
+            {
+                "chunk_id": "chunk-a2",
+                "fused_rank": 2,
+                "fused_score": 0.8,
+                "resolution_status": "selected",
+                "selection_reason": "selected",
+            },
+        ],
+    }
     # selected_chunk_ids_json holds only ids (final order), no body text.
     assert json.loads(event.selected_chunk_ids_json) == ["chunk-a0", "chunk-a2"]
-    serialized = json.dumps(candidates) + json.dumps(event.selected_chunk_ids_json)
+    serialized = json.dumps(trace) + json.dumps(event.selected_chunk_ids_json)
     assert "七天无理由退货" not in serialized
     assert "退货政策" not in serialized
 
     # estimated_tokens = query-embedding token_count + selected chunk tokens.
     assert event.estimated_tokens == 3 + 20 + 20
     assert event.original_query == "退货"
+
+
+def test_trace_explains_budget_filter_top_k_and_duplicate_decisions(
+    retrieval_scope,
+):
+    for chunk_id, ordinal, tokens in [
+        ("oversized", 10, 3001),
+        ("extra", 11, 10),
+        ("overflow", 12, 10),
+    ]:
+        retrieval_scope.store.active[chunk_id] = _chunk_ref(
+            chunk_id=chunk_id,
+            ordinal=ordinal,
+            token_count=tokens,
+            heading_path=f"/诊断/{chunk_id}",
+        )
+    retrieval_scope.vector.candidates = [
+        _candidate("chunk-a0", score=0.99, ordinal=0),
+        _candidate("oversized", score=0.95, ordinal=10),
+        _candidate("chunk-a1", score=0.9, ordinal=1),
+        _candidate("chunk-a2", score=0.8, ordinal=2),
+        _candidate("chunk-a5", score=0.7, ordinal=5, document_id="doc-b"),
+        _candidate("extra", score=0.6, ordinal=11),
+        _candidate("overflow", score=0.5, ordinal=12),
+        _candidate("filtered", score=0.4, ordinal=13),
+        _candidate("chunk-a0", score=0.3, ordinal=0),
+    ]
+
+    result = retrieval_scope.service.search(
+        organization_id="org-a",
+        question="诊断候选选择",
+    )
+
+    assert [c.chunk_id for c in result.citations] == [
+        "chunk-a0", "chunk-a1", "chunk-a2", "chunk-a5", "extra"
+    ]
+    decisions = [
+        (
+            item.chunk_id,
+            item.resolution_status,
+            item.selection_reason,
+        )
+        for item in result.retrieval_trace.candidates
+    ]
+    assert decisions == [
+        ("chunk-a0", "selected", "selected"),
+        ("oversized", "active", "token_budget_exceeded"),
+        ("chunk-a1", "selected", "selected"),
+        ("chunk-a2", "selected", "selected"),
+        ("chunk-a5", "selected", "selected"),
+        ("extra", "selected", "selected"),
+        ("overflow", "active", "top_k_exceeded"),
+        (
+            "filtered",
+            "filtered_inactive_or_invalid",
+            "filtered_inactive_or_invalid",
+        ),
+        ("chunk-a0", "active", "duplicate_chunk_id"),
+    ]
+    serialized = json.dumps(result.retrieval_trace.to_dict(), ensure_ascii=False)
+    assert "policy content" not in serialized
+    assert "诊断候选选择" not in serialized

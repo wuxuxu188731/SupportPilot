@@ -9,7 +9,9 @@ from app.knowledge.base import VectorStoreUnavailableError
 from app.knowledge.results import (
     BaselineSearchResult,
     Citation,
+    RetrievalCandidateTrace,
     RetrievalSummary,
+    RetrievalTrace,
 )
 
 
@@ -57,6 +59,33 @@ def test_retrieval_summary_serializes_without_internal_reasoning():
     }
 
 
+def test_retrieval_trace_serializes_metadata_only():
+    trace = RetrievalTrace(
+        candidates=(
+            RetrievalCandidateTrace(
+                chunk_id="chunk-a",
+                fused_rank=1,
+                fused_score=0.9,
+                resolution_status="selected",
+                selection_reason="selected",
+            ),
+        ),
+    )
+
+    assert trace.to_dict() == {
+        "schema_version": 2,
+        "candidates": [
+            {
+                "chunk_id": "chunk-a",
+                "fused_rank": 1,
+                "fused_score": 0.9,
+                "resolution_status": "selected",
+                "selection_reason": "selected",
+            }
+        ],
+    }
+
+
 def test_baseline_search_result_serialization_hides_selected_chunks():
     selected = _citation()  # stand-in: two selected objects
     result = BaselineSearchResult(
@@ -77,6 +106,11 @@ def test_baseline_search_result_serialization_hides_selected_chunks():
     # The full body text appears in the structured citation, not duplicated
     # anywhere else in the payload (selected_chunks are hidden entirely).
     assert payload["citations"][0]["content"] == "退货期限为收货后七天内。"
+    assert result.retrieval_trace.to_dict() == {
+        "schema_version": 2,
+        "candidates": [],
+    }
+    assert "retrieval_trace" not in payload
 
 
 def test_error_serialization_exposes_only_stable_code_and_safe_message():
