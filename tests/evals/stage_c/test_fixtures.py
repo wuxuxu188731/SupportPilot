@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from app.evals.stage_c.fixtures import (
     validate_golden_headings,
 )
 from app.evals.stage_c.models import StageCScenario, load_stage_c_cases
+from app.knowledge.base import DocumentStatus
 from app.knowledge.chunking import KnowledgeChunker
 from app.knowledge.document_loader import DocumentLoader
 from app.knowledge.ingestion import KnowledgeIngestionService
@@ -228,6 +230,65 @@ def test_prepare_is_resumable_without_duplicate_documents(prepared_fixture, vali
     resumed = prepared_fixture.prepare(cases=valid_cases, specs=specs)
 
     assert resumed == original
+
+
+def test_restore_reuses_a_matching_manifest_without_ingestion(
+    prepared_fixture, specs
+):
+    original = prepared_fixture.manifest
+
+    restored = prepared_fixture.restore(original, specs=specs)
+
+    assert restored == original
+    assert prepared_fixture.identity_index.identities
+
+
+def test_restore_rejects_active_version_drift(prepared_fixture, specs):
+    original = prepared_fixture.manifest
+    first = original.documents[0]
+    broken = FixtureManifest(
+        (replace(first, active_version_id="missing-version"), *original.documents[1:])
+    )
+
+    with pytest.raises(ValueError, match="active version drift"):
+        prepared_fixture.restore(broken, specs=specs)
+
+
+def test_restore_reactivates_document_left_disabled_by_interruption(
+    prepared_fixture, specs
+):
+    document = prepared_fixture.document("org_a", "returns_exchange")
+    prepared_fixture._store.set_document_status(
+        organization_id=document.tenant_key.value,
+        document_id=document.document_id,
+        status=DocumentStatus.DISABLED,
+    )
+
+    prepared_fixture.restore(prepared_fixture.manifest, specs=specs)
+
+    assert prepared_fixture.status("org_a", "returns_exchange") == "active"
+
+
+def test_restore_rejects_missing_active_chunks(prepared_fixture, specs):
+    class MissingChunkStore:
+        def __init__(self, delegate):
+            self._delegate = delegate
+
+        def __getattr__(self, name):
+            return getattr(self._delegate, name)
+
+        def list_active_chunks(self, *, organization_id, candidate_ids):
+            return []
+
+    manager = StageCFixtureManager(
+        store=MissingChunkStore(prepared_fixture._store),
+        ingestion=prepared_fixture._ingestion,
+        loader=DocumentLoader(),
+        chunker=KnowledgeChunker(),
+    )
+
+    with pytest.raises(ValueError, match="active chunk drift"):
+        manager.restore(prepared_fixture.manifest, specs=specs)
 
 
 def test_disabled_scenario_restores_even_after_error(prepared_fixture, valid_cases):

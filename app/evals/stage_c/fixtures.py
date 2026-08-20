@@ -408,6 +408,83 @@ class StageCFixtureManager:
         self.identity_index
         return self._manifest
 
+    def restore(
+        self,
+        manifest: FixtureManifest,
+        *,
+        specs: Sequence[CorpusDocumentSpec],
+    ) -> FixtureManifest:
+        """Attach a checkpointed fixture only when its trusted state still matches."""
+
+        if not isinstance(manifest, FixtureManifest):
+            raise TypeError("manifest must be a FixtureManifest")
+        specs = tuple(specs)
+        spec_by_key = {
+            (spec.tenant_key, spec.document_key): spec for spec in specs
+        }
+        if len(spec_by_key) != len(specs):
+            raise ValueError("corpus specs contain duplicate tenant/document keys")
+        document_by_key = {
+            (document.tenant_key, document.document_key): document
+            for document in manifest.documents
+        }
+        if set(spec_by_key) != set(document_by_key):
+            raise ValueError("fixture manifest does not match corpus specs")
+
+        stored_documents = []
+        for key, fixture_document in document_by_key.items():
+            spec = spec_by_key[key]
+            if fixture_document.title != spec.title:
+                raise ValueError("fixture manifest title does not match corpus spec")
+            stored = self._store.get_document(
+                organization_id=fixture_document.tenant_key.value,
+                document_id=fixture_document.document_id,
+            )
+            if stored.title != fixture_document.title:
+                raise ValueError("fixture document title drift")
+            if stored.active_version_id != fixture_document.active_version_id:
+                raise ValueError("fixture document active version drift")
+            for version_id in (
+                fixture_document.active_version_id,
+                fixture_document.old_version_id,
+            ):
+                if version_id is not None:
+                    self._store.get_version_by_id(
+                        organization_id=fixture_document.tenant_key.value,
+                        document_id=fixture_document.document_id,
+                        version_id=version_id,
+                    )
+            stored_documents.append((fixture_document, stored))
+
+        for fixture_document, stored in stored_documents:
+            if stored.status is DocumentStatus.DISABLED:
+                self._store.set_document_status(
+                    organization_id=fixture_document.tenant_key.value,
+                    document_id=fixture_document.document_id,
+                    status=DocumentStatus.ACTIVE,
+                )
+
+        self._specs = specs
+        self._manifest = manifest
+        identity_index = self.identity_index
+        for fixture_document, _ in stored_documents:
+            expected_chunk_ids = {
+                identity.chunk_id
+                for identity in identity_index.identities_for_version(
+                    fixture_document.active_version_id
+                )
+            }
+            persisted_chunk_ids = {
+                chunk.chunk_id
+                for chunk in self._store.list_active_chunks(
+                    organization_id=fixture_document.tenant_key.value,
+                    candidate_ids=tuple(expected_chunk_ids),
+                )
+            }
+            if not expected_chunk_ids or persisted_chunk_ids != expected_chunk_ids:
+                raise ValueError("fixture document active chunk drift")
+        return manifest
+
     def document(
         self, tenant_key: TenantKey | str, document_key: str
     ) -> FixtureDocument:
