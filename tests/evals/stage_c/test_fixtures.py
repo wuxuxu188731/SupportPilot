@@ -129,6 +129,53 @@ def test_preflight_rejects_unmapped_heading(valid_cases, specs):
         validate_golden_headings((broken_case, *valid_cases[1:]), specs)
 
 
+def test_prepare_rejects_loader_only_heading_before_ingestion(valid_cases, specs):
+    """A loader section absent from real chunks must fail before external work."""
+
+    class EmptyChunker:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def split(self, document, **identity):
+            self.calls += 1
+            return []
+
+    class EmptyStore:
+        def list_documents(self, *, organization_id):
+            return []
+
+    class FailIfCalledIngestion:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def ingest_new_document(self, **kwargs):
+            self.calls += 1
+            raise AssertionError("ingestion ran before heading preflight")
+
+    first_case = valid_cases[0]
+    first_spec = next(
+        spec
+        for spec in specs
+        if spec.tenant_key == first_case.tenant_key
+        and spec.document_key
+        == first_case.required_evidence_groups[0].any_of[0].document_key
+    )
+    chunker = EmptyChunker()
+    ingestion = FailIfCalledIngestion()
+    manager = StageCFixtureManager(
+        store=EmptyStore(),
+        ingestion=ingestion,
+        loader=DocumentLoader(),
+        chunker=chunker,
+    )
+
+    with pytest.raises(GoldenEvidenceMappingError, match=first_case.case_id):
+        manager.prepare(cases=(first_case,), specs=(first_spec,))
+
+    assert chunker.calls == 1
+    assert ingestion.calls == 0
+
+
 def test_manifest_is_immutable_and_json_round_trips(prepared_fixture):
     manifest = prepared_fixture.manifest
     encoded = json.dumps(manifest.to_dict(), ensure_ascii=False)

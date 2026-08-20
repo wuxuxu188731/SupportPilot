@@ -175,11 +175,16 @@ def _old_returns_bytes(current: bytes) -> bytes:
 
 
 def validate_golden_headings(
-    cases: Sequence[StageCCase], specs: Sequence[CorpusDocumentSpec]
+    cases: Sequence[StageCCase],
+    specs: Sequence[CorpusDocumentSpec],
+    *,
+    loader: DocumentLoader | None = None,
+    chunker: KnowledgeChunker | None = None,
 ) -> None:
-    """Preflight every golden tenant/document/heading against real bytes."""
+    """Preflight every golden heading against the chunks retrieval can emit."""
 
-    loader = DocumentLoader()
+    loader = loader or DocumentLoader()
+    chunker = chunker or KnowledgeChunker()
     headings: dict[tuple[TenantKey, str], set[str]] = {}
     for spec in specs:
         key = (spec.tenant_key, spec.document_key)
@@ -188,10 +193,16 @@ def validate_golden_headings(
                 f"duplicate corpus mapping for {spec.tenant_key.value}/{spec.document_key}"
             )
         loaded = loader.load(spec.path.read_bytes(), DocumentSourceType.MARKDOWN)
+        chunks = chunker.split(
+            loaded,
+            organization_id=f"stage-c-preflight-{spec.tenant_key.value}",
+            document_id=f"stage-c-preflight-{spec.document_key}",
+            version_id=(
+                f"stage-c-preflight-{spec.tenant_key.value}-{spec.document_key}-v1"
+            ),
+        )
         headings[key] = {
-            section.heading_path
-            for section in loaded.sections
-            if section.heading_path is not None
+            chunk.heading_path for chunk in chunks if chunk.heading_path is not None
         }
 
     for case in cases:
@@ -308,7 +319,12 @@ class StageCFixtureManager:
         """Idempotently ingest real bytes and leave every current version active."""
 
         specs = tuple(specs)
-        validate_golden_headings(cases, specs)
+        validate_golden_headings(
+            cases,
+            specs,
+            loader=self._loader,
+            chunker=self._chunker,
+        )
         prepared: list[FixtureDocument] = []
         existing_by_tenant = {
             tenant: {
