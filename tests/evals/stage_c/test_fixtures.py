@@ -319,6 +319,37 @@ def test_restore_rejects_sqlite_content_or_heading_drift(prepared_fixture, specs
         manager.restore(prepared_fixture.manifest, specs=specs)
 
 
+@pytest.mark.parametrize("field", ["token_count", "start_offset", "end_offset"])
+def test_restore_rejects_sqlite_chunk_measurement_drift(
+    prepared_fixture, specs, field
+):
+    class DriftedChunkStore:
+        def __init__(self, delegate):
+            self._delegate = delegate
+
+        def __getattr__(self, name):
+            return getattr(self._delegate, name)
+
+        def list_version_chunks(self, **kwargs):
+            chunks = self._delegate.list_version_chunks(**kwargs)
+            if chunks:
+                chunks[0] = replace(
+                    chunks[0], **{field: getattr(chunks[0], field) + 1}
+                )
+            return chunks
+
+    manager = StageCFixtureManager(
+        store=DriftedChunkStore(prepared_fixture._store),
+        ingestion=prepared_fixture._ingestion,
+        loader=DocumentLoader(),
+        chunker=KnowledgeChunker(),
+        vector_store=prepared_fixture._vector_store,
+    )
+
+    with pytest.raises(ValueError, match="SQLite chunk drift"):
+        manager.restore(prepared_fixture.manifest, specs=specs)
+
+
 def test_restore_rejects_missing_old_version_chunks(prepared_fixture, specs):
     old_version_id = prepared_fixture.document("org_a", "returns_exchange").old_version_id
 

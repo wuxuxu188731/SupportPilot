@@ -324,6 +324,7 @@ def test_validate_point_identities_retrieves_payload_without_vectors():
         {},
         {"chunk-1": record(identity(), organization_id="wrong-tenant")},
         {"chunk-1": record(identity(), version_id="wrong-version")},
+        {"chunk-1": record(identity(), content="forbidden document body")},
     ],
 )
 def test_validate_point_identities_rejects_missing_or_wrong_payload(points):
@@ -348,6 +349,25 @@ def test_validate_point_identities_converts_transport_errors_to_unavailable():
 
     with pytest.raises(VectorStoreUnavailableError):
         store.validate_point_identities(expected=(identity(),))
+
+
+def test_validate_point_identities_converts_response_handling_connection_failure():
+    from qdrant_client.http.exceptions import ResponseHandlingException
+
+    wrapped = ResponseHandlingException(ConnectionError("raw connection detail"))
+
+    class ExplodingRetrieveClient(FakeQdrantClient):
+        def retrieve(self, **kwargs):
+            raise wrapped
+
+    store = QdrantVectorStore(
+        client=ExplodingRetrieveClient(), collection_name=COLLECTION
+    )
+
+    with pytest.raises(VectorStoreUnavailableError) as captured:
+        store.validate_point_identities(expected=(identity(),))
+
+    assert captured.value.__cause__ is wrapped
 
 
 def test_search_filters_both_prefetches_by_tenant_and_active_versions():

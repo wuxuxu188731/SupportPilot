@@ -18,7 +18,10 @@ from typing import Sequence
 
 from qdrant_client import QdrantClient
 from qdrant_client import models
-from qdrant_client.http.exceptions import UnexpectedResponse
+from qdrant_client.http.exceptions import (
+    ResponseHandlingException,
+    UnexpectedResponse,
+)
 
 from app.knowledge.base import VectorStoreUnavailableError
 from app.knowledge.embeddings import EmbeddingVector
@@ -208,7 +211,12 @@ class QdrantVectorStore:
                 with_payload=True,
                 with_vectors=False,
             )
-        except (UnexpectedResponse, ConnectionError, TimeoutError) as exc:
+        except (
+            UnexpectedResponse,
+            ResponseHandlingException,
+            ConnectionError,
+            TimeoutError,
+        ) as exc:
             raise VectorStoreUnavailableError(
                 reason=f"retrieve identities: {type(exc).__name__}"
             ) from exc
@@ -216,6 +224,14 @@ class QdrantVectorStore:
         actual_by_id: dict[str, VectorPointIdentity] = {}
         for record in records:
             payload = record.payload if isinstance(record.payload, dict) else {}
+            if set(payload) != {
+                _ORGANIZATION_FIELD,
+                _DOCUMENT_ID_FIELD,
+                _VERSION_FIELD,
+                _CHUNK_ID_FIELD,
+                _ORDINAL_FIELD,
+            }:
+                raise ValueError("vector point identity drift")
             chunk_id = payload.get(_CHUNK_ID_FIELD)
             organization_id = payload.get(_ORGANIZATION_FIELD)
             document_id = payload.get(_DOCUMENT_ID_FIELD)

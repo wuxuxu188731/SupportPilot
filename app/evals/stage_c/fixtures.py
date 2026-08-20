@@ -524,9 +524,17 @@ class StageCFixtureManager:
     @staticmethod
     def _chunk_fingerprints(
         chunks: Sequence[DocumentChunk],
-    ) -> tuple[tuple[str, int, str | None, str], ...]:
+    ) -> tuple[tuple[str, int, str | None, str, int, int, int], ...]:
         return tuple(
-            (chunk.chunk_id, chunk.ordinal, chunk.heading_path, chunk.content)
+            (
+                chunk.chunk_id,
+                chunk.ordinal,
+                chunk.heading_path,
+                chunk.content,
+                chunk.token_count,
+                chunk.start_offset,
+                chunk.end_offset,
+            )
             for chunk in chunks
         )
 
