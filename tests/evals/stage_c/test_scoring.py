@@ -347,6 +347,86 @@ def test_security_metrics_include_unknown_and_untrusted_citations(
     assert metrics.unknown_identity_count == 1
 
 
+def test_forged_known_citation_metadata_cannot_hide_trusted_safety_leaks(
+    stage_case: StageCCase,
+) -> None:
+    """Known chunks retain trusted leak findings even when returned fields disagree."""
+    identities = IdentityIndex(
+        (
+            ChunkIdentity(
+                chunk_id="cross-tenant",
+                tenant_key=TenantKey.ORG_B,
+                document_key="returns_exchange",
+                document_id="trusted-cross-tenant-document",
+                version_id="cross-version",
+                heading_path=RETURN_HEADING,
+                document_status=DocumentStatus.ACTIVE,
+                active_version_id="cross-version",
+            ),
+            ChunkIdentity(
+                chunk_id="disabled",
+                tenant_key=TenantKey.ORG_A,
+                document_key="returns_exchange",
+                document_id="trusted-disabled-document",
+                version_id="disabled-version",
+                heading_path=RETURN_HEADING,
+                document_status=DocumentStatus.DISABLED,
+                active_version_id="disabled-version",
+            ),
+            ChunkIdentity(
+                chunk_id="inactive",
+                tenant_key=TenantKey.ORG_A,
+                document_key="returns_exchange",
+                document_id="trusted-inactive-document",
+                version_id="old-version",
+                heading_path=RETURN_HEADING,
+                document_status=DocumentStatus.ACTIVE,
+                active_version_id="current-version",
+            ),
+        )
+    )
+    citations = normalize_citations(
+        (
+            Citation(
+                citation_id="C1",
+                document_id="forged-cross-tenant-document",
+                version_id="cross-version",
+                chunk_id="cross-tenant",
+                title="标题",
+                heading_path=RETURN_HEADING,
+                content="内容",
+            ),
+            Citation(
+                citation_id="C2",
+                document_id="forged-disabled-document",
+                version_id="disabled-version",
+                chunk_id="disabled",
+                title="标题",
+                heading_path=RETURN_HEADING,
+                content="内容",
+            ),
+            Citation(
+                citation_id="C3",
+                document_id="forged-inactive-document",
+                version_id="current-version",
+                chunk_id="inactive",
+                title="标题",
+                heading_path=RETURN_HEADING,
+                content="内容",
+            ),
+        ),
+        identities,
+    )
+
+    metrics = score_variant(stage_case, citations, top_k=5)
+
+    assert all(item.identity_consistent is False for item in citations)
+    assert metrics.relevant_top5_count == 0
+    assert metrics.cross_tenant_leak is True
+    assert metrics.disabled_document_leak is True
+    assert metrics.inactive_version_leak is True
+
+
 def test_aggregate_metrics_exposes_exact_quality_fractions(stage_case: StageCCase) -> None:
     """Aggregate denominators must be counts, never an average of averages."""
     partial = score_variant(

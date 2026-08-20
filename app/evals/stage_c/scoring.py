@@ -178,20 +178,17 @@ class VariantMetrics:
             quality_scope_reason=quality_scope_reason,
             cross_tenant_leak=any(
                 item.identity_known
-                and item.identity_consistent
                 and item.tenant_key is not None
                 and item.tenant_key != case.tenant_key
                 for item in evaluated
             ),
             disabled_document_leak=any(
                 item.identity_known
-                and item.identity_consistent
                 and item.document_status is DocumentStatus.DISABLED
                 for item in evaluated
             ),
             inactive_version_leak=any(
                 item.identity_known
-                and item.identity_consistent
                 and item.document_status is DocumentStatus.ACTIVE
                 and item.version_id != item.active_version_id
                 for item in evaluated
@@ -221,14 +218,24 @@ def normalize_citations(
                 citation_rank=rank,
                 tenant_key=identity.tenant_key if identity.known else None,
                 document_key=identity.document_key if identity.known else None,
-                heading_path=citation.heading_path,
-                document_id=citation.document_id,
-                version_id=citation.version_id,
+                heading_path=(
+                    identity.heading_path if identity.known else citation.heading_path
+                ),
+                document_id=(
+                    identity.document_id if identity.known else citation.document_id
+                ),
+                version_id=(
+                    identity.version_id if identity.known else citation.version_id
+                ),
                 chunk_id=citation.chunk_id,
                 identity_known=identity.known,
                 identity_consistent=consistent,
-                document_status=(identity.document_status if identity.known else None),
-                active_version_id=(identity.active_version_id if identity.known else None),
+                document_status=(
+                    identity.document_status if identity.known else None
+                ),
+                active_version_id=(
+                    identity.active_version_id if identity.known else None
+                ),
             )
         )
     return tuple(normalized)
