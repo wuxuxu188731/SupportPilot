@@ -43,7 +43,7 @@ from app.knowledge.base import DocumentChunk, InvalidDocumentError
 from app.knowledge.document_loader import LoadedDocument
 
 CHUNKER_VERSION = "supportpilot-chunker-v1"
-TARGET_CHUNK_TOKENS = 600
+TARGET_CHUNK_TOKENS = 600 
 MAX_CHUNK_TOKENS = 700
 CHUNK_OVERLAP_TOKENS = 80
 

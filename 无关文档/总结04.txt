@@ -1,0 +1,129 @@
+1. Annotated[原本的类型, 附加信息]，例如：
+age: Annotated[int, "用户年龄"]：对 Python 类型检查器来说，age 依然是 int；
+后面的 "用户年龄" 是额外的元数据，可以被某个框架或工具读取。Annotated 本身不会执行验证，也不会改变变量的值。
+
+2. 通过使用数据库的组合外键来进行 “状态检查或校验” ，例如：
+conversations → memberships：
+ batch.create_foreign_key(
+    "fk_conversations_membership",
+    "memberships",
+    ["organization_id", "user_id"],         # conversations 的两列
+    ["organization_id", "user_id"],         # memberships 的两列
+)
+它的作用：校验一个会话的(organization_id,user_id)必须是memberships表里面真实存在的成员关系，防止会话属于一个不属于该组织
+(企业)的用户
+
+orders -> customers
+sa.ForeignKeyConstraint(
+    ["organization_id", "customer_id"],
+    ["customers.organization_id", "customers.id"],
+    name="fk_orders_customer",
+)
+它的作用：订单引用的客户必须和订单属于同一个企业。防止企业B的客户把订单挂到企业A上
+
+shipment -> orders 
+ sa.ForeignKeyConstraint(
+    ["organization_id", "order_id"],
+    ["orders.organization_id", "orders.id"],
+    name="fk_shipments_order",
+)
+物流记录引用的订单必须和物流属于同一个企业。防止跨企业建立物流关联（发货单不可能发另一个企业的订单）
+
+tickets -> cumtomers
+sa.ForeignKeyConstraint(
+    ["organization_id", "customer_id"],
+    ["customers.organization_id", "customers.id"],
+    name="fk_tickets_customer",
+)
+工单关联的客户必须和工单属于同一个企业。防止把企业 B 的客户挂到企业 A 的工单上
+
+tickets → orders
+sa.ForeignKeyConstraint(
+    ["organization_id", "order_id", "customer_id"],       # tickets 三列
+    ["orders.organization_id", "orders.id", "orders.customer_id"],  # orders 三列
+    name="fk_tickets_order_customer",
+)
+工单如果关联了订单，则 (organization_id, order_id, customer_id) 三个值必须整体在 orders        
+表中存在。同时防止：(1) 跨企业关联订单、(2) 工单关联的客户不是该订单的真实下单客户。即工单不能把"客户 A          
+下的订单"挂到"客户 B"名下去      
+
+tickets → memberships(创建人)
+ sa.ForeignKeyConstraint(
+    ["organization_id", "created_by_user_id"],
+    ["memberships.organization_id", "memberships.user_id"],
+    name="fk_tickets_creator_membership",
+)
+工单创建人必须是该企业的成员。防止企业外部的用户 ID 被用作创建人
+
+tickets → memberships(负责人)
+sa.ForeignKeyConstraint(
+    ["organization_id", "assigned_to_user_id"],
+    ["memberships.organization_id", "memberships.user_id"],
+    name="fk_tickets_assignee_membership",
+)
+工单负责人必须是该企业的成员。防止把工单分配给企业外的用户（assigned_to_user_id 为 NULL 时，SQLite 跳过 FK 
+检查）
+
+ticket_comments → tickets
+sa.ForeignKeyConstraint(
+    ["organization_id", "ticket_id"],
+    ["tickets.organization_id", "tickets.id"],
+    name="fk_ticket_comments_ticket",
+)
+评论所属工单必须和评论属于同一个企业。防止跨企业评论
+
+ticket_comments → memberships
+sa.ForeignKeyConstraint(
+    ["organization_id", "author_user_id"],
+    ["memberships.organization_id", "memberships.user_id"],
+    name="fk_ticket_comments_author_membership",
+)
+评论作者必须是该企业的成员。防止企业外用户 ID 撰写评论
+
+整体防线图
+
+                      organizations
+                           │
+           ┌───────────────┼───────────────┐
+           │               │               │
+      customers      memberships     conversations
+           │            │  │  │           │
+      ┌────┘       ┌────┘  │  └────┐      │
+      │            │       │       │      │
+    orders         │   tickets ──┘      │
+      │            │    │  │            │
+      │            └────┘  │            │
+      │                    │            │
+    shipments        ticket_comments    │
+                         │             │
+                         └─────────────┘
+
+每条连线都是一个复合外键，organization_id 始终是约束的一部分。这意味着：
+任何一条跨表关联，如果两端的 organization_id 不一致，数据库会直接拒绝。不是"查不出来"，是"根本写不进去"
+这样做的好处：
+1.真正的“不可能犯错”：在未来，代码可能被其他开发者忘记写校验。但是数据库约束一旦建好，任何路径写入都绕不过
+2.防御下面所有的写入通道：
+  HTTP API → Service → Store
+  直接调 Store（如 CLI seeder）
+  sqlite3 命令行直连
+  未来迁移脚本的 backfill
+  并发竞态
+3.并发安全无竞态，数据库约束在同一事务里面原子执行
+4.python代码更加简洁
+
+坏处：
+在校验的过程中如果发生错误抛出异常，错误信息很模糊，不好准确定位到底是哪里的问题，没有办提前给出友好的错误
+
+
+3. assert {"tickets", "ticket_comments"} <= table_names(database_path)中
+table_names()函数返回database_path路径下数据库里面所有的表名，返回值是set[str]
+python里面两个集合之间使用<=，a<=b 表示a是b的子集
+
+4.tuple[str, ...]表示不定长同质元组，当前表示该元组的全部元素都是str类型，元素数量可以有任意个
+
+5.
+class ToolFunction(Protocol):
+    def __call__(self, **arguments: Any) -> JsonObject:
+        raise NotImplementedError
+也可以表示为ToolFunction = Callable[..., JsonObject]
+实现了__call__方法的对象可以像函数一样调用
