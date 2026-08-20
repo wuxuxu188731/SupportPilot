@@ -158,6 +158,36 @@ def job_for(version):
     return _JOBS_BY_VERSION[version.version_id]
 
 
+def test_list_version_chunks_reads_inactive_version_with_exact_tenant_scope(
+    store_with_two_versions, two_tenant_knowledge_store
+):
+    store, context, document, old_version, new_version = store_with_two_versions
+    _same_store, _org_a, other_tenant = two_tenant_knowledge_store
+
+    old_chunks = store.list_version_chunks(
+        organization_id=context.organization_id,
+        document_id=document.document_id,
+        version_id=old_version.version_id,
+    )
+    new_chunks = store.list_version_chunks(
+        organization_id=context.organization_id,
+        document_id=document.document_id,
+        version_id=new_version.version_id,
+    )
+
+    assert [(chunk.chunk_id, chunk.content) for chunk in old_chunks] == [
+        (old_chunk_id, "some policy body")
+    ]
+    assert [(chunk.chunk_id, chunk.content) for chunk in new_chunks] == [
+        (new_chunk_id, "some policy body")
+    ]
+    assert store.list_version_chunks(
+        organization_id=other_tenant.organization_id,
+        document_id=document.document_id,
+        version_id=old_version.version_id,
+    ) == []
+
+
 def retrieval_event(
     organization_id: str,
     *,

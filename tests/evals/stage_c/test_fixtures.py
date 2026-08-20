@@ -22,6 +22,7 @@ from app.knowledge.chunking import KnowledgeChunker
 from app.knowledge.document_loader import DocumentLoader
 from app.knowledge.ingestion import KnowledgeIngestionService
 from app.knowledge.sqlite_store import SQLiteKnowledgeStore
+from app.knowledge.vector_store import VectorPointIdentity
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -35,13 +36,31 @@ class DeterministicEmbedding:
 
 class RecordingVectorStore:
     def __init__(self) -> None:
-        self.points = []
+        self.points = {}
+        self.validation_calls = []
 
     def ensure_collection(self) -> None:
         return None
 
     def upsert(self, *, points) -> None:
-        self.points.extend(points)
+        self.points.update({point.chunk_id: point for point in points})
+
+    def validate_point_identities(self, *, expected) -> None:
+        expected = tuple(expected)
+        self.validation_calls.append(expected)
+        actual = {
+            chunk_id: VectorPointIdentity(
+                chunk_id=point.chunk_id,
+                organization_id=point.organization_id,
+                document_id=point.document_id,
+                version_id=point.version_id,
+                ordinal=point.ordinal,
+            )
+            for chunk_id, point in self.points.items()
+            if chunk_id in {identity.chunk_id for identity in expected}
+        }
+        if actual != {identity.chunk_id: identity for identity in expected}:
+            raise ValueError("vector point identity drift")
 
 
 @pytest.fixture(scope="module")
@@ -74,12 +93,13 @@ def prepared_fixture(tmp_path_factory, valid_cases, specs):
         )
     loader = DocumentLoader()
     chunker = KnowledgeChunker()
+    vector_store = RecordingVectorStore()
     ingestion = KnowledgeIngestionService(
         store=store,
         loader=loader,
         chunker=chunker,
         embedding=DeterministicEmbedding(),
-        vector_store=RecordingVectorStore(),
+        vector_store=vector_store,
         embedding_model="stage-c-test",
         embedding_dimensions=2,
     )
@@ -88,6 +108,7 @@ def prepared_fixture(tmp_path_factory, valid_cases, specs):
         ingestion=ingestion,
         loader=loader,
         chunker=chunker,
+        vector_store=vector_store,
     )
     manager.prepare(cases=valid_cases, specs=specs)
     return manager
@@ -169,6 +190,7 @@ def test_prepare_rejects_loader_only_heading_before_ingestion(valid_cases, specs
         ingestion=ingestion,
         loader=DocumentLoader(),
         chunker=chunker,
+        vector_store=RecordingVectorStore(),
     )
 
     with pytest.raises(GoldenEvidenceMappingError, match=first_case.case_id):
@@ -269,26 +291,78 @@ def test_restore_reactivates_document_left_disabled_by_interruption(
     assert prepared_fixture.status("org_a", "returns_exchange") == "active"
 
 
-def test_restore_rejects_missing_active_chunks(prepared_fixture, specs):
-    class MissingChunkStore:
+def test_restore_rejects_sqlite_content_or_heading_drift(prepared_fixture, specs):
+    class DriftedChunkStore:
         def __init__(self, delegate):
             self._delegate = delegate
 
         def __getattr__(self, name):
             return getattr(self._delegate, name)
 
-        def list_active_chunks(self, *, organization_id, candidate_ids):
-            return []
+        def list_version_chunks(self, **kwargs):
+            chunks = self._delegate.list_version_chunks(**kwargs)
+            if chunks:
+                chunks[0] = replace(
+                    chunks[0], content="drifted", heading_path="drifted/heading"
+                )
+            return chunks
 
     manager = StageCFixtureManager(
-        store=MissingChunkStore(prepared_fixture._store),
+        store=DriftedChunkStore(prepared_fixture._store),
         ingestion=prepared_fixture._ingestion,
         loader=DocumentLoader(),
         chunker=KnowledgeChunker(),
+        vector_store=prepared_fixture._vector_store,
     )
 
-    with pytest.raises(ValueError, match="active chunk drift"):
+    with pytest.raises(ValueError, match="SQLite chunk drift"):
         manager.restore(prepared_fixture.manifest, specs=specs)
+
+
+def test_restore_rejects_missing_old_version_chunks(prepared_fixture, specs):
+    old_version_id = prepared_fixture.document("org_a", "returns_exchange").old_version_id
+
+    class MissingOldChunkStore:
+        def __init__(self, delegate):
+            self._delegate = delegate
+
+        def __getattr__(self, name):
+            return getattr(self._delegate, name)
+
+        def list_version_chunks(self, **kwargs):
+            if kwargs["version_id"] == old_version_id:
+                return []
+            return self._delegate.list_version_chunks(**kwargs)
+
+    manager = StageCFixtureManager(
+        store=MissingOldChunkStore(prepared_fixture._store),
+        ingestion=prepared_fixture._ingestion,
+        loader=DocumentLoader(),
+        chunker=KnowledgeChunker(),
+        vector_store=prepared_fixture._vector_store,
+    )
+
+    with pytest.raises(ValueError, match="SQLite chunk drift"):
+        manager.restore(prepared_fixture.manifest, specs=specs)
+
+
+def test_restore_rejects_cleared_qdrant_points_for_active_and_old_versions(
+    prepared_fixture, specs
+):
+    saved = dict(prepared_fixture._vector_store.points)
+    prepared_fixture._vector_store.points.clear()
+    try:
+        with pytest.raises(ValueError, match="vector point identity drift"):
+            prepared_fixture.restore(prepared_fixture.manifest, specs=specs)
+    finally:
+        prepared_fixture._vector_store.points.update(saved)
+
+    validated = prepared_fixture._vector_store.validation_calls[-1]
+    returns = prepared_fixture.document("org_a", "returns_exchange")
+    assert {item.version_id for item in validated} >= {
+        returns.active_version_id,
+        returns.old_version_id,
+    }
 
 
 def test_disabled_scenario_restores_even_after_error(prepared_fixture, valid_cases):

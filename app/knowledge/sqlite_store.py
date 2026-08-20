@@ -710,6 +710,27 @@ class SQLiteKnowledgeStore(KnowledgeStore):
         chunk_by_id = {row["id"]: self._to_chunk(row) for row in rows}
         return [chunk_by_id[cid] for cid in candidate_ids if cid in chunk_by_id]
 
+    def list_version_chunks(
+        self,
+        *,
+        organization_id: str,
+        document_id: str,
+        version_id: str,
+    ) -> list[DocumentChunk]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM document_chunks
+                WHERE organization_id = ?
+                  AND document_id = ?
+                  AND version_id = ?
+                ORDER BY ordinal, id
+                """,
+                (organization_id, document_id, version_id),
+            ).fetchall()
+        return [self._to_chunk(row) for row in rows]
+
     def resolve_active_citations(
         self,
         *,

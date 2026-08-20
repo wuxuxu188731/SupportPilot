@@ -123,6 +123,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         _print_failure(failure.classification, args)
         return 1
     except Exception as error:  # noqa: BLE001 - never print provider detail
+        output.unlink(missing_ok=True)
         _print_failure(classify_infrastructure_failure(error), args)
         return 1
 

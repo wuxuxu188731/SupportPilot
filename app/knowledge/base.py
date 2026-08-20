@@ -405,6 +405,16 @@ class KnowledgeStore(Protocol):
     ) -> None:
         raise NotImplementedError
 
+    def list_version_chunks(
+        self,
+        *,
+        organization_id: str,
+        document_id: str,
+        version_id: str,
+    ) -> list[DocumentChunk]:
+        """Read one exact version's chunks without requiring it to be active."""
+        raise NotImplementedError
+
     def activate_version(
         self,
         *,

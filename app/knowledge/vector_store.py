@@ -25,6 +25,17 @@ class VectorPoint:
 
 
 @dataclass(frozen=True)
+class VectorPointIdentity:
+    """Content-free point metadata used to verify a persisted fixture."""
+
+    chunk_id: str
+    organization_id: str
+    document_id: str
+    version_id: str
+    ordinal: int
+
+
+@dataclass(frozen=True)
 class VectorCandidate:
     chunk_id: str
     document_id: str
@@ -45,6 +56,11 @@ class VectorStore(Protocol):
         raise NotImplementedError
 
     def upsert(self, *, points: Sequence[VectorPoint]) -> None:
+        raise NotImplementedError
+
+    def validate_point_identities(
+        self, *, expected: Sequence[VectorPointIdentity]
+    ) -> None:
         raise NotImplementedError
 
     def search(

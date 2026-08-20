@@ -13,7 +13,7 @@ from qdrant_client import models
 from app.knowledge.base import VectorStoreUnavailableError
 from app.knowledge.embeddings import EmbeddingVector, SparseValue
 from app.knowledge.qdrant_store import QdrantVectorStore
-from app.knowledge.vector_store import VectorPoint
+from app.knowledge.vector_store import VectorPoint, VectorPointIdentity
 from app.knowledge.qdrant_store import VectorConfigurationError
 
 COLLECTION = "supportpilot_knowledge_te4_1024_v1"
@@ -27,6 +27,7 @@ class FakeQdrantClient:
         self.create_calls = []
         self.upsert_calls = []
         self.query_calls = []
+        self.retrieve_calls = []
         self.payload_index_calls = []
         self.collections = set()
         self._collections_info = {}
@@ -63,6 +64,10 @@ class FakeQdrantClient:
     def query_points(self, **kwargs):
         self.query_calls.append(kwargs)
         return type("QR", (), {"points": []})()
+
+    def retrieve(self, **kwargs):
+        self.retrieve_calls.append(kwargs)
+        return [self.points[point_id] for point_id in kwargs["ids"] if point_id in self.points]
 
     # --- helpers for the mismatch tests ---
 
@@ -274,6 +279,75 @@ def test_upsert_point_id_is_deterministic_per_org_version_chunk():
     store.upsert(points=[point("chunk-2")])
     assert client.upsert_calls[2]["points"][0].id == chunk_id("chunk-2")
     assert client.upsert_calls[2]["points"][0].id != first_id
+
+
+def identity() -> VectorPointIdentity:
+    return VectorPointIdentity(
+        chunk_id="chunk-1",
+        organization_id="org-a",
+        document_id="doc-1",
+        version_id="version-1",
+        ordinal=0,
+    )
+
+
+def record(point_identity: VectorPointIdentity, **payload_overrides):
+    payload = {
+        "organization_id": point_identity.organization_id,
+        "document_id": point_identity.document_id,
+        "version_id": point_identity.version_id,
+        "chunk_id": point_identity.chunk_id,
+        "ordinal": point_identity.ordinal,
+    }
+    payload.update(payload_overrides)
+    return type("Record", (), {"id": point_identity.chunk_id, "payload": payload})()
+
+
+def test_validate_point_identities_retrieves_payload_without_vectors():
+    expected = identity()
+    client = FakeQdrantClient(points={expected.chunk_id: record(expected)})
+    store = QdrantVectorStore(client=client, collection_name=COLLECTION)
+
+    store.validate_point_identities(expected=(expected,))
+
+    assert client.retrieve_calls == [{
+        "collection_name": COLLECTION,
+        "ids": [expected.chunk_id],
+        "with_payload": True,
+        "with_vectors": False,
+    }]
+
+
+@pytest.mark.parametrize(
+    "points",
+    [
+        {},
+        {"chunk-1": record(identity(), organization_id="wrong-tenant")},
+        {"chunk-1": record(identity(), version_id="wrong-version")},
+    ],
+)
+def test_validate_point_identities_rejects_missing_or_wrong_payload(points):
+    store = QdrantVectorStore(
+        client=FakeQdrantClient(points=points), collection_name=COLLECTION
+    )
+
+    with pytest.raises(ValueError, match="vector point identity drift"):
+        store.validate_point_identities(expected=(identity(),))
+
+
+def test_validate_point_identities_converts_transport_errors_to_unavailable():
+    from qdrant_client.http.exceptions import UnexpectedResponse
+
+    class ExplodingRetrieveClient(FakeQdrantClient):
+        def retrieve(self, **kwargs):
+            raise UnexpectedResponse(503, "Unavailable", b"raw body", {})
+
+    store = QdrantVectorStore(
+        client=ExplodingRetrieveClient(), collection_name=COLLECTION
+    )
+
+    with pytest.raises(VectorStoreUnavailableError):
+        store.validate_point_identities(expected=(identity(),))
 
 
 def test_search_filters_both_prefetches_by_tenant_and_active_versions():

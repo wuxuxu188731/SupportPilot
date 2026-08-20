@@ -87,6 +87,15 @@ def classify_infrastructure_failure(value: object) -> str:
     internal_reason = str(getattr(error, "internal_reason", "") or "")
     safe_message = str(getattr(error, "safe_message", "") or "")
     diagnostic = f"{internal_reason} {safe_message} {type(error).__name__}".lower()
+    current = error
+    seen: set[int] = set()
+    status_codes: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        status_code = getattr(current, "status_code", None)
+        if isinstance(status_code, int) and not isinstance(status_code, bool):
+            status_codes.add(status_code)
+        current = getattr(current, "__cause__", None)
     balance_markers = (
         "insufficient_balance",
         "insufficient balance",
@@ -103,7 +112,9 @@ def classify_infrastructure_failure(value: object) -> str:
         if any(marker in diagnostic for marker in balance_markers):
             return "deepseek_balance"
         return "deepseek_provider_failure"
-    if code == "VECTOR_STORE_UNAVAILABLE" and "503" in diagnostic:
+    if 503 in status_codes or (
+        code == "VECTOR_STORE_UNAVAILABLE" and "503" in diagnostic
+    ):
         return "qdrant_503"
     return "generic"
 
@@ -391,6 +402,7 @@ def run_stage_c_retrieval_eval(
         ingestion=services.ingestion,
         loader=loader,
         chunker=chunker,
+        vector_store=services.vector_store,
     )
     run_metadata = _build_metadata(
         repo_root=root,

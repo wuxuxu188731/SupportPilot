@@ -46,6 +46,7 @@ class KnowledgeServices:
     baseline: BaselineKnowledgeSearchService
     retriever: HybridRetriever
     adaptive: AdaptiveKnowledgeSearchService
+    vector_store: QdrantVectorStore
 
 
 def create_knowledge_services(
@@ -138,4 +139,5 @@ def create_knowledge_services(
         baseline=baseline,
         retriever=retriever,
         adaptive=adaptive,
+        vector_store=vector_store,
     )

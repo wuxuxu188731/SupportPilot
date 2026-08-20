@@ -518,6 +518,26 @@ def test_failure_classification_exposes_only_a_stable_label(error, expected):
     assert "SECRET" not in classification
 
 
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_failure_classification_reads_numeric_qdrant_503_from_error_or_cause(wrapped):
+    class NativeQdrantFailure(RuntimeError):
+        status_code = 503
+
+        def __str__(self):
+            raise AssertionError("raw response must not be stringified")
+
+    native = NativeQdrantFailure()
+    if wrapped:
+        try:
+            raise VectorStoreUnavailableError(reason="sanitized") from native
+        except VectorStoreUnavailableError as error:
+            value = error
+    else:
+        value = native
+
+    assert classify_infrastructure_failure(value) == "qdrant_503"
+
+
 def test_production_builder_uses_real_settings_constants_and_service_graph(
     tmp_path, monkeypatch
 ):
@@ -540,7 +560,8 @@ def test_production_builder_uses_real_settings_constants_and_service_graph(
         search_timeout_seconds=12.0,
     )
     services = SimpleNamespace(
-        store=object(), ingestion=object(), baseline=object(), adaptive=object()
+        store=object(), ingestion=object(), baseline=object(), adaptive=object(),
+        vector_store=object(),
     )
     captured = {}
 
@@ -588,6 +609,7 @@ def test_production_builder_uses_real_settings_constants_and_service_graph(
         runner_module.MODEL_NAME,
     )
     assert captured["tenant_database"] == tmp_path / "state.db"
+    assert captured["fixture_kwargs"]["vector_store"] is services.vector_store
     run_metadata = captured["runner"]["metadata"]
     assert run_metadata.git_revision == "real-head"
     assert run_metadata.collection_name == "real-collection"

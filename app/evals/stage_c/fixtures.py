@@ -9,10 +9,16 @@ from typing import Iterator, Mapping, Sequence
 
 from app.evals.stage_c.models import StageCCase, StageCScenario, TenantKey
 from app.evals.stage_c.scoring import ChunkIdentity, IdentityIndex
-from app.knowledge.base import DocumentSourceType, DocumentStatus, KnowledgeStore
+from app.knowledge.base import (
+    DocumentChunk,
+    DocumentSourceType,
+    DocumentStatus,
+    KnowledgeStore,
+)
 from app.knowledge.chunking import KnowledgeChunker
 from app.knowledge.document_loader import DocumentLoader
 from app.knowledge.ingestion import KnowledgeIngestionService
+from app.knowledge.vector_store import VectorPointIdentity, VectorStore
 
 
 _OLD_RETURN_ROW = b"| \xe6\x99\xae\xe9\x80\x9a\xe4\xbc\x9a\xe5\x91\x98 | 7 \xe5\xa4\xa9 |"
@@ -286,11 +292,13 @@ class StageCFixtureManager:
         ingestion: KnowledgeIngestionService,
         loader: DocumentLoader,
         chunker: KnowledgeChunker,
+        vector_store: VectorStore,
     ) -> None:
         self._store = store
         self._ingestion = ingestion
         self._loader = loader
         self._chunker = chunker
+        self._vector_store = vector_store
         self._manifest: FixtureManifest | None = None
         self._specs: tuple[CorpusDocumentSpec, ...] = ()
 
@@ -464,26 +472,63 @@ class StageCFixtureManager:
                     status=DocumentStatus.ACTIVE,
                 )
 
+        expected_points: list[VectorPointIdentity] = []
+        for fixture_document, _ in stored_documents:
+            spec = spec_by_key[
+                (fixture_document.tenant_key, fixture_document.document_key)
+            ]
+            version_sources = (
+                (fixture_document.active_version_id, spec.path.read_bytes()),
+            )
+            if fixture_document.old_version_id is not None:
+                version_sources += (
+                    (
+                        fixture_document.old_version_id,
+                        _old_returns_bytes(spec.path.read_bytes()),
+                    ),
+                )
+            for version_id, source in version_sources:
+                loaded = self._loader.load(source, DocumentSourceType.MARKDOWN)
+                expected_chunks = self._chunker.split(
+                    loaded,
+                    organization_id=fixture_document.tenant_key.value,
+                    document_id=fixture_document.document_id,
+                    version_id=version_id,
+                )
+                persisted_chunks = self._store.list_version_chunks(
+                    organization_id=fixture_document.tenant_key.value,
+                    document_id=fixture_document.document_id,
+                    version_id=version_id,
+                )
+                if self._chunk_fingerprints(persisted_chunks) != self._chunk_fingerprints(
+                    expected_chunks
+                ):
+                    raise ValueError("fixture SQLite chunk drift")
+                expected_points.extend(
+                    VectorPointIdentity(
+                        chunk_id=chunk.chunk_id,
+                        organization_id=fixture_document.tenant_key.value,
+                        document_id=fixture_document.document_id,
+                        version_id=version_id,
+                        ordinal=chunk.ordinal,
+                    )
+                    for chunk in expected_chunks
+                )
+
+        self._vector_store.validate_point_identities(expected=tuple(expected_points))
         self._specs = specs
         self._manifest = manifest
-        identity_index = self.identity_index
-        for fixture_document, _ in stored_documents:
-            expected_chunk_ids = {
-                identity.chunk_id
-                for identity in identity_index.identities_for_version(
-                    fixture_document.active_version_id
-                )
-            }
-            persisted_chunk_ids = {
-                chunk.chunk_id
-                for chunk in self._store.list_active_chunks(
-                    organization_id=fixture_document.tenant_key.value,
-                    candidate_ids=tuple(expected_chunk_ids),
-                )
-            }
-            if not expected_chunk_ids or persisted_chunk_ids != expected_chunk_ids:
-                raise ValueError("fixture document active chunk drift")
+        self.identity_index
         return manifest
+
+    @staticmethod
+    def _chunk_fingerprints(
+        chunks: Sequence[DocumentChunk],
+    ) -> tuple[tuple[str, int, str | None, str], ...]:
+        return tuple(
+            (chunk.chunk_id, chunk.ordinal, chunk.heading_path, chunk.content)
+            for chunk in chunks
+        )
 
     def document(
         self, tenant_key: TenantKey | str, document_key: str

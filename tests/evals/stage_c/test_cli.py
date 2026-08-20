@@ -137,3 +137,17 @@ def test_cli_writes_incomplete_report_and_sanitized_nonzero_handoff(
     assert "sk-live-key" not in stderr
     assert written["report"] == report
     assert "SECRET_PROVIDER_BODY" not in json.dumps(written["report"])
+
+
+def test_cli_generic_failure_removes_stale_success_report(tmp_path, monkeypatch, capsys):
+    output = tmp_path / "report.json"
+    output.write_text('{"completion":{"completed_variants":96}}', encoding="utf-8")
+
+    def fail(**kwargs):
+        raise RuntimeError("SECRET corrupt checkpoint")
+
+    monkeypatch.setattr(cli, "run_stage_c_retrieval_eval", fail)
+
+    assert cli.main(["--output", str(output)]) == 1
+    assert not output.exists()
+    assert "SECRET" not in capsys.readouterr().err

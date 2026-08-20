@@ -22,7 +22,11 @@ from qdrant_client.http.exceptions import UnexpectedResponse
 
 from app.knowledge.base import VectorStoreUnavailableError
 from app.knowledge.embeddings import EmbeddingVector
-from app.knowledge.vector_store import VectorCandidate, VectorPoint
+from app.knowledge.vector_store import (
+    VectorCandidate,
+    VectorPoint,
+    VectorPointIdentity,
+)
 
 DENSE_VECTOR_NAME = "dense"
 SPARSE_VECTOR_NAME = "sparse"
@@ -185,6 +189,58 @@ class QdrantVectorStore:
             raise VectorStoreUnavailableError(
                 reason=f"upsert: {type(exc).__name__}: {exc}"
             ) from exc
+
+    def validate_point_identities(
+        self, *, expected: Sequence[VectorPointIdentity]
+    ) -> None:
+        """Verify exact content-free metadata for a known set of point ids."""
+
+        expected = tuple(expected)
+        expected_by_id = {item.chunk_id: item for item in expected}
+        if len(expected_by_id) != len(expected):
+            raise ValueError("vector point identity drift")
+        if not expected:
+            return
+        try:
+            records = self._client.retrieve(
+                collection_name=self._collection_name,
+                ids=list(expected_by_id),
+                with_payload=True,
+                with_vectors=False,
+            )
+        except (UnexpectedResponse, ConnectionError, TimeoutError) as exc:
+            raise VectorStoreUnavailableError(
+                reason=f"retrieve identities: {type(exc).__name__}"
+            ) from exc
+
+        actual_by_id: dict[str, VectorPointIdentity] = {}
+        for record in records:
+            payload = record.payload if isinstance(record.payload, dict) else {}
+            chunk_id = payload.get(_CHUNK_ID_FIELD)
+            organization_id = payload.get(_ORGANIZATION_FIELD)
+            document_id = payload.get(_DOCUMENT_ID_FIELD)
+            version_id = payload.get(_VERSION_FIELD)
+            ordinal = payload.get(_ORDINAL_FIELD)
+            if (
+                not isinstance(chunk_id, str)
+                or not isinstance(organization_id, str)
+                or not isinstance(document_id, str)
+                or not isinstance(version_id, str)
+                or isinstance(ordinal, bool)
+                or not isinstance(ordinal, int)
+                or str(record.id) != chunk_id
+                or chunk_id in actual_by_id
+            ):
+                raise ValueError("vector point identity drift")
+            actual_by_id[chunk_id] = VectorPointIdentity(
+                chunk_id=chunk_id,
+                organization_id=organization_id,
+                document_id=document_id,
+                version_id=version_id,
+                ordinal=ordinal,
+            )
+        if actual_by_id != expected_by_id:
+            raise ValueError("vector point identity drift")
 
     # ------------------------------------------------------------------ #
     # Hybrid search with native RRF

@@ -74,6 +74,7 @@ def test_factory_wires_real_adapters_without_network(tmp_path, monkeypatch):
     # yet assembly touched the network zero times.
     assert isinstance(services.ingestion._embedding, DashScopeEmbeddingClient)
     assert isinstance(services.ingestion._vector_store, QdrantVectorStore)
+    assert services.vector_store is services.ingestion._vector_store
     assert qdrant.network_calls == []
 
 
