@@ -125,13 +125,15 @@ def test_transport_errors_are_internal_and_not_retried(error):
 
 
 def test_provider_error_retains_only_sanitized_internal_diagnostic():
+    secret_sentinel = "SECRET_SENTINEL_DO_NOT_RETAIN"
+
     class ProviderBalanceError(Exception):
         status_code = 402
         code = "insufficient_balance"
 
     completions = _Completions(
         error=ProviderBalanceError(
-            "account acct-secret cannot pay with token sk-secret"
+            f"account acct-secret cannot pay with {secret_sentinel}"
         )
     )
     sdk = SimpleNamespace(chat=SimpleNamespace(completions=completions))
@@ -148,4 +150,10 @@ def test_provider_error_retains_only_sanitized_internal_diagnostic():
     )
     assert raised.value.safe_message == "knowledge search could not be completed"
     assert "acct-secret" not in raised.value.internal_reason
-    assert "sk-secret" not in raised.value.internal_reason
+    assert secret_sentinel not in raised.value.internal_reason
+    exception_chain = (raised.value.__cause__, raised.value.__context__)
+    assert secret_sentinel not in " ".join(
+        repr(item) for item in exception_chain if item is not None
+    )
+    assert raised.value.__cause__ is None
+    assert raised.value.__context__ is None

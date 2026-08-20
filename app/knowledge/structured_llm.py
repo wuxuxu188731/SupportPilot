@@ -57,6 +57,7 @@ class OpenAIStructuredJSONClient:
         user_prompt: str,
         timeout_seconds: float,
     ) -> StructuredCompletion:
+        provider_failure = None
         try:
             response = self._client.chat.completions.create(
                 model=self._model_name,
@@ -70,9 +71,10 @@ class OpenAIStructuredJSONClient:
                 timeout=timeout_seconds,
             )
         except Exception as exc:
-            raise SearchInternalError(
-                internal_reason=_provider_diagnostic(exc)
-            ) from exc
+            provider_failure = _provider_diagnostic(exc)
+
+        if provider_failure is not None:
+            raise SearchInternalError(internal_reason=provider_failure)
 
         choices = getattr(response, "choices", None)
         if not isinstance(choices, (list, tuple)) or len(choices) != 1:
