@@ -132,6 +132,25 @@ class SQLiteKnowledgeStore(KnowledgeStore):
             created_at=row["created_at"],
         )
 
+    @staticmethod
+    def _to_retrieval_event(row: sqlite3.Row) -> RetrievalEvent:
+        return RetrievalEvent(
+            event_id=row["id"],
+            organization_id=row["organization_id"],
+            conversation_id=row["conversation_id"],
+            strategy=row["strategy"],
+            original_query=row["original_query"],
+            planned_queries_json=row["planned_queries_json"],
+            round_count=row["round_count"],
+            candidate_json=row["candidate_json"],
+            selected_chunk_ids_json=row["selected_chunk_ids_json"],
+            outcome=row["outcome"],
+            latency_ms=row["latency_ms"],
+            model_calls=row["model_calls"],
+            estimated_tokens=row["estimated_tokens"],
+            created_at=row["created_at"],
+        )
+
     # ------------------------------------------------------------ documents
     def create_document(
         self,
@@ -753,9 +772,10 @@ class SQLiteKnowledgeStore(KnowledgeStore):
                     outcome,
                     latency_ms,
                     model_calls,
-                    estimated_tokens
+                    estimated_tokens,
+                    created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event.event_id,
@@ -771,9 +791,28 @@ class SQLiteKnowledgeStore(KnowledgeStore):
                     event.latency_ms,
                     event.model_calls,
                     event.estimated_tokens,
+                    event.created_at,
                 ),
             )
         return event
+
+    def get_retrieval_event(
+        self,
+        *,
+        organization_id: str,
+        conversation_id: str,
+    ) -> RetrievalEvent | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM retrieval_events
+                WHERE organization_id = ? AND conversation_id = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (organization_id, conversation_id),
+            ).fetchone()
+        return None if row is None else self._to_retrieval_event(row)
 
     # ------------------------------------------------------------ activate
     def activate_version(

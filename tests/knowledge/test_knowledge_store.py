@@ -16,6 +16,7 @@ from app.knowledge.base import (
     DuplicateDocumentVersionError,
     IngestionStatus,
     InvalidDocumentError,
+    RetrievalEvent,
     VectorStoreUnavailableError,
 )
 from app.knowledge.sqlite_store import SQLiteKnowledgeStore
@@ -155,6 +156,82 @@ def _chunk(context, document, version, chunk_id):
 def job_for(version):
     """Return the queued job created for a version via create_version()."""
     return _JOBS_BY_VERSION[version.version_id]
+
+
+def retrieval_event(
+    organization_id: str,
+    *,
+    conversation_id: str,
+    event_id: str = "event-a",
+    created_at: str = "2026-08-21T00:00:00+00:00",
+) -> RetrievalEvent:
+    return RetrievalEvent(
+        event_id=event_id,
+        organization_id=organization_id,
+        conversation_id=conversation_id,
+        strategy="single",
+        original_query="sha256:original",
+        planned_queries_json='["sha256:planned"]',
+        round_count=1,
+        candidate_json='{"schema_version": 4}',
+        selected_chunk_ids_json="[]",
+        outcome="insufficient",
+        latency_ms=12,
+        model_calls=2,
+        estimated_tokens=34,
+        created_at=created_at,
+    )
+
+
+def test_get_retrieval_event_is_scoped_by_tenant(two_tenant_knowledge_store):
+    store, org_a, org_b = two_tenant_knowledge_store
+    event = retrieval_event(
+        org_a.organization_id, conversation_id="eval-case:adaptive"
+    )
+    store.record_retrieval_event(
+        organization_id=org_a.organization_id, event=event
+    )
+
+    assert store.get_retrieval_event(
+        organization_id=org_a.organization_id,
+        conversation_id="eval-case:adaptive",
+    ) == event
+    assert store.get_retrieval_event(
+        organization_id=org_b.organization_id,
+        conversation_id="eval-case:adaptive",
+    ) is None
+
+
+def test_get_retrieval_event_returns_newest_match(two_tenant_knowledge_store):
+    store, org_a, _ = two_tenant_knowledge_store
+    conversation_id = "eval-case:newest"
+    events = [
+        retrieval_event(
+            org_a.organization_id,
+            conversation_id=conversation_id,
+            event_id="event-old",
+            created_at="2026-08-20T23:59:59+00:00",
+        ),
+        retrieval_event(
+            org_a.organization_id,
+            conversation_id=conversation_id,
+            event_id="event-a",
+        ),
+        retrieval_event(
+            org_a.organization_id,
+            conversation_id=conversation_id,
+            event_id="event-z",
+        ),
+    ]
+    for event in events:
+        store.record_retrieval_event(
+            organization_id=org_a.organization_id, event=event
+        )
+
+    assert store.get_retrieval_event(
+        organization_id=org_a.organization_id,
+        conversation_id=conversation_id,
+    ) == events[-1]
 
 
 class TestTenantScoping:

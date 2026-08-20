@@ -23,11 +23,16 @@ from app.knowledge.base import (
     VectorStoreUnavailableError,
 )
 from app.knowledge.evidence import (
+    ASSESSOR_PROMPT_VERSION,
     EvidenceAssessor,
     EvidenceStatus,
     RoundEvidence,
 )
-from app.knowledge.planning import QueryPlanner, SearchStrategy
+from app.knowledge.planning import (
+    PLANNER_PROMPT_VERSION,
+    QueryPlanner,
+    SearchStrategy,
+)
 from app.knowledge.results import (
     AdaptiveSearchResult,
     Citation,
@@ -165,6 +170,7 @@ class AdaptiveKnowledgeSearchService:
         reason_code = None
         failure_stage = None
         planned_queries: list[str] = []
+        trace_queries: list[dict] = []
         trace_candidates: list[dict] = []
         evidence_by_id: dict[str, RoundEvidence] = {}
         selected: list[RoundEvidence] = []
@@ -205,6 +211,13 @@ class AdaptiveKnowledgeSearchService:
                 for query_index, query in enumerate(round_queries):
                     planned_queries.append(query)
                     executed_keys.add(query.casefold())
+                    trace_queries.append(
+                        {
+                            "round": round_number,
+                            "query_index": query_index + 1,
+                            "query_digest": query_digest(query),
+                        }
+                    )
                     retrieval = self._retriever.retrieve(
                         organization_id=organization_id,
                         query=query,
@@ -332,9 +345,12 @@ class AdaptiveKnowledgeSearchService:
             return result
         finally:
             trace = {
-                "schema_version": 3,
+                "schema_version": 4,
+                "planner_prompt_version": PLANNER_PROMPT_VERSION,
+                "assessor_prompt_version": ASSESSOR_PROMPT_VERSION,
                 "reason_code": reason_code,
                 "failure_stage": failure_stage,
+                "queries": trace_queries,
                 "candidates": trace_candidates,
             }
             selected_ids = {

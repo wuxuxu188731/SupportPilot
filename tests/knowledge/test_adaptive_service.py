@@ -2,6 +2,8 @@ import pytest
 import json
 from types import SimpleNamespace
 
+from app.knowledge import evidence as evidence_module
+from app.knowledge import planning as planning_module
 from app.knowledge.base import (
     ChunkWithDocumentTitle,
     EmbeddingUnavailableError,
@@ -21,7 +23,11 @@ from app.knowledge.planning import (
     SearchStrategy,
 )
 from app.knowledge.results import QueryRetrievalResult, ScoredChunk
-from app.knowledge.service import AdaptiveKnowledgeSearchService, SearchBudget
+from app.knowledge.service import (
+    AdaptiveKnowledgeSearchService,
+    SearchBudget,
+    query_digest,
+)
 
 
 def test_budget_rejects_third_round_and_fourth_model_call():
@@ -319,13 +325,55 @@ def test_event_hashes_queries_and_contains_content_free_trace(adaptive_scope):
     assert "13800000000" not in combined
     assert "user@example.com" not in combined
     assert "trusted content" not in combined
-    assert '"schema_version": 3' in event.candidate_json
+    assert '"schema_version": 4' in event.candidate_json
     assert event.model_calls == 2
     assert event.strategy == "single"
 
 
+def test_trace_counts_every_query_even_when_no_candidates(adaptive_scope):
+    adaptive_scope.planner.next_plan = _plan(
+        SearchStrategy.MULTI,
+        ("q1", "q2"),
+        SearchReasonCode.MULTI_CONDITION,
+    )
+    adaptive_scope.assessor.decisions = [
+        _assessment(
+            EvidenceStatus.INSUFFICIENT,
+            missing=("no_evidence",),
+        )
+    ]
+
+    result = adaptive_scope.service.search(
+        organization_id="org-a",
+        question="complex private question",
+    )
+
+    assert result.retrieval_trace["queries"] == [
+        {"round": 1, "query_index": 1, "query_digest": query_digest("q1")},
+        {"round": 1, "query_index": 2, "query_digest": query_digest("q2")},
+    ]
+    assert result.retrieval_trace["planner_prompt_version"] == (
+        planning_module.PLANNER_PROMPT_VERSION
+    )
+    assert result.retrieval_trace["assessor_prompt_version"] == (
+        evidence_module.ASSESSOR_PROMPT_VERSION
+    )
+    serialized = json.dumps(result.retrieval_trace, ensure_ascii=False)
+    for forbidden in (
+        '"q1"',
+        '"q2"',
+        "complex private question",
+        "org-a",
+        "reasoning",
+    ):
+        assert forbidden not in serialized
+
+
 def test_planner_and_assessor_provider_failures_are_internal(adaptive_scope):
-    adaptive_scope.planner.error = SearchInternalError()
+    internal_reason = "ProviderBalanceError|status=402|code=insufficient_balance"
+    adaptive_scope.planner.error = SearchInternalError(
+        internal_reason=internal_reason
+    )
     planner_result = adaptive_scope.service.search(
         organization_id="org-a", question="returns"
     )
@@ -334,6 +382,8 @@ def test_planner_and_assessor_provider_failures_are_internal(adaptive_scope):
     assert json.loads(
         adaptive_scope.store.events[-1].candidate_json
     )["failure_stage"] == "planner"
+    assert internal_reason not in json.dumps(planner_result.public_dict())
+    assert internal_reason not in adaptive_scope.store.events[-1].candidate_json
 
     adaptive_scope.planner.error = None
     adaptive_scope.planner.next_plan = _plan(

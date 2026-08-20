@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -9,6 +10,20 @@ from app.knowledge.base import SearchInternalError
 from app.knowledge.embeddings import count_tokens
 
 STRUCTURED_MAX_TOKENS = 800
+_SAFE_PROVIDER_CODE = re.compile(r"[A-Za-z0-9_.-]{1,128}\Z")
+
+
+def _provider_diagnostic(exc: Exception) -> str:
+    parts = [type(exc).__name__]
+    status_code = getattr(exc, "status_code", None)
+    if isinstance(status_code, int) and not isinstance(status_code, bool):
+        parts.append(f"status={status_code}")
+    provider_code = getattr(exc, "code", None)
+    if isinstance(provider_code, str) and _SAFE_PROVIDER_CODE.fullmatch(
+        provider_code
+    ):
+        parts.append(f"code={provider_code}")
+    return "|".join(parts)
 
 
 @dataclass(frozen=True)
@@ -55,7 +70,9 @@ class OpenAIStructuredJSONClient:
                 timeout=timeout_seconds,
             )
         except Exception as exc:
-            raise SearchInternalError() from exc
+            raise SearchInternalError(
+                internal_reason=_provider_diagnostic(exc)
+            ) from exc
 
         choices = getattr(response, "choices", None)
         if not isinstance(choices, (list, tuple)) or len(choices) != 1:

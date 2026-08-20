@@ -122,3 +122,30 @@ def test_transport_errors_are_internal_and_not_retried(error):
             timeout_seconds=2,
         )
     assert len(completions.calls) == 1
+
+
+def test_provider_error_retains_only_sanitized_internal_diagnostic():
+    class ProviderBalanceError(Exception):
+        status_code = 402
+        code = "insufficient_balance"
+
+    completions = _Completions(
+        error=ProviderBalanceError(
+            "account acct-secret cannot pay with token sk-secret"
+        )
+    )
+    sdk = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+    with pytest.raises(SearchInternalError) as raised:
+        OpenAIStructuredJSONClient(sdk, model_name="model").complete(
+            system_prompt='return json: {"ok":true}',
+            user_prompt="private customer question",
+            timeout_seconds=2,
+        )
+
+    assert raised.value.internal_reason == (
+        "ProviderBalanceError|status=402|code=insufficient_balance"
+    )
+    assert raised.value.safe_message == "knowledge search could not be completed"
+    assert "acct-secret" not in raised.value.internal_reason
+    assert "sk-secret" not in raised.value.internal_reason

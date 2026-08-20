@@ -67,6 +67,7 @@ class PlanDecision:
     degraded: bool
 
 
+PLANNER_PROMPT_VERSION = "planner-v1"
 PLANNER_SYSTEM_PROMPT = """Classify and rewrite the user question for retrieval.
 Return one json object only. Do not answer the question or expose reasoning.
 Never output tenant ids, thresholds, budgets, model names, or top-k controls.

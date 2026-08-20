@@ -252,7 +252,8 @@ class SearchBudgetExceededError(KnowledgeError):
 class SearchInternalError(KnowledgeError):
     code = "SEARCH_INTERNAL_ERROR"
 
-    def __init__(self) -> None:
+    def __init__(self, *, internal_reason: str | None = None) -> None:
+        self.internal_reason = internal_reason
         super().__init__(
             "SEARCH_INTERNAL_ERROR",
             "knowledge search could not be completed",
@@ -451,4 +452,12 @@ class KnowledgeStore(Protocol):
         organization_id: str,
         event: RetrievalEvent,
     ) -> RetrievalEvent:
+        raise NotImplementedError
+
+    def get_retrieval_event(
+        self,
+        *,
+        organization_id: str,
+        conversation_id: str,
+    ) -> RetrievalEvent | None:
         raise NotImplementedError

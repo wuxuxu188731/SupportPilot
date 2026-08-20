@@ -174,6 +174,18 @@ class TestErrors:
             error = cls.__new__(cls)
             assert error.code == expected_code
 
+    def test_search_internal_error_keeps_diagnostic_out_of_safe_message(self):
+        error = kb.SearchInternalError(
+            internal_reason=(
+                "ProviderBalanceError|status=402|code=insufficient_balance"
+            )
+        )
+        assert error.internal_reason == (
+            "ProviderBalanceError|status=402|code=insufficient_balance"
+        )
+        assert error.safe_message == "knowledge search could not be completed"
+        assert "insufficient_balance" not in error.safe_message
+
 
 class TestKnowledgeStoreProtocol:
     def test_rag_service_methods_raise_not_implemented(self):
@@ -228,6 +240,13 @@ class TestKnowledgeStoreProtocol:
             (
                 kb.KnowledgeStore.record_retrieval_event,
                 dict(organization_id="org-a", event=event),
+            ),
+            (
+                kb.KnowledgeStore.get_retrieval_event,
+                dict(
+                    organization_id="org-a",
+                    conversation_id="eval-case:adaptive",
+                ),
             ),
         ]
         for method, kwargs in calls:
