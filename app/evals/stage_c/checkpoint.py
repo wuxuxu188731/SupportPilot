@@ -198,7 +198,12 @@ def _validate_checkpoint_payload(
         raise ValueError("payload.attempt must match the checkpoint result")
     if "error_code" in payload and payload["error_code"] not in _ERROR_CODES:
         raise ValueError("payload.error_code is invalid")
-    if "strategy" in payload and payload["strategy"] not in {"single", "multi", None}:
+    if "strategy" in payload and payload["strategy"] not in {
+        "single",
+        "multi",
+        "none",
+        None,
+    }:
         raise ValueError("payload.strategy is invalid")
     if "evidence_status" in payload and payload["evidence_status"] not in {
         "complete", "partial", "missing", "not_applicable", None,

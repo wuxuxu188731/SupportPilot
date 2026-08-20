@@ -185,6 +185,7 @@ def _load_trace(
     if not isinstance(queries, list):
         raise ValueError("adaptive retrieval trace queries are missing")
     query_counts = [0] * round_count
+    query_indexes_by_round: list[list[int]] = [[] for _ in range(round_count)]
     seen: set[tuple[int, int]] = set()
     for item in queries:
         if not isinstance(item, dict):
@@ -209,6 +210,12 @@ def _load_trace(
             raise ValueError("adaptive retrieval query trace contains duplicates")
         seen.add(key)
         query_counts[round_number - 1] += 1
+        query_indexes_by_round[round_number - 1].append(query_index)
+    if any(
+        not indexes or sorted(indexes) != list(range(1, len(indexes) + 1))
+        for indexes in query_indexes_by_round
+    ):
+        raise ValueError("adaptive retrieval query indexes are not contiguous")
     return raw, tuple(query_counts)
 
 
@@ -370,15 +377,25 @@ def normalize_result(
     strategy_allowed = None
     strategy_preferred = None
     if variant is StageCVariant.ADAPTIVE and event is not None:
-        try:
-            parsed_strategy = RetrievalStrategy(event.strategy)
-        except ValueError:
-            parsed_strategy = None
-        if parsed_strategy is not None:
-            strategy = parsed_strategy.value
+        if event.strategy == "none":
+            strategy = "none"
             if case.strategy_expectation is not None:
-                strategy_allowed = parsed_strategy in case.strategy_expectation.allowed
-                strategy_preferred = parsed_strategy is case.strategy_expectation.preferred
+                strategy_allowed = False
+                strategy_preferred = False
+        else:
+            try:
+                parsed_strategy = RetrievalStrategy(event.strategy)
+            except ValueError:
+                parsed_strategy = None
+            if parsed_strategy is not None:
+                strategy = parsed_strategy.value
+                if case.strategy_expectation is not None:
+                    strategy_allowed = (
+                        parsed_strategy in case.strategy_expectation.allowed
+                    )
+                    strategy_preferred = (
+                        parsed_strategy is case.strategy_expectation.preferred
+                    )
 
     flags = _budget_flags(
         case,

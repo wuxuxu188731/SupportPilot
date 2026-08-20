@@ -238,6 +238,97 @@ def test_adaptive_normalization_uses_persisted_event_counts_and_top_five(
     assert "must never be serialized" not in json.dumps(payload)
 
 
+def test_none_strategy_is_preserved_and_scored_against_expectations(
+    identity_index: IdentityIndex,
+) -> None:
+    """Dropping a legal NONE strategy would remove a completed case from strategy metrics."""
+    case = make_case(
+        strategy_expectation=StrategyExpectation(
+            preferred=RetrievalStrategy.SINGLE,
+            allowed=(RetrievalStrategy.SINGLE, RetrievalStrategy.MULTI),
+        )
+    )
+    persisted_event = event(
+        adaptive=True,
+        rounds=0,
+        model_calls=1,
+        tokens=12,
+        query_rounds=(),
+    )
+    object.__setattr__(persisted_event, "strategy", "none")
+
+    normalized = normalize_result(
+        case=case,
+        variant=StageCVariant.ADAPTIVE,
+        result=adaptive_result(strategy="none"),
+        event=persisted_event,
+        identity_index=identity_index,
+        attempt=1,
+    )
+
+    assert normalized.status == "completed"
+    assert normalized.strategy == "none"
+    assert normalized.strategy_allowed is False
+    assert normalized.strategy_preferred is False
+    assert checkpoint_result(normalized).payload["strategy"] == "none"
+
+    no_expectation = normalize_result(
+        case=make_case("none-without-expectation"),
+        variant=StageCVariant.ADAPTIVE,
+        result=adaptive_result(strategy="none"),
+        event=persisted_event,
+        identity_index=identity_index,
+        attempt=1,
+    )
+    assert no_expectation.strategy == "none"
+    assert no_expectation.strategy_allowed is None
+    assert no_expectation.strategy_preferred is None
+
+
+@pytest.mark.parametrize(
+    "query_indexes_by_round",
+    [
+        ((1,), ()),
+        ((1, 3),),
+    ],
+)
+def test_adaptive_trace_rejects_empty_rounds_and_non_contiguous_query_indexes(
+    identity_index: IdentityIndex,
+    query_indexes_by_round: tuple[tuple[int, ...], ...],
+) -> None:
+    """A declared executed round must contain exactly query indexes 1 through count."""
+    persisted_event = event(
+        adaptive=True,
+        rounds=len(query_indexes_by_round),
+        model_calls=1,
+        tokens=12,
+        query_rounds=tuple(len(indexes) for indexes in query_indexes_by_round),
+    )
+    trace = json.loads(persisted_event.candidate_json)
+    trace["queries"] = [
+        {
+            "round": round_number,
+            "query_index": query_index,
+            "query_digest": f"sha256:{round_number}-{query_index}",
+        }
+        for round_number, indexes in enumerate(query_indexes_by_round, start=1)
+        for query_index in indexes
+    ]
+    object.__setattr__(persisted_event, "candidate_json", json.dumps(trace))
+
+    normalized = normalize_result(
+        case=make_case(),
+        variant=StageCVariant.ADAPTIVE,
+        result=adaptive_result(returned=citations(1)),
+        event=persisted_event,
+        identity_index=identity_index,
+        attempt=1,
+    )
+
+    assert normalized.status == "infrastructure_failed"
+    assert normalized.metrics is None
+
+
 def test_vector_failure_and_damaged_or_missing_event_are_infrastructure_failed(
     identity_index: IdentityIndex,
 ) -> None:

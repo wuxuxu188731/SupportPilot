@@ -343,6 +343,33 @@ def test_checkpoint_round_trips_completed_task6_variant_result_payload() -> None
     assert restored.to_dict() == result.to_dict()
 
 
+def test_checkpoint_round_trips_none_strategy_but_rejects_unknown_strategy() -> None:
+    """Task 6 must persist production NONE without opening the strategy boundary."""
+    result = CheckpointResult(
+        case_id="case-1",
+        variant=StageCVariant.ADAPTIVE,
+        status="completed",
+        attempt=1,
+        payload={
+            "case_id": "case-1",
+            "variant": "adaptive",
+            "status": "completed",
+            "attempt": 1,
+            "strategy": "none",
+        },
+    )
+
+    assert CheckpointResult.from_dict(result.to_dict()).payload["strategy"] == "none"
+    with pytest.raises(ValueError, match="strategy"):
+        CheckpointResult(
+            case_id="case-1",
+            variant=StageCVariant.ADAPTIVE,
+            status="completed",
+            attempt=1,
+            payload={"strategy": "invented"},
+        )
+
+
 def test_checkpoint_round_trips_infrastructure_failed_task6_payload() -> None:
     """Infrastructure failures preserve Task 6's null metrics instead of scoring."""
     result = CheckpointResult(
