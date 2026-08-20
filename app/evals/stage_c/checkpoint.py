@@ -20,9 +20,11 @@ from app.evals.stage_c.models import StageCVariant, TenantKey
 _SCHEMA_VERSION = 1
 _RESULT_STATUSES = {"completed", "infrastructure_failed"}
 _PAYLOAD_FIELDS = {
-    "case_id", "variant", "status", "error_code", "strategy", "evidence_status",
-    "round_count", "query_count", "query_counts", "model_calls", "tokens",
-    "latency_ms", "citations", "candidate_trace", "metrics", "safety_flags",
+    "case_id", "variant", "status", "attempt", "error_code", "strategy",
+    "strategy_allowed", "strategy_preferred", "evidence_status", "round_count",
+    "query_count_by_round", "model_calls", "tokens", "latency_ms",
+    "evaluated_citation_count", "full_citation_count", "citations",
+    "candidate_trace", "metrics", "safety_flags",
 }
 _ERROR_CODES = {
     "provider_timeout", "provider_unavailable", "provider_error", "invalid_response",
@@ -183,6 +185,7 @@ def _validate_checkpoint_payload(
     case_id: str,
     variant: StageCVariant,
     status: str,
+    attempt: int,
 ) -> None:
     _require_allowed_keys(payload, allowed=_PAYLOAD_FIELDS, name="payload")
     if "case_id" in payload and payload["case_id"] != case_id:
@@ -191,6 +194,8 @@ def _validate_checkpoint_payload(
         raise ValueError("payload.variant must match the checkpoint result")
     if "status" in payload and payload["status"] != status:
         raise ValueError("payload.status must match the checkpoint result")
+    if "attempt" in payload and payload["attempt"] != attempt:
+        raise ValueError("payload.attempt must match the checkpoint result")
     if "error_code" in payload and payload["error_code"] not in _ERROR_CODES:
         raise ValueError("payload.error_code is invalid")
     if "strategy" in payload and payload["strategy"] not in {"single", "multi", None}:
@@ -199,25 +204,26 @@ def _validate_checkpoint_payload(
         "complete", "partial", "missing", "not_applicable", None,
     }:
         raise ValueError("payload.evidence_status is invalid")
-    for field in ("round_count", "query_count"):
+    for field in (
+        "round_count",
+        "model_calls",
+        "tokens",
+        "evaluated_citation_count",
+        "full_citation_count",
+    ):
         if field in payload:
             _require_nonnegative_int(payload[field], name=f"payload.{field}")
-    if "query_counts" in payload:
-        query_counts = payload["query_counts"]
+    for field in ("strategy_allowed", "strategy_preferred"):
+        if field in payload and type(payload[field]) is not bool:
+            raise TypeError(f"payload.{field} must be a boolean")
+    if "query_count_by_round" in payload:
+        query_counts = payload["query_count_by_round"]
         if not isinstance(query_counts, list):
-            raise TypeError("payload.query_counts must be a JSON list")
+            raise TypeError("payload.query_count_by_round must be a JSON list")
         for index, count in enumerate(query_counts):
-            _require_nonnegative_int(count, name=f"payload.query_counts[{index}]")
-    for field, allowed in (
-        ("model_calls", {"planner", "assessor", "total"}),
-        ("tokens", {"input", "output", "total"}),
-    ):
-        if field not in payload:
-            continue
-        values = _require_mapping(payload[field], name=f"payload.{field}")
-        _require_allowed_keys(values, allowed=allowed, name=f"payload.{field}")
-        for key, value in values.items():
-            _require_nonnegative_int(value, name=f"payload.{field}.{key}")
+            _require_nonnegative_int(
+                count, name=f"payload.query_count_by_round[{index}]"
+            )
     if "latency_ms" in payload:
         if _require_finite_number(payload["latency_ms"], name="payload.latency_ms") < 0:
             raise ValueError("payload.latency_ms must be non-negative")
@@ -231,7 +237,7 @@ def _validate_checkpoint_payload(
             allowed=_CANDIDATE_TRACE_FIELDS,
             name="payload.candidate_trace",
         )
-    if "metrics" in payload:
+    if "metrics" in payload and payload["metrics"] is not None:
         metrics = _require_mapping(payload["metrics"], name="payload.metrics")
         _require_allowed_keys(metrics, allowed=_METRIC_FIELDS, name="payload.metrics")
         for field in (
@@ -537,6 +543,7 @@ class CheckpointResult:
             case_id=self.case_id,
             variant=self.variant,
             status=self.status,
+            attempt=self.attempt,
         )
         _validate_json_value(payload, path="payload")
         object.__setattr__(self, "payload", _freeze_json(payload))

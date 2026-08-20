@@ -246,10 +246,12 @@ def test_checkpoint_payload_accepts_normalized_identity_artifacts() -> None:
             "strategy": "multi",
             "evidence_status": "complete",
             "round_count": 2,
-            "query_count": 3,
-            "model_calls": {"planner": 1, "assessor": 1, "total": 2},
-            "tokens": {"input": 20, "output": 10, "total": 30},
+            "query_count_by_round": [2, 1],
+            "model_calls": 2,
+            "tokens": 30,
             "latency_ms": 123.4,
+            "evaluated_citation_count": 1,
+            "full_citation_count": 1,
             "citations": [
                 {
                     "citation_id": "C1",
@@ -291,6 +293,86 @@ def test_checkpoint_payload_accepts_normalized_identity_artifacts() -> None:
     )
 
     assert result.payload["citations"][0]["document_id"] == "document-1"
+
+
+def test_checkpoint_round_trips_completed_task6_variant_result_payload() -> None:
+    """Checkpoint persistence must accept the frozen completed VariantResult shape."""
+    result = CheckpointResult(
+        case_id="case-1",
+        variant=StageCVariant.ADAPTIVE,
+        status="completed",
+        attempt=2,
+        payload={
+            "case_id": "case-1",
+            "variant": "adaptive",
+            "status": "completed",
+            "attempt": 2,
+            "strategy": "multi",
+            "strategy_allowed": True,
+            "strategy_preferred": True,
+            "evidence_status": "complete",
+            "round_count": 2,
+            "query_count_by_round": [3, 2],
+            "model_calls": 3,
+            "tokens": 321,
+            "latency_ms": 123.4,
+            "evaluated_citation_count": 5,
+            "full_citation_count": 6,
+            "citations": [
+                {
+                    "citation_id": "C1",
+                    "tenant_key": "org_a",
+                    "document_id": "document-1",
+                    "version_id": "version-2",
+                    "chunk_id": "chunk-1",
+                    "rank": 1,
+                }
+            ],
+            "candidate_trace": [],
+            "metrics": {
+                "covered_group_count": 1,
+                "required_group_count": 1,
+                "evidence_group_recall": 1.0,
+            },
+            "safety_flags": {"cross_tenant_leak": False},
+        },
+    )
+
+    restored = CheckpointResult.from_dict(result.to_dict())
+
+    assert restored.to_dict() == result.to_dict()
+
+
+def test_checkpoint_round_trips_infrastructure_failed_task6_payload() -> None:
+    """Infrastructure failures preserve Task 6's null metrics instead of scoring."""
+    result = CheckpointResult(
+        case_id="case-1",
+        variant=StageCVariant.BASELINE,
+        status="infrastructure_failed",
+        attempt=1,
+        payload={
+            "case_id": "case-1",
+            "variant": "baseline",
+            "status": "infrastructure_failed",
+            "attempt": 1,
+            "error_code": "provider_timeout",
+            "round_count": 0,
+            "query_count_by_round": [],
+            "model_calls": 0,
+            "tokens": 0,
+            "latency_ms": 0.0,
+            "evaluated_citation_count": 0,
+            "full_citation_count": 0,
+            "citations": [],
+            "candidate_trace": [],
+            "metrics": None,
+            "safety_flags": {"cross_tenant_leak": False},
+        },
+    )
+
+    restored = CheckpointResult.from_dict(result.to_dict())
+
+    assert restored.to_dict() == result.to_dict()
 
 
 def test_record_writes_through_a_same_directory_temporary_file(
