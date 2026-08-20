@@ -44,6 +44,12 @@ def metadata(git_revision: str, *, run_id: str | None = None) -> RunMetadata:
         score_threshold=0.42,
         timeout_seconds=30.0,
         runner_schema_version="stage-c-runner-v1",
+        adaptive_top_k=5,
+        max_rounds=2,
+        max_round_queries=(2, 1),
+        max_planner_calls=1,
+        max_assessor_calls=1,
+        max_model_calls=2,
         run_id=run_id,
         created_at="2026-08-21T00:00:00Z",
     )
@@ -55,7 +61,12 @@ def completed(case_id: str, variant: StageCVariant, *, attempt: int) -> Checkpoi
         variant=variant,
         status="completed",
         attempt=attempt,
-        payload={"outcome": "content-free"},
+        payload={
+            "case_id": case_id,
+            "variant": variant.value,
+            "status": "completed",
+            "metrics": {"returned_full_count": 0},
+        },
     )
 
 
@@ -67,7 +78,12 @@ def infrastructure_failed(
         variant=variant,
         status="infrastructure_failed",
         attempt=attempt,
-        payload={"reason": "provider_timeout"},
+        payload={
+            "case_id": case_id,
+            "variant": variant.value,
+            "status": "infrastructure_failed",
+            "error_code": "provider_timeout",
+        },
     )
 
 
@@ -114,6 +130,167 @@ def test_build_fingerprint_uses_canonical_json_key_order() -> None:
     expected = hashlib.sha256(b'{"a":{"x":1},"b":2}').hexdigest()
 
     assert build_run_fingerprint({"b": 2, "a": {"x": 1}}) == expected
+
+
+def test_corpus_hash_binds_each_file_digest_to_its_stable_path(tmp_path: Path) -> None:
+    """Sorting bare digests would miss content swapped between two corpus files."""
+    first = tmp_path / "tenant-a" / "returns.md"
+    second = tmp_path / "tenant-b" / "returns.md"
+    first.parent.mkdir()
+    second.parent.mkdir()
+    first.write_text("org-a policy", encoding="utf-8")
+    second.write_text("org-b policy", encoding="utf-8")
+    original = sha256_corpus((first, second))
+
+    first.write_text("org-b policy", encoding="utf-8")
+    second.write_text("org-a policy", encoding="utf-8")
+
+    assert sha256_corpus((first, second)) != original
+
+
+def _fixture_manifest_document() -> dict[str, object]:
+    return {
+        "tenant_key": "org_a",
+        "document_key": "returns_exchange",
+        "title": "Returns",
+        "document_id": "document-1",
+        "active_version_id": "version-2",
+        "old_version_id": "version-1",
+    }
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {
+            "tenant_key": "org_a",
+            "document_key": "returns_exchange",
+            "title": "Returns",
+            "document_id": "document-1",
+            "active_version_id": "version-2",
+        },
+        {
+            **_fixture_manifest_document(),
+            "untrusted_extra": "must-not-be-persisted",
+        },
+    ],
+)
+def test_fixture_manifest_state_rejects_damaged_document_schema(
+    document: dict[str, object],
+) -> None:
+    """A damaged manifest must not be reused merely because it is JSON-shaped."""
+    with pytest.raises((TypeError, ValueError)):
+        FixtureManifestState({"schema_version": 1, "documents": [document]})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("adaptive_top_k", 6),
+        ("max_rounds", 3),
+        ("max_round_queries", (2, 2)),
+        ("max_planner_calls", 2),
+        ("max_assessor_calls", 2),
+        ("max_model_calls", 4),
+    ],
+)
+def test_adaptive_hard_limits_change_run_fingerprint(
+    field: str, value: object
+) -> None:
+    """Adaptive guardrail drift must invalidate completed checkpoint results."""
+    raw = metadata("adaptive-limits").to_dict()
+    raw.update(
+        {
+            "adaptive_top_k": 5,
+            "max_rounds": 2,
+            "max_round_queries": (2, 1),
+            "max_planner_calls": 1,
+            "max_assessor_calls": 1,
+            "max_model_calls": 2,
+        }
+    )
+    baseline = RunMetadata(**raw)
+
+    assert replace(baseline, **{field: value}).fingerprint != baseline.fingerprint
+
+
+@pytest.mark.parametrize(
+    "sensitive_field",
+    ["api_key", "raw_document", "reasoning", "unexpected"],
+)
+def test_checkpoint_result_rejects_sensitive_or_unknown_payload_fields(
+    sensitive_field: str,
+) -> None:
+    """The checkpoint boundary must not persist credentials, corpus text, or CoT."""
+    with pytest.raises((TypeError, ValueError)):
+        CheckpointResult(
+            case_id="case-1",
+            variant=StageCVariant.BASELINE,
+            status="completed",
+            attempt=1,
+            payload={sensitive_field: "must-not-be-persisted"},
+        )
+
+
+def test_checkpoint_payload_accepts_normalized_identity_artifacts() -> None:
+    """Strict payload validation retains stable evidence identities for scoring."""
+    result = CheckpointResult(
+        case_id="case-1",
+        variant=StageCVariant.ADAPTIVE,
+        status="completed",
+        attempt=1,
+        payload={
+            "case_id": "case-1",
+            "variant": "adaptive",
+            "status": "completed",
+            "strategy": "multi",
+            "evidence_status": "complete",
+            "round_count": 2,
+            "query_count": 3,
+            "model_calls": {"planner": 1, "assessor": 1, "total": 2},
+            "tokens": {"input": 20, "output": 10, "total": 30},
+            "latency_ms": 123.4,
+            "citations": [
+                {
+                    "citation_id": "C1",
+                    "tenant_key": "org_a",
+                    "document_key": "returns_exchange",
+                    "document_id": "document-1",
+                    "version_id": "version-2",
+                    "chunk_id": "chunk-1",
+                    "heading_path": "Returns/Window",
+                    "rank": 1,
+                    "score": 0.9,
+                }
+            ],
+            "candidate_trace": [
+                {
+                    "round": 1,
+                    "query_index": 1,
+                    "rank": 1,
+                    "score": 0.9,
+                    "citation_id": "C1",
+                    "tenant_key": "org_a",
+                    "document_id": "document-1",
+                    "version_id": "version-2",
+                    "chunk_id": "chunk-1",
+                }
+            ],
+            "metrics": {
+                "covered_group_count": 1,
+                "required_group_count": 1,
+                "evidence_group_recall": 1.0,
+                "retrieval_precision": 1.0,
+            },
+            "safety_flags": {
+                "cross_tenant_leak": False,
+                "disabled_document_leak": False,
+                "inactive_version_leak": False,
+            },
+        },
+    )
+
+    assert result.payload["citations"][0]["document_id"] == "document-1"
 
 
 def test_record_writes_through_a_same_directory_temporary_file(

@@ -14,11 +14,38 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Literal
 
-from app.evals.stage_c.models import StageCVariant
+from app.evals.stage_c.models import StageCVariant, TenantKey
 
 
 _SCHEMA_VERSION = 1
 _RESULT_STATUSES = {"completed", "infrastructure_failed"}
+_PAYLOAD_FIELDS = {
+    "case_id", "variant", "status", "error_code", "strategy", "evidence_status",
+    "round_count", "query_count", "query_counts", "model_calls", "tokens",
+    "latency_ms", "citations", "candidate_trace", "metrics", "safety_flags",
+}
+_ERROR_CODES = {
+    "provider_timeout", "provider_unavailable", "provider_error", "invalid_response",
+    "budget_exhausted", "unexpected_error",
+}
+_METRIC_FIELDS = {
+    "covered_group_count", "required_group_count", "evidence_group_recall",
+    "retrieval_precision", "complete_evidence_coverage", "relevant_top5_count",
+    "evaluated_citation_count", "returned_full_count", "cross_tenant_leak",
+    "disabled_document_leak", "inactive_version_leak", "unknown_identity_count",
+    "quality_scope_reason",
+}
+_SAFETY_FLAG_FIELDS = {
+    "cross_tenant_leak", "disabled_document_leak", "inactive_version_leak",
+    "unknown_identity_count", "injection_followed", "budget_exceeded",
+    "round_limit_exceeded", "query_limit_exceeded", "model_call_limit_exceeded",
+}
+_CITATION_FIELDS = {
+    "citation_id", "tenant_key", "document_key", "document_id", "version_id",
+    "chunk_id", "heading_path", "rank", "score", "identity_known",
+    "identity_consistent", "document_status", "active_version_id",
+}
+_CANDIDATE_TRACE_FIELDS = _CITATION_FIELDS | {"round", "query_index", "source"}
 
 
 def _validate_json_value(value: object, *, path: str = "value") -> None:
@@ -77,6 +104,14 @@ def _require_exact_keys(
         raise ValueError(f"{name} has invalid keys; missing={missing}, extra={extra}")
 
 
+def _require_allowed_keys(
+    raw: Mapping[str, object], *, allowed: set[str], name: str
+) -> None:
+    unexpected = sorted(set(raw) - allowed)
+    if unexpected:
+        raise ValueError(f"{name} has unsupported keys: {unexpected}")
+
+
 def _require_nonempty_string(value: object, *, name: str) -> str:
     if type(value) is not str or not value:
         raise TypeError(f"{name} must be a non-empty string")
@@ -89,6 +124,12 @@ def _require_positive_int(value: object, *, name: str) -> int:
     return value
 
 
+def _require_nonnegative_int(value: object, *, name: str) -> int:
+    if type(value) is not int or value < 0:
+        raise ValueError(f"{name} must be a non-negative integer")
+    return value
+
+
 def _require_finite_number(value: object, *, name: str) -> float:
     if type(value) not in {int, float} or isinstance(value, bool):
         raise TypeError(f"{name} must be a number")
@@ -96,6 +137,133 @@ def _require_finite_number(value: object, *, name: str) -> float:
     if not math.isfinite(result):
         raise ValueError(f"{name} must be finite")
     return result
+
+
+def _validate_identity_fields(raw: Mapping[str, object], *, name: str) -> None:
+    for field in (
+        "citation_id", "document_key", "document_id", "version_id", "chunk_id",
+        "heading_path", "active_version_id",
+    ):
+        if field in raw and raw[field] is not None:
+            _require_nonempty_string(raw[field], name=f"{name}.{field}")
+    if "tenant_key" in raw and raw["tenant_key"] is not None:
+        try:
+            TenantKey(raw["tenant_key"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{name}.tenant_key is invalid") from exc
+    if "document_status" in raw and raw["document_status"] is not None:
+        if raw["document_status"] not in {"active", "disabled"}:
+            raise ValueError(f"{name}.document_status is invalid")
+
+
+def _validate_citation_artifacts(
+    value: object, *, allowed: set[str], name: str
+) -> None:
+    if not isinstance(value, list):
+        raise TypeError(f"{name} must be a JSON list")
+    for index, item in enumerate(value):
+        raw = _require_mapping(item, name=f"{name}[{index}]")
+        _require_allowed_keys(raw, allowed=allowed, name=f"{name}[{index}]")
+        _validate_identity_fields(raw, name=f"{name}[{index}]")
+        for field in ("rank", "round", "query_index"):
+            if field in raw:
+                _require_positive_int(raw[field], name=f"{name}[{index}].{field}")
+        if "score" in raw:
+            _require_finite_number(raw["score"], name=f"{name}[{index}].score")
+        for field in ("identity_known", "identity_consistent"):
+            if field in raw and type(raw[field]) is not bool:
+                raise TypeError(f"{name}[{index}].{field} must be a boolean")
+        if "source" in raw and raw["source"] not in {"dense", "sparse", "fused"}:
+            raise ValueError(f"{name}[{index}].source is invalid")
+
+
+def _validate_checkpoint_payload(
+    payload: Mapping[str, object],
+    *,
+    case_id: str,
+    variant: StageCVariant,
+    status: str,
+) -> None:
+    _require_allowed_keys(payload, allowed=_PAYLOAD_FIELDS, name="payload")
+    if "case_id" in payload and payload["case_id"] != case_id:
+        raise ValueError("payload.case_id must match the checkpoint result")
+    if "variant" in payload and payload["variant"] != variant.value:
+        raise ValueError("payload.variant must match the checkpoint result")
+    if "status" in payload and payload["status"] != status:
+        raise ValueError("payload.status must match the checkpoint result")
+    if "error_code" in payload and payload["error_code"] not in _ERROR_CODES:
+        raise ValueError("payload.error_code is invalid")
+    if "strategy" in payload and payload["strategy"] not in {"single", "multi", None}:
+        raise ValueError("payload.strategy is invalid")
+    if "evidence_status" in payload and payload["evidence_status"] not in {
+        "complete", "partial", "missing", "not_applicable", None,
+    }:
+        raise ValueError("payload.evidence_status is invalid")
+    for field in ("round_count", "query_count"):
+        if field in payload:
+            _require_nonnegative_int(payload[field], name=f"payload.{field}")
+    if "query_counts" in payload:
+        query_counts = payload["query_counts"]
+        if not isinstance(query_counts, list):
+            raise TypeError("payload.query_counts must be a JSON list")
+        for index, count in enumerate(query_counts):
+            _require_nonnegative_int(count, name=f"payload.query_counts[{index}]")
+    for field, allowed in (
+        ("model_calls", {"planner", "assessor", "total"}),
+        ("tokens", {"input", "output", "total"}),
+    ):
+        if field not in payload:
+            continue
+        values = _require_mapping(payload[field], name=f"payload.{field}")
+        _require_allowed_keys(values, allowed=allowed, name=f"payload.{field}")
+        for key, value in values.items():
+            _require_nonnegative_int(value, name=f"payload.{field}.{key}")
+    if "latency_ms" in payload:
+        if _require_finite_number(payload["latency_ms"], name="payload.latency_ms") < 0:
+            raise ValueError("payload.latency_ms must be non-negative")
+    if "citations" in payload:
+        _validate_citation_artifacts(
+            payload["citations"], allowed=_CITATION_FIELDS, name="payload.citations"
+        )
+    if "candidate_trace" in payload:
+        _validate_citation_artifacts(
+            payload["candidate_trace"],
+            allowed=_CANDIDATE_TRACE_FIELDS,
+            name="payload.candidate_trace",
+        )
+    if "metrics" in payload:
+        metrics = _require_mapping(payload["metrics"], name="payload.metrics")
+        _require_allowed_keys(metrics, allowed=_METRIC_FIELDS, name="payload.metrics")
+        for field in (
+            "covered_group_count", "required_group_count", "relevant_top5_count",
+            "evaluated_citation_count", "returned_full_count", "unknown_identity_count",
+        ):
+            if field in metrics:
+                _require_nonnegative_int(metrics[field], name=f"payload.metrics.{field}")
+        for field in ("evidence_group_recall", "retrieval_precision"):
+            if field in metrics and metrics[field] is not None:
+                _require_finite_number(metrics[field], name=f"payload.metrics.{field}")
+        if "complete_evidence_coverage" in metrics and type(
+            metrics["complete_evidence_coverage"]
+        ) not in {bool, type(None)}:
+            raise TypeError("payload.metrics.complete_evidence_coverage must be boolean or null")
+        for field in (
+            "cross_tenant_leak", "disabled_document_leak", "inactive_version_leak",
+        ):
+            if field in metrics and type(metrics[field]) is not bool:
+                raise TypeError(f"payload.metrics.{field} must be a boolean")
+        if "quality_scope_reason" in metrics and metrics["quality_scope_reason"] not in {
+            "no_required_evidence_groups", "no_measurable_cases", None,
+        }:
+            raise ValueError("payload.metrics.quality_scope_reason is invalid")
+    if "safety_flags" in payload:
+        flags = _require_mapping(payload["safety_flags"], name="payload.safety_flags")
+        _require_allowed_keys(flags, allowed=_SAFETY_FLAG_FIELDS, name="payload.safety_flags")
+        for field, value in flags.items():
+            if field == "unknown_identity_count":
+                _require_nonnegative_int(value, name=f"payload.safety_flags.{field}")
+            elif type(value) is not bool:
+                raise TypeError(f"payload.safety_flags.{field} must be a boolean")
 
 
 def build_run_fingerprint(metadata_without_fingerprint: Mapping[str, object]) -> str:
@@ -121,9 +289,82 @@ def sha256_file(path: str | Path) -> str:
 
 
 def sha256_corpus(paths: Iterable[str | Path]) -> str:
-    """Return an order-independent digest of the corpus' file digests."""
-    file_digests = sorted(sha256_file(path) for path in paths)
-    return build_run_fingerprint({"file_sha256": file_digests})
+    """Return an order-independent digest bound to each corpus file identity."""
+    resolved_paths = tuple(Path(path).resolve() for path in paths)
+    if not resolved_paths:
+        return build_run_fingerprint({"files": []})
+    common_parent = Path(
+        os.path.commonpath([str(path.parent) for path in resolved_paths])
+    )
+    files = [
+        {
+            "path": (
+                path.name
+                if len(resolved_paths) == 1
+                else path.relative_to(common_parent).as_posix()
+            ),
+            "sha256": sha256_file(path),
+        }
+        for path in resolved_paths
+    ]
+    if len({entry["path"] for entry in files}) != len(files):
+        raise ValueError("corpus paths must be unique")
+    return build_run_fingerprint({"files": sorted(files, key=lambda entry: entry["path"])})
+
+
+def _validate_fixture_manifest(manifest: Mapping[str, object]) -> None:
+    _require_exact_keys(
+        manifest,
+        expected={"schema_version", "documents"},
+        name="fixture_manifest",
+    )
+    if type(manifest["schema_version"]) is not int or manifest["schema_version"] != 1:
+        raise ValueError("fixture_manifest schema_version must be 1")
+    documents = manifest["documents"]
+    if not isinstance(documents, list):
+        raise TypeError("fixture_manifest documents must be a list")
+    expected_document_keys = {
+        "tenant_key",
+        "document_key",
+        "title",
+        "document_id",
+        "active_version_id",
+        "old_version_id",
+    }
+    known_documents: set[tuple[TenantKey, str]] = set()
+    for index, document in enumerate(documents):
+        raw_document = _require_mapping(document, name=f"fixture_manifest.documents[{index}]")
+        _require_exact_keys(
+            raw_document,
+            expected=expected_document_keys,
+            name=f"fixture_manifest.documents[{index}]",
+        )
+        try:
+            tenant_key = TenantKey(raw_document["tenant_key"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"fixture_manifest.documents[{index}].tenant_key is invalid"
+            ) from exc
+        for key in (
+            "document_key",
+            "title",
+            "document_id",
+            "active_version_id",
+        ):
+            _require_nonempty_string(
+                raw_document[key], name=f"fixture_manifest.documents[{index}].{key}"
+            )
+        old_version_id = raw_document["old_version_id"]
+        if old_version_id is not None:
+            _require_nonempty_string(
+                old_version_id,
+                name=f"fixture_manifest.documents[{index}].old_version_id",
+            )
+        document_key = raw_document["document_key"]
+        identity = (tenant_key, document_key)
+        if identity in known_documents:
+            raise ValueError("fixture_manifest contains duplicate tenant/document keys")
+        known_documents.add(identity)
 
 
 @dataclass(frozen=True)
@@ -149,6 +390,12 @@ class RunMetadata:
     score_threshold: float
     timeout_seconds: float
     runner_schema_version: str
+    adaptive_top_k: int
+    max_rounds: int
+    max_round_queries: tuple[int, ...]
+    max_planner_calls: int
+    max_assessor_calls: int
+    max_model_calls: int
     run_id: str | None = None
     created_at: str | None = None
 
@@ -171,6 +418,20 @@ class RunMetadata:
             _require_nonempty_string(getattr(self, name), name=name)
         for name in ("embedding_dimensions", "top_k", "prefetch_limit", "token_budget"):
             _require_positive_int(getattr(self, name), name=name)
+        _require_positive_int(self.adaptive_top_k, name="adaptive_top_k")
+        _require_positive_int(self.max_rounds, name="max_rounds")
+        if type(self.max_round_queries) is not tuple:
+            raise TypeError("max_round_queries must be an immutable tuple")
+        if not self.max_round_queries:
+            raise ValueError("max_round_queries must not be empty")
+        for index, value in enumerate(self.max_round_queries):
+            _require_positive_int(value, name=f"max_round_queries[{index}]")
+        for name in (
+            "max_planner_calls",
+            "max_assessor_calls",
+            "max_model_calls",
+        ):
+            _require_nonnegative_int(getattr(self, name), name=name)
         _require_finite_number(self.score_threshold, name="score_threshold")
         if _require_finite_number(self.timeout_seconds, name="timeout_seconds") <= 0:
             raise ValueError("timeout_seconds must be positive")
@@ -201,6 +462,12 @@ class RunMetadata:
             "score_threshold": self.score_threshold,
             "timeout_seconds": self.timeout_seconds,
             "runner_schema_version": self.runner_schema_version,
+            "adaptive_top_k": self.adaptive_top_k,
+            "max_rounds": self.max_rounds,
+            "max_round_queries": list(self.max_round_queries),
+            "max_planner_calls": self.max_planner_calls,
+            "max_assessor_calls": self.max_assessor_calls,
+            "max_model_calls": self.max_model_calls,
         }
 
     @property
@@ -219,7 +486,12 @@ class RunMetadata:
         raw = _require_mapping(raw, name="metadata")
         expected = set(cls.__dataclass_fields__)
         _require_exact_keys(raw, expected=expected, name="metadata")
-        return cls(**dict(raw))
+        parsed = dict(raw)
+        max_round_queries = parsed["max_round_queries"]
+        if not isinstance(max_round_queries, list):
+            raise TypeError("metadata max_round_queries must be a JSON list")
+        parsed["max_round_queries"] = tuple(max_round_queries)
+        return cls(**parsed)
 
 
 @dataclass(frozen=True)
@@ -230,6 +502,7 @@ class FixtureManifestState:
 
     def __post_init__(self) -> None:
         manifest = _require_mapping(self.manifest, name="fixture_manifest")
+        _validate_fixture_manifest(manifest)
         _validate_json_value(manifest, path="fixture_manifest")
         object.__setattr__(self, "manifest", _freeze_json(manifest))
 
@@ -259,6 +532,12 @@ class CheckpointResult:
             raise ValueError("status must be completed or infrastructure_failed")
         _require_positive_int(self.attempt, name="attempt")
         payload = _require_mapping(self.payload, name="payload")
+        _validate_checkpoint_payload(
+            payload,
+            case_id=self.case_id,
+            variant=self.variant,
+            status=self.status,
+        )
         _validate_json_value(payload, path="payload")
         object.__setattr__(self, "payload", _freeze_json(payload))
 
@@ -315,7 +594,9 @@ class CheckpointState:
         if self.fingerprint != self.metadata.fingerprint:
             raise ValueError("checkpoint fingerprint does not match metadata")
         if self.fixture_manifest is not None:
-            fixture_manifest = FixtureManifestState(self.fixture_manifest).manifest
+            fixture_manifest = FixtureManifestState(
+                _thaw_json(self.fixture_manifest)  # type: ignore[arg-type]
+            ).manifest
         else:
             fixture_manifest = None
         results = _require_mapping(self.results, name="results")
