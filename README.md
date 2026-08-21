@@ -23,7 +23,19 @@ SupportPilot 是一个面向电商售后客服团队的多租户工单处理 Age
 - 阶段 A 已修正 ordinal 邻接误删互补章节的问题，并将 raw Top-K precision 与阶段 B
   最终 citation precision 分开。历史候选的无网络回放为 20/20 黄金章节命中；真实
   DashScope/Qdrant 重跑命令见 `docs/evals/tenant-scoped-rag-stage-a-baseline.md`。
-- Stage C 的 48 条扩容、Baseline/Adaptive 最终质量与成本对照尚未执行；本地 fake/黄金路径测试不代表真实环境质量达标。
+- Stage C 提供 48 条样例的 Baseline/Adaptive 检索级对照；本地 fake/黄金路径测试不代表真实环境质量达标。
+
+### Stage C 检索评测
+
+配置 `DASHSCOPE_API_KEY`、`DEEPSEEK_API_KEY` 并启动本地 Qdrant 后，在仓库根目录运行（同一命令会从 checkpoint 续跑）：
+
+```text
+python scripts/run_stage_c_retrieval_eval.py --database .artifacts/stage-c-retrieval/state.db --cases evals/knowledge/stage_c/cases.jsonl --checkpoint .artifacts/stage-c-retrieval/checkpoint.json --output .artifacts/stage-c-retrieval/report.json
+```
+
+运行状态、恢复记录和结果分别写入 `.artifacts/stage-c-retrieval/state.db`、`.artifacts/stage-c-retrieval/checkpoint.json` 与 `.artifacts/stage-c-retrieval/report.json`。两种策略统一按最终前 5 个 citation 评分；Adaptive 的第 6 个 citation 仅保留为诊断信息。
+
+Embedding、模型或 Qdrant 基础设施失败会写入可续跑 checkpoint 并以非零状态退出，不能按“无结果”解读。DashScope/DeepSeek 余额不足时充值后使用同一命令续跑；Qdrant 返回 503/Bad Gateway 时先排除 VPN/代理干扰，再使用同一命令续跑。
 
 当前不包含：
 
