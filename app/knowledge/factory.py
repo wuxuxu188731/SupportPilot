@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 from qdrant_client import QdrantClient
 
@@ -85,11 +86,18 @@ def create_knowledge_services(
         # check_compatibility=False suppresses QdrantClient's eager in-constructor
         # server-version probe, so assembly performs zero network I/O against the
         # configured URL.
-        qdrant_client = QdrantClient(
-            url=settings.qdrant_url,
-            timeout=_CONNECT_TIMEOUT_SECONDS,
-            check_compatibility=False,
-        )
+        client_options = {
+            "url": settings.qdrant_url,
+            "timeout": _CONNECT_TIMEOUT_SECONDS,
+            "check_compatibility": False,
+        }
+        if urlparse(settings.qdrant_url).hostname in {
+            "localhost",
+            "127.0.0.1",
+            "::1",
+        }:
+            client_options["trust_env"] = False
+        qdrant_client = QdrantClient(**client_options)
     vector_store = QdrantVectorStore(
         client=qdrant_client,
         collection_name=settings.qdrant_collection,

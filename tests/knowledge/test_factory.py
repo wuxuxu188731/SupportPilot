@@ -9,6 +9,8 @@ initialisation is deferred to first ingestion / explicit ops check.
 
 from dataclasses import dataclass, field
 
+import pytest
+
 from app.core.config import KnowledgeSettings
 
 
@@ -40,6 +42,43 @@ class RecordingQdrantClient:
 
     def query_points(self, **kwargs):  # pragma: no cover
         self.network_calls.append("query_points")
+
+
+@pytest.mark.parametrize(
+    ("url", "expects_proxy_bypass"),
+    [
+        ("http://localhost:6333", True),
+        ("http://127.0.0.1:6333", True),
+        ("http://[::1]:6333", True),
+        ("https://qdrant.example.com", False),
+    ],
+)
+def test_factory_bypasses_environment_proxy_only_for_loopback_qdrant(
+    tmp_path, monkeypatch, url, expects_proxy_bypass
+):
+    from app.knowledge import factory
+
+    captured = {}
+
+    def construct_qdrant(**kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(factory, "QdrantClient", construct_qdrant)
+    settings = KnowledgeSettings(
+        dashscope_api_key="test-key",
+        dashscope_base_url="https://dashscope.test/api/v1",
+        qdrant_url=url,
+    )
+
+    factory.create_knowledge_services(
+        tmp_path / "app.db", settings, llm_client=object()
+    )
+
+    if expects_proxy_bypass:
+        assert captured["trust_env"] is False
+    else:
+        assert "trust_env" not in captured
 
 
 def test_factory_wires_real_adapters_without_network(tmp_path, monkeypatch):
