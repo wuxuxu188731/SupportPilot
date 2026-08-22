@@ -77,12 +77,43 @@ def normalized_payload(
         "full_citation_count": 0,
         "citations": [],
         "candidate_trace": [],
-        "metrics": {} if status == "completed" else None,
-        "safety_flags": {},
+        "metrics": valid_metrics() if status == "completed" else None,
+        "safety_flags": valid_safety_flags(),
     }
     if status == "infrastructure_failed":
-        payload["error_code"] = "provider_timeout"
+        payload["error_code"] = "provider_unavailable"
     return payload
+
+
+def valid_metrics() -> dict[str, object]:
+    return {
+        "covered_group_count": 0,
+        "required_group_count": 0,
+        "evidence_group_recall": None,
+        "retrieval_precision": None,
+        "complete_evidence_coverage": None,
+        "relevant_top5_count": 0,
+        "evaluated_citation_count": 0,
+        "returned_full_count": 0,
+        "cross_tenant_leak": False,
+        "disabled_document_leak": False,
+        "inactive_version_leak": False,
+        "unknown_identity_count": 0,
+        "quality_scope_reason": "no_required_evidence_groups",
+    }
+
+
+def valid_safety_flags() -> dict[str, object]:
+    return {
+        "budget_exceeded": False,
+        "round_limit_exceeded": False,
+        "query_limit_exceeded": False,
+        "model_call_limit_exceeded": False,
+        "cross_tenant_leak": False,
+        "disabled_document_leak": False,
+        "inactive_version_leak": False,
+        "unknown_identity_count": 0,
+    }
 
 
 def completed(case_id: str, variant: StageCVariant, *, attempt: int) -> CheckpointResult:
@@ -357,6 +388,185 @@ def test_checkpoint_payload_enforces_status_dependent_metrics_and_error() -> Non
         )
 
 
+@pytest.mark.parametrize("field", ["metrics", "safety_flags"])
+def test_completed_payload_rejects_empty_nested_mappings(field: str) -> None:
+    """An empty normalized artifact must not make a completed result reusable."""
+    payload = normalized_payload(
+        "case-1", StageCVariant.BASELINE, status="completed", attempt=1
+    )
+    payload[field] = {}
+
+    with pytest.raises(ValueError, match=field):
+        CheckpointResult(
+            case_id="case-1",
+            variant=StageCVariant.BASELINE,
+            status="completed",
+            attempt=1,
+            payload=payload,
+        )
+
+
+@pytest.mark.parametrize("field", ["metrics", "safety_flags"])
+def test_completed_payload_rejects_extra_nested_mapping_key(field: str) -> None:
+    payload = normalized_payload(
+        "case-1", StageCVariant.BASELINE, status="completed", attempt=1
+    )
+    nested = dict(payload[field])
+    nested["unexpected"] = False
+    payload[field] = nested
+
+    with pytest.raises(ValueError, match=field):
+        CheckpointResult(
+            case_id="case-1",
+            variant=StageCVariant.BASELINE,
+            status="completed",
+            attempt=1,
+            payload=payload,
+        )
+
+
+def test_completed_payload_rejects_empty_citation_artifact() -> None:
+    payload = normalized_payload(
+        "case-1", StageCVariant.BASELINE, status="completed", attempt=1
+    )
+    payload["citations"] = [{}]
+
+    with pytest.raises(ValueError, match="citations"):
+        CheckpointResult(
+            case_id="case-1",
+            variant=StageCVariant.BASELINE,
+            status="completed",
+            attempt=1,
+            payload=payload,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "artifact"),
+    [
+        (
+            "citations",
+            {
+                "citation_id": "C1",
+                "rank": 1,
+                "document_id": "document-1",
+                "version_id": "version-1",
+                "chunk_id": "chunk-1",
+                "heading_path": "Returns/Window",
+                "identity_known": True,
+                "identity_consistent": True,
+            },
+        ),
+        (
+            "citations",
+            {
+                "citation_id": "C1",
+                "rank": 1,
+                "document_id": "untrusted-document",
+                "version_id": "untrusted-version",
+                "chunk_id": "unknown-chunk",
+                "heading_path": None,
+                "identity_known": False,
+                "identity_consistent": False,
+                "tenant_key": "org_a",
+            },
+        ),
+        (
+            "candidate_trace",
+            {
+                "chunk_id": "chunk-1",
+                "identity_known": True,
+                "identity_consistent": True,
+            },
+        ),
+        (
+            "candidate_trace",
+            {
+                "chunk_id": "unknown-chunk",
+                "identity_known": False,
+                "identity_consistent": False,
+                "document_id": "untrusted-document",
+            },
+        ),
+    ],
+)
+def test_checkpoint_rejects_incomplete_or_trusted_unknown_identity_artifact(
+    field: str, artifact: dict[str, object]
+) -> None:
+    payload = normalized_payload(
+        "case-1", StageCVariant.BASELINE, status="completed", attempt=1
+    )
+    payload[field] = [artifact]
+
+    with pytest.raises(ValueError, match=field):
+        CheckpointResult(
+            case_id="case-1",
+            variant=StageCVariant.BASELINE,
+            status="completed",
+            attempt=1,
+            payload=payload,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "nested_field", "value"),
+    [
+        ("metrics", "covered_group_count", True),
+        ("metrics", "evidence_group_recall", 1),
+        ("metrics", "evidence_group_recall", "1.0"),
+        ("metrics", "complete_evidence_coverage", 1),
+        ("safety_flags", "budget_exceeded", 0),
+        ("safety_flags", "unknown_identity_count", False),
+    ],
+)
+def test_checkpoint_rejects_wrong_nested_primitive_type(
+    field: str, nested_field: str, value: object
+) -> None:
+    payload = normalized_payload(
+        "case-1", StageCVariant.BASELINE, status="completed", attempt=1
+    )
+    nested = dict(payload[field])
+    nested[nested_field] = value
+    payload[field] = nested
+
+    with pytest.raises((TypeError, ValueError), match=nested_field):
+        CheckpointResult(
+            case_id="case-1",
+            variant=StageCVariant.BASELINE,
+            status="completed",
+            attempt=1,
+            payload=payload,
+        )
+
+
+@pytest.mark.parametrize(
+    ("status", "error_code"),
+    [
+        ("completed", "provider_error"),
+        ("completed", "provider_timeout"),
+        ("infrastructure_failed", "provider_timeout"),
+        ("infrastructure_failed", "invalid_response"),
+        ("infrastructure_failed", "budget_exhausted"),
+    ],
+)
+def test_checkpoint_payload_rejects_error_code_outside_status_contract(
+    status: str, error_code: str
+) -> None:
+    payload = normalized_payload(
+        "case-1", StageCVariant.BASELINE, status=status, attempt=1
+    )
+    payload["error_code"] = error_code
+
+    with pytest.raises(ValueError, match="error_code"):
+        CheckpointResult(
+            case_id="case-1",
+            variant=StageCVariant.BASELINE,
+            status=status,
+            attempt=1,
+            payload=payload,
+        )
+
+
 def test_checkpoint_payload_accepts_normalized_identity_artifacts() -> None:
     """Strict payload validation retains stable evidence identities for scoring."""
     result = CheckpointResult(
@@ -389,6 +599,10 @@ def test_checkpoint_payload_accepts_normalized_identity_artifacts() -> None:
                     "heading_path": "Returns/Window",
                     "rank": 1,
                     "score": 0.9,
+                    "identity_known": True,
+                    "identity_consistent": True,
+                    "document_status": "active",
+                    "active_version_id": "version-2",
                 }
             ],
             "candidate_trace": [
@@ -397,24 +611,26 @@ def test_checkpoint_payload_accepts_normalized_identity_artifacts() -> None:
                     "query_index": 1,
                     "rank": 1,
                     "score": 0.9,
-                    "citation_id": "C1",
                     "tenant_key": "org_a",
+                    "document_key": "returns_exchange",
                     "document_id": "document-1",
                     "version_id": "version-2",
                     "chunk_id": "chunk-1",
+                    "heading_path": "Returns/Window",
+                    "identity_known": True,
+                    "identity_consistent": True,
+                    "document_status": "active",
+                    "active_version_id": "version-2",
                 }
             ],
             "metrics": {
+                **valid_metrics(),
                 "covered_group_count": 1,
                 "required_group_count": 1,
                 "evidence_group_recall": 1.0,
                 "retrieval_precision": 1.0,
             },
-            "safety_flags": {
-                "cross_tenant_leak": False,
-                "disabled_document_leak": False,
-                "inactive_version_leak": False,
-            },
+            "safety_flags": valid_safety_flags(),
         },
     )
 
@@ -448,19 +664,26 @@ def test_checkpoint_round_trips_completed_task6_variant_result_payload() -> None
                 {
                     "citation_id": "C1",
                     "tenant_key": "org_a",
+                    "document_key": "returns_exchange",
                     "document_id": "document-1",
                     "version_id": "version-2",
                     "chunk_id": "chunk-1",
+                    "heading_path": "Returns/Window",
                     "rank": 1,
+                    "identity_known": True,
+                    "identity_consistent": True,
+                    "document_status": "active",
+                    "active_version_id": "version-2",
                 }
             ],
             "candidate_trace": [],
             "metrics": {
+                **valid_metrics(),
                 "covered_group_count": 1,
                 "required_group_count": 1,
                 "evidence_group_recall": 1.0,
             },
-            "safety_flags": {"cross_tenant_leak": False},
+            "safety_flags": valid_safety_flags(),
         },
     )
 
@@ -510,7 +733,7 @@ def test_checkpoint_round_trips_infrastructure_failed_task6_payload() -> None:
             "variant": "baseline",
             "status": "infrastructure_failed",
             "attempt": 1,
-            "error_code": "provider_timeout",
+            "error_code": "provider_error",
             "evidence_status": None,
             "round_count": 0,
             "query_count_by_round": [],
@@ -522,7 +745,7 @@ def test_checkpoint_round_trips_infrastructure_failed_task6_payload() -> None:
             "citations": [],
             "candidate_trace": [],
             "metrics": None,
-            "safety_flags": {"cross_tenant_leak": False},
+            "safety_flags": valid_safety_flags(),
         },
     )
 
@@ -639,4 +862,31 @@ def test_load_rejects_truncated_success_before_should_run_can_skip_it(
     checkpoint.write_text(json.dumps(raw), encoding="utf-8")
 
     with pytest.raises(ValueError, match="candidate_trace"):
+        CheckpointStore(checkpoint).load(run_metadata)
+
+
+def test_load_rejects_empty_nested_success_before_resume_can_skip_it(
+    tmp_path: Path,
+) -> None:
+    """A completed envelope cannot make empty citation artifacts reusable."""
+    checkpoint = tmp_path / "checkpoint.json"
+    run_metadata = metadata("empty-nested-success")
+    CheckpointStore(checkpoint).initialize(run_metadata)
+    raw = json.loads(checkpoint.read_text(encoding="utf-8"))
+    payload = normalized_payload(
+        "case-1", StageCVariant.BASELINE, status="completed", attempt=1
+    )
+    payload["citations"] = [{}]
+    raw["results"] = {
+        "case-1:baseline": {
+            "case_id": "case-1",
+            "variant": "baseline",
+            "status": "completed",
+            "attempt": 1,
+            "payload": payload,
+        }
+    }
+    checkpoint.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="citations"):
         CheckpointStore(checkpoint).load(run_metadata)

@@ -30,11 +30,10 @@ _OPTIONAL_PAYLOAD_FIELDS = {
     "error_code", "strategy", "strategy_allowed", "strategy_preferred",
 }
 _COMMON_PAYLOAD_FIELDS = _PAYLOAD_FIELDS - _OPTIONAL_PAYLOAD_FIELDS
-_ERROR_CODES = {
-    "provider_timeout", "provider_unavailable", "provider_error", "invalid_response",
-    "budget_exhausted", "unexpected_error",
+_COMPLETED_ERROR_CODES = {"budget_exhausted"}
+_INFRASTRUCTURE_ERROR_CODES = {
+    "provider_unavailable", "provider_error", "unexpected_error",
 }
-_INFRASTRUCTURE_ERROR_CODES = _ERROR_CODES - {"budget_exhausted"}
 _METRIC_FIELDS = {
     "covered_group_count", "required_group_count", "evidence_group_recall",
     "retrieval_precision", "complete_evidence_coverage", "relevant_top5_count",
@@ -44,15 +43,30 @@ _METRIC_FIELDS = {
 }
 _SAFETY_FLAG_FIELDS = {
     "cross_tenant_leak", "disabled_document_leak", "inactive_version_leak",
-    "unknown_identity_count", "injection_followed", "budget_exceeded",
+    "unknown_identity_count", "budget_exceeded",
     "round_limit_exceeded", "query_limit_exceeded", "model_call_limit_exceeded",
 }
-_CITATION_FIELDS = {
-    "citation_id", "tenant_key", "document_key", "document_id", "version_id",
-    "chunk_id", "heading_path", "rank", "score", "identity_known",
-    "identity_consistent", "document_status", "active_version_id",
+_CITATION_COMMON_FIELDS = {
+    "citation_id", "rank", "document_id", "version_id", "chunk_id",
+    "heading_path", "identity_known", "identity_consistent",
 }
-_CANDIDATE_TRACE_FIELDS = _CITATION_FIELDS | {"round", "query_index", "source"}
+_CITATION_TRUSTED_FIELDS = {
+    "tenant_key", "document_key", "document_status", "active_version_id",
+}
+_CITATION_FIELDS = _CITATION_COMMON_FIELDS | _CITATION_TRUSTED_FIELDS | {"score"}
+_CANDIDATE_COMMON_FIELDS = {
+    "chunk_id", "identity_known", "identity_consistent",
+}
+_CANDIDATE_TRUSTED_FIELDS = {
+    "tenant_key", "document_key", "document_id", "version_id", "heading_path",
+    "document_status", "active_version_id",
+}
+_CANDIDATE_DIAGNOSTIC_FIELDS = {"round", "query_index", "rank", "score"}
+_CANDIDATE_TRACE_FIELDS = (
+    _CANDIDATE_COMMON_FIELDS
+    | _CANDIDATE_TRUSTED_FIELDS
+    | _CANDIDATE_DIAGNOSTIC_FIELDS
+)
 
 
 def _validate_json_value(value: object, *, path: str = "value") -> None:
@@ -164,24 +178,54 @@ def _validate_identity_fields(raw: Mapping[str, object], *, name: str) -> None:
 
 
 def _validate_citation_artifacts(
-    value: object, *, allowed: set[str], name: str
+    value: object,
+    *,
+    allowed: set[str],
+    required_common: set[str],
+    trusted_fields: set[str],
+    name: str,
 ) -> None:
     if not isinstance(value, list):
         raise TypeError(f"{name} must be a JSON list")
     for index, item in enumerate(value):
         raw = _require_mapping(item, name=f"{name}[{index}]")
         _require_allowed_keys(raw, allowed=allowed, name=f"{name}[{index}]")
+        missing_common = sorted(required_common - set(raw))
+        if missing_common:
+            raise ValueError(
+                f"{name}[{index}] is missing required fields: {missing_common}"
+            )
+        for field in ("identity_known", "identity_consistent"):
+            if type(raw[field]) is not bool:
+                raise TypeError(f"{name}[{index}].{field} must be a boolean")
+        if raw["identity_known"]:
+            missing_trusted = sorted(trusted_fields - set(raw))
+            if missing_trusted:
+                raise ValueError(
+                    f"{name}[{index}] is missing known identity fields: "
+                    f"{missing_trusted}"
+                )
+        else:
+            unexpected_trusted = sorted(trusted_fields & set(raw))
+            if unexpected_trusted:
+                raise ValueError(
+                    f"{name}[{index}] has trusted fields for unknown identity: "
+                    f"{unexpected_trusted}"
+                )
+        _require_nonempty_string(
+            raw["chunk_id"], name=f"{name}[{index}].chunk_id"
+        )
+        if "citation_id" in required_common:
+            for field in ("citation_id", "document_id", "version_id"):
+                _require_nonempty_string(
+                    raw[field], name=f"{name}[{index}].{field}"
+                )
         _validate_identity_fields(raw, name=f"{name}[{index}]")
         for field in ("rank", "round", "query_index"):
             if field in raw:
                 _require_positive_int(raw[field], name=f"{name}[{index}].{field}")
         if "score" in raw:
             _require_finite_number(raw["score"], name=f"{name}[{index}].score")
-        for field in ("identity_known", "identity_consistent"):
-            if field in raw and type(raw[field]) is not bool:
-                raise TypeError(f"{name}[{index}].{field} must be a boolean")
-        if "source" in raw and raw["source"] not in {"dense", "sparse", "fused"}:
-            raise ValueError(f"{name}[{index}].source is invalid")
 
 
 def _validate_checkpoint_payload(
@@ -208,8 +252,9 @@ def _validate_checkpoint_payload(
         raise ValueError("payload.status must match the checkpoint result")
     if payload["attempt"] != attempt:
         raise ValueError("payload.attempt must match the checkpoint result")
-    if "error_code" in payload and payload["error_code"] not in _ERROR_CODES:
-        raise ValueError("payload.error_code is invalid")
+    if status == "completed" and "error_code" in payload:
+        if payload["error_code"] not in _COMPLETED_ERROR_CODES:
+            raise ValueError("completed payload.error_code is invalid")
     if "strategy" in payload and payload["strategy"] not in {
         "single",
         "multi",
@@ -246,38 +291,45 @@ def _validate_checkpoint_payload(
             raise ValueError("payload.latency_ms must be non-negative")
     if "citations" in payload:
         _validate_citation_artifacts(
-            payload["citations"], allowed=_CITATION_FIELDS, name="payload.citations"
+            payload["citations"],
+            allowed=_CITATION_FIELDS,
+            required_common=_CITATION_COMMON_FIELDS,
+            trusted_fields=_CITATION_TRUSTED_FIELDS,
+            name="payload.citations",
         )
     if "candidate_trace" in payload:
         _validate_citation_artifacts(
             payload["candidate_trace"],
             allowed=_CANDIDATE_TRACE_FIELDS,
+            required_common=_CANDIDATE_COMMON_FIELDS,
+            trusted_fields=_CANDIDATE_TRUSTED_FIELDS,
             name="payload.candidate_trace",
         )
     metrics_value = payload["metrics"]
     if status == "completed":
         metrics = _require_mapping(metrics_value, name="payload.metrics")
-        _require_allowed_keys(metrics, allowed=_METRIC_FIELDS, name="payload.metrics")
+        _require_exact_keys(metrics, expected=_METRIC_FIELDS, name="payload.metrics")
         for field in (
             "covered_group_count", "required_group_count", "relevant_top5_count",
             "evaluated_citation_count", "returned_full_count", "unknown_identity_count",
         ):
-            if field in metrics:
-                _require_nonnegative_int(metrics[field], name=f"payload.metrics.{field}")
+            _require_nonnegative_int(metrics[field], name=f"payload.metrics.{field}")
         for field in ("evidence_group_recall", "retrieval_precision"):
-            if field in metrics and metrics[field] is not None:
+            if metrics[field] is not None:
+                if type(metrics[field]) is not float:
+                    raise TypeError(
+                        f"payload.metrics.{field} must be a float or null"
+                    )
                 _require_finite_number(metrics[field], name=f"payload.metrics.{field}")
-        if "complete_evidence_coverage" in metrics and type(
-            metrics["complete_evidence_coverage"]
-        ) not in {bool, type(None)}:
+        if type(metrics["complete_evidence_coverage"]) not in {bool, type(None)}:
             raise TypeError("payload.metrics.complete_evidence_coverage must be boolean or null")
         for field in (
             "cross_tenant_leak", "disabled_document_leak", "inactive_version_leak",
         ):
-            if field in metrics and type(metrics[field]) is not bool:
+            if type(metrics[field]) is not bool:
                 raise TypeError(f"payload.metrics.{field} must be a boolean")
-        if "quality_scope_reason" in metrics and metrics["quality_scope_reason"] not in {
-            "no_required_evidence_groups", "no_measurable_cases", None,
+        if metrics["quality_scope_reason"] not in {
+            "no_required_evidence_groups", None,
         }:
             raise ValueError("payload.metrics.quality_scope_reason is invalid")
     else:
@@ -289,7 +341,9 @@ def _validate_checkpoint_payload(
             raise ValueError("infrastructure_failed payload.error_code is invalid")
     if "safety_flags" in payload:
         flags = _require_mapping(payload["safety_flags"], name="payload.safety_flags")
-        _require_allowed_keys(flags, allowed=_SAFETY_FLAG_FIELDS, name="payload.safety_flags")
+        _require_exact_keys(
+            flags, expected=_SAFETY_FLAG_FIELDS, name="payload.safety_flags"
+        )
         for field, value in flags.items():
             if field == "unknown_identity_count":
                 _require_nonnegative_int(value, name=f"payload.safety_flags.{field}")
