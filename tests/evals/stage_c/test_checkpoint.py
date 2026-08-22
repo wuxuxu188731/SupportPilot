@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -114,6 +115,29 @@ def valid_safety_flags() -> dict[str, object]:
         "inactive_version_leak": False,
         "unknown_identity_count": 0,
     }
+
+
+def valid_known_citation() -> dict[str, object]:
+    return {
+        "citation_id": "C1",
+        "rank": 1,
+        "tenant_key": "org_a",
+        "document_key": "returns_exchange",
+        "document_id": "document-1",
+        "version_id": "version-2",
+        "chunk_id": "chunk-1",
+        "heading_path": "Returns/Window",
+        "identity_known": True,
+        "identity_consistent": True,
+        "document_status": "active",
+        "active_version_id": "version-2",
+    }
+
+
+def valid_known_candidate() -> dict[str, object]:
+    citation = valid_known_citation()
+    citation.pop("citation_id")
+    return citation
 
 
 def completed(case_id: str, variant: StageCVariant, *, attempt: int) -> CheckpointResult:
@@ -509,6 +533,75 @@ def test_checkpoint_rejects_incomplete_or_trusted_unknown_identity_artifact(
 
 
 @pytest.mark.parametrize(
+    ("field", "artifact_factory", "nested_field"),
+    [
+        ("citations", valid_known_citation, "tenant_key"),
+        ("citations", valid_known_citation, "document_key"),
+        ("citations", valid_known_citation, "document_status"),
+        ("citations", valid_known_citation, "active_version_id"),
+        ("citations", valid_known_citation, "heading_path"),
+        ("candidate_trace", valid_known_candidate, "tenant_key"),
+        ("candidate_trace", valid_known_candidate, "document_key"),
+        ("candidate_trace", valid_known_candidate, "document_id"),
+        ("candidate_trace", valid_known_candidate, "version_id"),
+        ("candidate_trace", valid_known_candidate, "heading_path"),
+        ("candidate_trace", valid_known_candidate, "document_status"),
+        ("candidate_trace", valid_known_candidate, "active_version_id"),
+    ],
+)
+def test_checkpoint_rejects_null_fields_for_known_identity_artifact(
+    field: str,
+    artifact_factory: Callable[[], dict[str, object]],
+    nested_field: str,
+) -> None:
+    payload = normalized_payload(
+        "case-1", StageCVariant.BASELINE, status="completed", attempt=1
+    )
+    artifact = artifact_factory()
+    artifact[nested_field] = None
+    payload[field] = [artifact]
+
+    with pytest.raises((TypeError, ValueError), match=nested_field):
+        CheckpointResult(
+            case_id="case-1",
+            variant=StageCVariant.BASELINE,
+            status="completed",
+            attempt=1,
+            payload=payload,
+        )
+
+
+@pytest.mark.parametrize("field", ["citations", "candidate_trace"])
+def test_checkpoint_rejects_consistent_unknown_identity_artifact(field: str) -> None:
+    payload = normalized_payload(
+        "case-1", StageCVariant.BASELINE, status="completed", attempt=1
+    )
+    artifact: dict[str, object] = {
+        "chunk_id": "unknown-chunk",
+        "identity_known": False,
+        "identity_consistent": True,
+    }
+    if field == "citations":
+        artifact.update(
+            citation_id="C1",
+            rank=1,
+            document_id="untrusted-document",
+            version_id="untrusted-version",
+            heading_path=None,
+        )
+    payload[field] = [artifact]
+
+    with pytest.raises(ValueError, match="identity_consistent"):
+        CheckpointResult(
+            case_id="case-1",
+            variant=StageCVariant.BASELINE,
+            status="completed",
+            attempt=1,
+            payload=payload,
+        )
+
+
+@pytest.mark.parametrize(
     ("field", "nested_field", "value"),
     [
         ("metrics", "covered_group_count", True),
@@ -889,4 +982,32 @@ def test_load_rejects_empty_nested_success_before_resume_can_skip_it(
     checkpoint.write_text(json.dumps(raw), encoding="utf-8")
 
     with pytest.raises(ValueError, match="citations"):
+        CheckpointStore(checkpoint).load(run_metadata)
+
+
+def test_load_rejects_null_known_identity_before_resume_can_skip_it(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "checkpoint.json"
+    run_metadata = metadata("null-known-identity")
+    CheckpointStore(checkpoint).initialize(run_metadata)
+    raw = json.loads(checkpoint.read_text(encoding="utf-8"))
+    payload = normalized_payload(
+        "case-1", StageCVariant.BASELINE, status="completed", attempt=1
+    )
+    citation = valid_known_citation()
+    citation["tenant_key"] = None
+    payload["citations"] = [citation]
+    raw["results"] = {
+        "case-1:baseline": {
+            "case_id": "case-1",
+            "variant": "baseline",
+            "status": "completed",
+            "attempt": 1,
+            "payload": payload,
+        }
+    }
+    checkpoint.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="tenant_key"):
         CheckpointStore(checkpoint).load(run_metadata)

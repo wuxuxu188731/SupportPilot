@@ -205,7 +205,30 @@ def _validate_citation_artifacts(
                     f"{name}[{index}] is missing known identity fields: "
                     f"{missing_trusted}"
                 )
+            known_fields = trusted_fields | {"heading_path"}
+            for field in sorted(known_fields):
+                if field == "tenant_key":
+                    try:
+                        TenantKey(raw[field])
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError(
+                            f"{name}[{index}].tenant_key is invalid"
+                        ) from exc
+                elif field == "document_status":
+                    if raw[field] not in {"active", "disabled"}:
+                        raise ValueError(
+                            f"{name}[{index}].document_status is invalid"
+                        )
+                else:
+                    _require_nonempty_string(
+                        raw[field], name=f"{name}[{index}].{field}"
+                    )
         else:
+            if raw["identity_consistent"]:
+                raise ValueError(
+                    f"{name}[{index}].identity_consistent must be false "
+                    "when identity_known is false"
+                )
             unexpected_trusted = sorted(trusted_fields & set(raw))
             if unexpected_trusted:
                 raise ValueError(
