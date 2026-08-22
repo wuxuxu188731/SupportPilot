@@ -254,6 +254,117 @@ def test_prepare_is_resumable_without_duplicate_documents(prepared_fixture, vali
     assert resumed == original
 
 
+def test_prepare_rejects_reused_sqlite_chunk_content_drift(
+    prepared_fixture, valid_cases, specs
+):
+    """A new fingerprint must not score a deduplicated but drifted SQLite fixture."""
+
+    class DriftedChunkStore:
+        def __init__(self, delegate):
+            self._delegate = delegate
+
+        def __getattr__(self, name):
+            return getattr(self._delegate, name)
+
+        def list_version_chunks(self, **kwargs):
+            chunks = self._delegate.list_version_chunks(**kwargs)
+            if chunks:
+                chunks[0] = replace(chunks[0], content="drifted")
+            return chunks
+
+    manager = StageCFixtureManager(
+        store=DriftedChunkStore(prepared_fixture._store),
+        ingestion=prepared_fixture._ingestion,
+        loader=DocumentLoader(),
+        chunker=KnowledgeChunker(),
+        vector_store=prepared_fixture._vector_store,
+    )
+
+    with pytest.raises(ValueError, match="SQLite chunk drift"):
+        manager.prepare(cases=valid_cases, specs=specs)
+
+
+def test_prepare_rejects_reused_fixture_after_chunker_output_drift(
+    prepared_fixture, valid_cases, specs
+):
+    """Changed chunk output must not reuse rows produced by the prior chunker."""
+
+    class DriftedChunker:
+        def __init__(self) -> None:
+            self._delegate = KnowledgeChunker()
+
+        def split(self, document, **identity):
+            chunks = self._delegate.split(document, **identity)
+            if chunks:
+                chunks[0] = replace(chunks[0], token_count=chunks[0].token_count + 1)
+            return chunks
+
+    manager = StageCFixtureManager(
+        store=prepared_fixture._store,
+        ingestion=prepared_fixture._ingestion,
+        loader=DocumentLoader(),
+        chunker=DriftedChunker(),
+        vector_store=prepared_fixture._vector_store,
+    )
+
+    with pytest.raises(ValueError, match="SQLite chunk drift"):
+        manager.prepare(cases=valid_cases, specs=specs)
+
+
+@pytest.mark.parametrize(
+    ("field", "stale_value"),
+    [
+        ("loader_version", "stale-loader"),
+        ("chunker_version", "stale-chunker"),
+        ("embedding_model", "stale-embedding"),
+        ("embedding_dimensions", 999),
+    ],
+)
+def test_prepare_rejects_reused_document_version_metadata_drift(
+    prepared_fixture, valid_cases, specs, field, stale_value
+):
+    """Content dedupe must not hide incompatible persisted ingestion metadata."""
+
+    class DriftedVersionStore:
+        def __init__(self, delegate):
+            self._delegate = delegate
+
+        def __getattr__(self, name):
+            return getattr(self._delegate, name)
+
+        def get_version_by_id(self, **kwargs):
+            version = self._delegate.get_version_by_id(**kwargs)
+            return replace(version, **{field: stale_value})
+
+    manager = StageCFixtureManager(
+        store=DriftedVersionStore(prepared_fixture._store),
+        ingestion=prepared_fixture._ingestion,
+        loader=DocumentLoader(),
+        chunker=KnowledgeChunker(),
+        vector_store=prepared_fixture._vector_store,
+    )
+
+    with pytest.raises(ValueError, match="version metadata drift"):
+        manager.prepare(cases=valid_cases, specs=specs)
+
+
+@pytest.mark.parametrize("remaining_point_count", [0, 1])
+def test_prepare_rejects_empty_or_partial_qdrant_fixture(
+    prepared_fixture, valid_cases, specs, remaining_point_count
+):
+    """A changed collection must fail setup before empty retrieval is scored."""
+    vector_store = prepared_fixture._vector_store
+    saved = dict(vector_store.points)
+    vector_store.points.clear()
+    vector_store.points.update(list(saved.items())[:remaining_point_count])
+    try:
+        with pytest.raises(ValueError, match="vector point identity drift"):
+            prepared_fixture.prepare(cases=valid_cases, specs=specs)
+    finally:
+        vector_store.points.clear()
+        vector_store.points.update(saved)
+
+
 def test_restore_reuses_a_matching_manifest_without_ingestion(
     prepared_fixture, specs
 ):
@@ -305,6 +416,37 @@ def test_restore_rejects_sqlite_content_or_heading_drift(prepared_fixture, specs
                 chunks[0] = replace(
                     chunks[0], content="drifted", heading_path="drifted/heading"
                 )
+            return chunks
+
+    manager = StageCFixtureManager(
+        store=DriftedChunkStore(prepared_fixture._store),
+        ingestion=prepared_fixture._ingestion,
+        loader=DocumentLoader(),
+        chunker=KnowledgeChunker(),
+        vector_store=prepared_fixture._vector_store,
+    )
+
+    with pytest.raises(ValueError, match="SQLite chunk drift"):
+        manager.restore(prepared_fixture.manifest, specs=specs)
+
+
+@pytest.mark.parametrize("field", ["organization_id", "document_id", "version_id"])
+def test_restore_rejects_sqlite_chunk_identity_field_drift(
+    prepared_fixture, specs, field
+):
+    """Scoped reads still validate every persisted DocumentChunk identity field."""
+
+    class DriftedChunkStore:
+        def __init__(self, delegate):
+            self._delegate = delegate
+
+        def __getattr__(self, name):
+            return getattr(self._delegate, name)
+
+        def list_version_chunks(self, **kwargs):
+            chunks = self._delegate.list_version_chunks(**kwargs)
+            if chunks:
+                chunks[0] = replace(chunks[0], **{field: "drifted"})
             return chunks
 
     manager = StageCFixtureManager(

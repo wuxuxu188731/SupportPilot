@@ -180,21 +180,21 @@ class VariantMetrics:
                 item.identity_known
                 and item.tenant_key is not None
                 and item.tenant_key != case.tenant_key
-                for item in evaluated
+                for item in citations
             ),
             disabled_document_leak=any(
                 item.identity_known
                 and item.document_status is DocumentStatus.DISABLED
-                for item in evaluated
+                for item in citations
             ),
             inactive_version_leak=any(
                 item.identity_known
                 and item.document_status is DocumentStatus.ACTIVE
                 and item.version_id != item.active_version_id
-                for item in evaluated
+                for item in citations
             ),
             unknown_identity_count=sum(
-                not item.identity_known for item in evaluated
+                not item.identity_known for item in citations
             ),
         )
 

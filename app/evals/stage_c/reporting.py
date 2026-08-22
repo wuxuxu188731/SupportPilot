@@ -343,9 +343,24 @@ def normalize_result(
         except (TypeError, ValueError):
             trace_valid = False
 
+    strategy = None
+    parsed_strategy: RetrievalStrategy | None = None
+    invalid_adaptive_strategy = False
+    if variant is StageCVariant.ADAPTIVE and event is not None:
+        if event.strategy == "none":
+            strategy = "none"
+        else:
+            try:
+                parsed_strategy = RetrievalStrategy(event.strategy)
+            except (TypeError, ValueError):
+                invalid_adaptive_strategy = True
+            else:
+                strategy = parsed_strategy.value
+
     raw_error_code = result.error.code if result.error is not None else None
     infrastructure_failed = (
         not trace_valid
+        or invalid_adaptive_strategy
         or raw_error_code in _INFRASTRUCTURE_ERROR_CODES
         or (
             not result.ok
@@ -355,7 +370,11 @@ def normalize_result(
     )
     error_code: str | None = None
     if infrastructure_failed:
-        error_code = _coarse_error_code(raw_error_code)
+        error_code = (
+            "unexpected_error"
+            if invalid_adaptive_strategy
+            else _coarse_error_code(raw_error_code)
+        )
     elif raw_error_code == "SEARCH_BUDGET_EXCEEDED":
         error_code = "budget_exhausted"
 
@@ -373,29 +392,16 @@ def normalize_result(
     metrics = None if infrastructure_failed else score_variant(
         case, stable_citations, top_k=5
     )
-    strategy = None
     strategy_allowed = None
     strategy_preferred = None
-    if variant is StageCVariant.ADAPTIVE and event is not None:
-        if event.strategy == "none":
-            strategy = "none"
+    if variant is StageCVariant.ADAPTIVE and not invalid_adaptive_strategy:
+        if strategy == "none":
             if case.strategy_expectation is not None:
                 strategy_allowed = False
                 strategy_preferred = False
-        else:
-            try:
-                parsed_strategy = RetrievalStrategy(event.strategy)
-            except ValueError:
-                parsed_strategy = None
-            if parsed_strategy is not None:
-                strategy = parsed_strategy.value
-                if case.strategy_expectation is not None:
-                    strategy_allowed = (
-                        parsed_strategy in case.strategy_expectation.allowed
-                    )
-                    strategy_preferred = (
-                        parsed_strategy is case.strategy_expectation.preferred
-                    )
+        elif parsed_strategy is not None and case.strategy_expectation is not None:
+            strategy_allowed = parsed_strategy in case.strategy_expectation.allowed
+            strategy_preferred = parsed_strategy is case.strategy_expectation.preferred
 
     flags = _budget_flags(
         case,

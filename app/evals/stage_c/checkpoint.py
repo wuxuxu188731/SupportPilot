@@ -26,10 +26,15 @@ _PAYLOAD_FIELDS = {
     "evaluated_citation_count", "full_citation_count", "citations",
     "candidate_trace", "metrics", "safety_flags",
 }
+_OPTIONAL_PAYLOAD_FIELDS = {
+    "error_code", "strategy", "strategy_allowed", "strategy_preferred",
+}
+_COMMON_PAYLOAD_FIELDS = _PAYLOAD_FIELDS - _OPTIONAL_PAYLOAD_FIELDS
 _ERROR_CODES = {
     "provider_timeout", "provider_unavailable", "provider_error", "invalid_response",
     "budget_exhausted", "unexpected_error",
 }
+_INFRASTRUCTURE_ERROR_CODES = _ERROR_CODES - {"budget_exhausted"}
 _METRIC_FIELDS = {
     "covered_group_count", "required_group_count", "evidence_group_recall",
     "retrieval_precision", "complete_evidence_coverage", "relevant_top5_count",
@@ -188,13 +193,20 @@ def _validate_checkpoint_payload(
     attempt: int,
 ) -> None:
     _require_allowed_keys(payload, allowed=_PAYLOAD_FIELDS, name="payload")
-    if "case_id" in payload and payload["case_id"] != case_id:
+    missing = sorted(_COMMON_PAYLOAD_FIELDS - set(payload))
+    if missing:
+        raise ValueError(f"payload is missing required fields: {missing}")
+    _require_nonempty_string(payload["case_id"], name="payload.case_id")
+    _require_nonempty_string(payload["variant"], name="payload.variant")
+    _require_nonempty_string(payload["status"], name="payload.status")
+    _require_positive_int(payload["attempt"], name="payload.attempt")
+    if payload["case_id"] != case_id:
         raise ValueError("payload.case_id must match the checkpoint result")
-    if "variant" in payload and payload["variant"] != variant.value:
+    if payload["variant"] != variant.value:
         raise ValueError("payload.variant must match the checkpoint result")
-    if "status" in payload and payload["status"] != status:
+    if payload["status"] != status:
         raise ValueError("payload.status must match the checkpoint result")
-    if "attempt" in payload and payload["attempt"] != attempt:
+    if payload["attempt"] != attempt:
         raise ValueError("payload.attempt must match the checkpoint result")
     if "error_code" in payload and payload["error_code"] not in _ERROR_CODES:
         raise ValueError("payload.error_code is invalid")
@@ -242,8 +254,9 @@ def _validate_checkpoint_payload(
             allowed=_CANDIDATE_TRACE_FIELDS,
             name="payload.candidate_trace",
         )
-    if "metrics" in payload and payload["metrics"] is not None:
-        metrics = _require_mapping(payload["metrics"], name="payload.metrics")
+    metrics_value = payload["metrics"]
+    if status == "completed":
+        metrics = _require_mapping(metrics_value, name="payload.metrics")
         _require_allowed_keys(metrics, allowed=_METRIC_FIELDS, name="payload.metrics")
         for field in (
             "covered_group_count", "required_group_count", "relevant_top5_count",
@@ -267,6 +280,13 @@ def _validate_checkpoint_payload(
             "no_required_evidence_groups", "no_measurable_cases", None,
         }:
             raise ValueError("payload.metrics.quality_scope_reason is invalid")
+    else:
+        if metrics_value is not None:
+            raise ValueError("infrastructure_failed payload.metrics must be null")
+        if "error_code" not in payload:
+            raise ValueError("infrastructure_failed payload requires error_code")
+        if payload["error_code"] not in _INFRASTRUCTURE_ERROR_CODES:
+            raise ValueError("infrastructure_failed payload.error_code is invalid")
     if "safety_flags" in payload:
         flags = _require_mapping(payload["safety_flags"], name="payload.safety_flags")
         _require_allowed_keys(flags, allowed=_SAFETY_FLAG_FIELDS, name="payload.safety_flags")

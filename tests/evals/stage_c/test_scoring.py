@@ -179,6 +179,43 @@ def test_sixth_adaptive_citation_does_not_change_primary_metrics(
     assert metrics.retrieval_precision == 0.0
 
 
+def test_sixth_and_later_forbidden_citations_set_safety_not_quality(
+    stage_case: StageCCase,
+) -> None:
+    """Safety scans the full response even though quality remains strict Top-5."""
+    citations = tuple(irrelevant(index) for index in range(1, 6)) + (
+        stable_citation(
+            "returns_exchange",
+            RETURN_HEADING,
+            rank=6,
+            tenant_key=TenantKey.ORG_B,
+        ),
+        stable_citation(
+            "returns_exchange",
+            RETURN_HEADING,
+            rank=7,
+            status=DocumentStatus.DISABLED,
+        ),
+        stable_citation(
+            "returns_exchange",
+            RETURN_HEADING,
+            rank=8,
+            active_version_id="version-2",
+        ),
+        stable_citation("unknown", "unknown", rank=9, known=False),
+    )
+
+    metrics = score_variant(stage_case, citations, top_k=5)
+
+    assert metrics.evaluated_citation_count == 5
+    assert metrics.relevant_top5_count == 0
+    assert metrics.covered_group_count == 0
+    assert metrics.cross_tenant_leak is True
+    assert metrics.disabled_document_leak is True
+    assert metrics.inactive_version_leak is True
+    assert metrics.unknown_identity_count == 1
+
+
 def test_no_golden_evidence_has_explicit_null_quality_scope(
     stage_case: StageCCase,
 ) -> None:

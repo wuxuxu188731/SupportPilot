@@ -285,6 +285,46 @@ def test_none_strategy_is_preserved_and_scored_against_expectations(
     assert no_expectation.strategy_preferred is None
 
 
+def test_unknown_adaptive_strategy_is_infrastructure_failed_and_unmeasured(
+    identity_index: IdentityIndex,
+) -> None:
+    """An invented persisted strategy must not enter completed denominators."""
+    case = make_case(
+        strategy_expectation=StrategyExpectation(
+            preferred=RetrievalStrategy.SINGLE,
+            allowed=(RetrievalStrategy.SINGLE, RetrievalStrategy.MULTI),
+        )
+    )
+    persisted_event = event(
+        adaptive=True,
+        rounds=1,
+        model_calls=1,
+        tokens=12,
+        query_rounds=(1,),
+    )
+    object.__setattr__(persisted_event, "strategy", "invented")
+
+    normalized = normalize_result(
+        case=case,
+        variant=StageCVariant.ADAPTIVE,
+        result=adaptive_result(returned=citations(1)),
+        event=persisted_event,
+        identity_index=identity_index,
+        attempt=1,
+    )
+
+    assert normalized.status == "infrastructure_failed"
+    assert normalized.error_code == "unexpected_error"
+    assert normalized.metrics is None
+    assert normalized.strategy is None
+    report = compile_stage_c_report(
+        (case,), checkpoint_state((checkpoint_result(normalized),))
+    )
+    adaptive = report["aggregates"]["overall"]["adaptive"]
+    assert adaptive["strategy_allowed"]["denominator"] == 0
+    assert adaptive["strategy_preferred"]["denominator"] == 0
+
+
 @pytest.mark.parametrize(
     "query_indexes_by_round",
     [
@@ -552,6 +592,56 @@ def test_normalization_keeps_unknown_trace_candidates_and_scores_trusted_leaks(
     assert normalized.metrics.inactive_version_leak is True
     assert normalized.candidate_trace[0]["chunk_id"] == "unknown-candidate"
     assert normalized.candidate_trace[0]["identity_known"] is False
+
+
+def test_full_citation_and_candidate_unknown_counts_reach_report_aggregates(
+    identity_index: IdentityIndex,
+) -> None:
+    """Citation and candidate unknowns remain distinct safety observations."""
+    unknown_sixth = Citation(
+        citation_id="C6",
+        document_id="unknown-document",
+        version_id="unknown-version",
+        chunk_id="unknown-citation",
+        title="must not persist",
+        heading_path="unknown/heading",
+        content="must not persist",
+    )
+    case = make_case()
+    normalized = normalize_result(
+        case=case,
+        variant=StageCVariant.ADAPTIVE,
+        result=adaptive_result(returned=(*citations(5), unknown_sixth)),
+        event=event(
+            adaptive=True,
+            rounds=1,
+            model_calls=2,
+            tokens=20,
+            query_rounds=(1,),
+            candidates=[
+                {
+                    "round": 1,
+                    "query_index": 1,
+                    "chunk_id": "unknown-candidate",
+                    "fused_rank": 1,
+                    "fused_score": 0.9,
+                }
+            ],
+        ),
+        identity_index=identity_index,
+        attempt=1,
+    )
+
+    assert normalized.metrics is not None
+    assert normalized.metrics.evaluated_citation_count == 5
+    assert normalized.metrics.relevant_top5_count == 1
+    assert normalized.metrics.unknown_identity_count == 1
+    assert normalized.safety_flags["unknown_identity_count"] == 2
+    report = compile_stage_c_report(
+        (case,), checkpoint_state((checkpoint_result(normalized),))
+    )
+    assert report["aggregates"]["overall"]["adaptive"]["unknown_identity_count"] == 2
+    assert report["aggregates"]["security"]["unknown_identity_count"] == 2
 
 
 def checkpoint_result(normalized) -> CheckpointResult:

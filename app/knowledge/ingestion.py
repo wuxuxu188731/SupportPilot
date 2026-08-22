@@ -86,6 +86,16 @@ class IngestionReceipt:
     deduplicated: bool
 
 
+@dataclass(frozen=True)
+class IngestionMetadata:
+    """Public, content-free version metadata stamped by this service."""
+
+    loader_version: str
+    chunker_version: str
+    embedding_model: str
+    embedding_dimensions: int
+
+
 class KnowledgeIngestionService:
     """Orchestrates the synchronous, happy-path ingestion of a knowledge
     document (or a new version of an existing document) into SQLite + Qdrant.
@@ -115,6 +125,16 @@ class KnowledgeIngestionService:
         self._embedding_dimensions = embedding_dimensions
 
     # -------------------------------------------------------------- public
+
+    @property
+    def metadata(self) -> IngestionMetadata:
+        """Expose the exact persisted version configuration without internals."""
+        return IngestionMetadata(
+            loader_version=LOADER_VERSION,
+            chunker_version=CHUNKER_VERSION,
+            embedding_model=self._embedding_model,
+            embedding_dimensions=self._embedding_dimensions,
+        )
 
     def ingest_new_document(
         self,

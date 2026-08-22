@@ -13,11 +13,12 @@ from app.knowledge.base import (
     DocumentChunk,
     DocumentSourceType,
     DocumentStatus,
+    DocumentVersion,
     KnowledgeStore,
 )
 from app.knowledge.chunking import KnowledgeChunker
 from app.knowledge.document_loader import DocumentLoader
-from app.knowledge.ingestion import KnowledgeIngestionService
+from app.knowledge.ingestion import IngestionMetadata, KnowledgeIngestionService
 from app.knowledge.vector_store import VectorPointIdentity, VectorStore
 
 
@@ -409,12 +410,12 @@ class StageCFixtureManager:
                 )
             )
 
+        manifest = FixtureManifest(tuple(prepared))
+        self._validate_exact_fixture(manifest, specs, reactivate_disabled=False)
         self._specs = specs
-        self._manifest = FixtureManifest(tuple(prepared))
-        # Force one complete reconstruction during preparation so bad receipt IDs
-        # or drift in the current loader/chunker fail before a run starts.
+        self._manifest = manifest
         self.identity_index
-        return self._manifest
+        return manifest
 
     def restore(
         self,
@@ -426,6 +427,22 @@ class StageCFixtureManager:
 
         if not isinstance(manifest, FixtureManifest):
             raise TypeError("manifest must be a FixtureManifest")
+        specs = tuple(specs)
+        self._validate_exact_fixture(manifest, specs, reactivate_disabled=True)
+        self._specs = specs
+        self._manifest = manifest
+        self.identity_index
+        return manifest
+
+    def _validate_exact_fixture(
+        self,
+        manifest: FixtureManifest,
+        specs: Sequence[CorpusDocumentSpec],
+        *,
+        reactivate_disabled: bool,
+    ) -> None:
+        """Validate exact SQLite versions/chunks and vector point identities."""
+
         specs = tuple(specs)
         spec_by_key = {
             (spec.tenant_key, spec.document_key): spec for spec in specs
@@ -452,20 +469,12 @@ class StageCFixtureManager:
                 raise ValueError("fixture document title drift")
             if stored.active_version_id != fixture_document.active_version_id:
                 raise ValueError("fixture document active version drift")
-            for version_id in (
-                fixture_document.active_version_id,
-                fixture_document.old_version_id,
-            ):
-                if version_id is not None:
-                    self._store.get_version_by_id(
-                        organization_id=fixture_document.tenant_key.value,
-                        document_id=fixture_document.document_id,
-                        version_id=version_id,
-                    )
             stored_documents.append((fixture_document, stored))
 
-        for fixture_document, stored in stored_documents:
-            if stored.status is DocumentStatus.DISABLED:
+        if reactivate_disabled:
+            for fixture_document, stored in stored_documents:
+                if stored.status is not DocumentStatus.DISABLED:
+                    continue
                 self._store.set_document_status(
                     organization_id=fixture_document.tenant_key.value,
                     document_id=fixture_document.document_id,
@@ -488,6 +497,15 @@ class StageCFixtureManager:
                     ),
                 )
             for version_id, source in version_sources:
+                persisted_version = self._store.get_version_by_id(
+                    organization_id=fixture_document.tenant_key.value,
+                    document_id=fixture_document.document_id,
+                    version_id=version_id,
+                )
+                self._validate_version_metadata(
+                    persisted_version,
+                    expected=self._ingestion.metadata,
+                )
                 loaded = self._loader.load(source, DocumentSourceType.MARKDOWN)
                 expected_chunks = self._chunker.split(
                     loaded,
@@ -516,18 +534,40 @@ class StageCFixtureManager:
                 )
 
         self._vector_store.validate_point_identities(expected=tuple(expected_points))
-        self._specs = specs
-        self._manifest = manifest
-        self.identity_index
-        return manifest
+
+    @staticmethod
+    def _validate_version_metadata(
+        version: DocumentVersion,
+        *,
+        expected: IngestionMetadata,
+    ) -> None:
+        actual = (
+            version.loader_version,
+            version.chunker_version,
+            version.embedding_model,
+            version.embedding_dimensions,
+        )
+        wanted = (
+            expected.loader_version,
+            expected.chunker_version,
+            expected.embedding_model,
+            expected.embedding_dimensions,
+        )
+        if actual != wanted:
+            raise ValueError("fixture document version metadata drift")
 
     @staticmethod
     def _chunk_fingerprints(
         chunks: Sequence[DocumentChunk],
-    ) -> tuple[tuple[str, int, str | None, str, int, int, int], ...]:
+    ) -> tuple[
+        tuple[str, str, str, str, int, str | None, str, int, int, int], ...
+    ]:
         return tuple(
             (
                 chunk.chunk_id,
+                chunk.organization_id,
+                chunk.document_id,
+                chunk.version_id,
                 chunk.ordinal,
                 chunk.heading_path,
                 chunk.content,
