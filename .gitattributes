@@ -1,0 +1,30 @@
+# 规范:仓库内文本文件统一以 LF 存储,git 自动检测二进制文件
+* text=auto
+
+# 常见文本类型强制 LF
+*.py text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+*.json text eol=lf
+*.jsonl text eol=lf
+*.yaml text eol=lf
+*.yml text eol=lf
+*.toml text eol=lf
+*.ini text eol=lf
+*.cfg text eol=lf
+*.sh text eol=lf
+*.mako text eol=lf
+*.gitignore text eol=lf
+.gitattributes text eol=lf
+
+# 二进制文件(防止 git 误判)
+*.db binary
+*.sqlite binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.gz binary
