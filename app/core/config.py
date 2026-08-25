@@ -45,7 +45,7 @@ class KnowledgeSettings:
     embedding_model: str = "text-embedding-v4"
     embedding_dimensions: int = 1024
     min_fused_score: float = 0.0
-    search_timeout_seconds: float = 15.0
+    search_timeout_seconds: float = 30.0
 
 
 def get_knowledge_settings() -> KnowledgeSettings:
@@ -56,7 +56,7 @@ def get_knowledge_settings() -> KnowledgeSettings:
         "KNOWLEDGE_MIN_FUSED_SCORE", default="0.0"
     )
     search_timeout_seconds = _finite_float(
-        "KNOWLEDGE_SEARCH_TIMEOUT_SECONDS", default="15"
+        "KNOWLEDGE_SEARCH_TIMEOUT_SECONDS", default="30"
     )
     if min_fused_score < 0:
         raise RuntimeError("KNOWLEDGE_MIN_FUSED_SCORE must be non-negative")

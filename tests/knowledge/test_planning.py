@@ -157,7 +157,7 @@ def test_weak_policy_keyword_with_policy_hint_is_corrected_to_single():
 
 
 def test_multi_plan_with_three_queries_is_capped_to_two():
-    # 保护行为：当前 15 秒总预算下，3 个首轮查询容易在 Assessor 前超时；
+    # 保护行为：当前总预算下，3 个首轮查询容易在 Assessor 前超时；
     # Planner 应把 MULTI 查询数限制为 2，降低 Agentic Search 整体失败率。
     client = FakeStructuredClient(
         '{"strategy":"MULTI","queries":["退货时限","运费承担","商品状态"],'

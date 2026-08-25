@@ -71,7 +71,7 @@ class PlanDecision:
 # - Strongly discourages NONE for policy/rule questions, which was a major source
 #   of missing evidence in Stage C.
 # - Encourages MULTI for multi-condition / mixed questions, while preferring two
-#   queries to keep the 15s search budget manageable.
+#   queries to keep the 30s search budget manageable.
 PLANNER_PROMPT_VERSION = "planner-v2"
 PLANNER_SYSTEM_PROMPT = """Classify and rewrite the user question for knowledge retrieval.
 Return one json object only. Do not answer the question or expose reasoning.
@@ -163,7 +163,7 @@ class QueryPlanner:
             )
 
         # Keep MULTI at two queries for now: three simultaneous retrieval calls
-        # are the main cause of Stage C budget exhaustion before the assessor can
+        # are a major cause of Stage C budget exhaustion before the assessor can
         # run. This is a Planner-side safety cap, not a change to Baseline RAG.
         degraded = False
         if plan.strategy is SearchStrategy.MULTI and len(plan.queries) > 2:

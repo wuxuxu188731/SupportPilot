@@ -141,7 +141,7 @@ class AdaptiveKnowledgeSearchService:
         retriever: HybridRetriever,
         planner: QueryPlanner,
         assessor: EvidenceAssessor,
-        timeout_seconds: float = 15.0,
+        timeout_seconds: float = 30.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._store = store
