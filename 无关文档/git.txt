@@ -1,7 +1,0 @@
-git init  //初始化仓库
-git add  {file_name}    //将文件添加到缓存区
-git add .gitignore
-git add .  //将所有文件加入缓冲区
-git commit -m"提交信息"
-git log --oneline -n 20   查看当前分支的最近二十次提交
-git diff 提交A..提交B
