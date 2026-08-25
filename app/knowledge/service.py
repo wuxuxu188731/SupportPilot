@@ -322,12 +322,19 @@ class AdaptiveKnowledgeSearchService:
                 )
                 error = InsufficientEvidenceError(missing_aspects=missing)
                 outcome = "insufficient"
+                # Keep the already-retrieved evidence as partial citations even
+                # when the Assessor says the evidence is not fully sufficient.
+                # Previously this path discarded all citations, which caused
+                # correct candidates to be lost before the final answer stage.
+                citations = self._citations(selected) if selected else []
                 result = self._result(
                     ok=False,
                     strategy=strategy,
                     round_count=budget.round_count,
                     evidence_status="insufficient",
                     started=started,
+                    citations=citations,
+                    selected=[item.chunk for item in selected],
                     error=error,
                 )
             return result
@@ -355,7 +362,7 @@ class AdaptiveKnowledgeSearchService:
             }
             selected_ids = {
                 item.chunk.chunk_id for item in selected
-            } if outcome == "sufficient" else set()
+            } if outcome in {"sufficient", "insufficient"} and selected else set()
             for candidate in trace_candidates:
                 if candidate["chunk_id"] in selected_ids:
                     candidate["resolution_status"] = "selected"
@@ -376,7 +383,7 @@ class AdaptiveKnowledgeSearchService:
                 candidate_json=json.dumps(trace),
                 selected_chunk_ids_json=json.dumps(
                     [item.chunk.chunk_id for item in selected]
-                    if outcome == "sufficient"
+                    if outcome in {"sufficient", "insufficient"} and selected
                     else []
                 ),
                 outcome=outcome,

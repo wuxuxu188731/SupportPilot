@@ -77,7 +77,7 @@ def test_empty_or_non_positive_evidence_is_insufficient_without_model():
     assert client.calls == []
 
 
-def test_low_score_and_uncovered_multi_query_use_deterministic_gate():
+def test_low_score_uses_deterministic_gate():
     client = FakeStructuredClient()
     assessor = EvidenceAssessor(client=client, min_fused_score=0.5)
     low = assessor.assess(
@@ -87,15 +87,32 @@ def test_low_score_and_uncovered_multi_query_use_deterministic_gate():
         timeout_seconds=5,
     )
     assert low.model_calls == 0
+    assert low.assessment.status is EvidenceStatus.INSUFFICIENT
 
-    missing = assessor.assess(
+
+def test_uncovered_multi_query_still_calls_model_and_enforces_coverage():
+    # 保护行为：MULTI 的某个计划子查询没有命中时，不应直接短路；
+    # 仍应让模型有机会提出补充查询，但即使模型返回 SUFFICIENT，
+    # 也必须强制降级为 INSUFFICIENT，避免未覆盖的方面被误判为充分。
+    client = FakeStructuredClient(
+        json.dumps(
+            {
+                "status": "SUFFICIENT",
+                "covered_aspects": [1],
+                "missing_aspects": [],
+                "follow_up_queries": [],
+            }
+        )
+    )
+    decision = EvidenceAssessor(client=client, min_fused_score=0.0).assess(
         plan=multi_plan("packaging", "window"),
         evidence=[evidence(score=0.8, matched=(0,))],
         round_number=1,
         timeout_seconds=5,
     )
-    assert missing.assessment.missing_aspects == ("query_2",)
-    assert missing.model_calls == 0
+    assert decision.model_calls == 1
+    assert decision.assessment.status is EvidenceStatus.INSUFFICIENT
+    assert decision.assessment.missing_aspects == ("query_2",)
 
 
 @pytest.mark.parametrize(

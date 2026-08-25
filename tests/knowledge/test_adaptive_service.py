@@ -257,7 +257,7 @@ def test_multi_runs_two_rounds_and_deduplicates_global_evidence(adaptive_scope):
     assert len(adaptive_scope.store.events) == 1
 
 
-def test_multi_without_new_followups_stops_insufficient(adaptive_scope):
+def test_multi_without_new_followups_stops_insufficient_but_keeps_partial_citations(adaptive_scope):
     adaptive_scope.planner.next_plan = _plan(
         SearchStrategy.MULTI,
         ("packaging", "window"),
@@ -277,7 +277,9 @@ def test_multi_without_new_followups_stops_insufficient(adaptive_scope):
     )
     assert result.ok is False
     assert result.error.code == "INSUFFICIENT_EVIDENCE"
-    assert result.citations == []
+    # 保护行为：Assessor 判定不足时不再丢弃已召回的 evidence，
+    # 而是作为 partial citations 返回，避免正确候选在最终阶段被全部清空。
+    assert [item.chunk_id for item in result.citations] == ["c1", "c2"]
     assert result.retrieval_summary.round_count == 1
 
 
