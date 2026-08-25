@@ -67,17 +67,55 @@ class PlanDecision:
     degraded: bool
 
 
-PLANNER_PROMPT_VERSION = "planner-v1"
-PLANNER_SYSTEM_PROMPT = """Classify and rewrite the user question for retrieval.
+# Planner prompt v2:
+# - Strongly discourages NONE for policy/rule questions, which was a major source
+#   of missing evidence in Stage C.
+# - Encourages MULTI for multi-condition / mixed questions, while preferring two
+#   queries to keep the 15s search budget manageable.
+PLANNER_PROMPT_VERSION = "planner-v2"
+PLANNER_SYSTEM_PROMPT = """Classify and rewrite the user question for knowledge retrieval.
 Return one json object only. Do not answer the question or expose reasoning.
 Never output tenant ids, thresholds, budgets, model names, or top-k controls.
+
+Rules:
+- NONE is ONLY for questions that are purely about order/logistics/ticket operations and do NOT need enterprise policy/rule knowledge. If the question mentions any policy/rule topic such as return, refund, warranty, compensation, shipping-time, member benefits, coupon, after-sales, or similar, do NOT use NONE.
+- SINGLE is for one clear policy question. Use the original question as the query unless a concise rewrite is clearly better.
+- MULTI is for questions that need multiple policy sections, multiple conditions/exceptions, or business facts plus policy. Generate 2-3 self-contained retrieval queries. Prefer 2 queries to control latency. Each query should be independently searchable and preserve key terms from the original question.
+
 Allowed reason codes: BUSINESS_ONLY, SIMPLE_POLICY, MULTI_CONDITION,
 MIXED_FACT_POLICY.
+
 Examples:
 {"strategy":"NONE","queries":[],"reason_code":"BUSINESS_ONLY"}
-{"strategy":"SINGLE","queries":["return window"],"reason_code":"SIMPLE_POLICY"}
-{"strategy":"MULTI","queries":["packaging requirements","return window"],"reason_code":"MULTI_CONDITION"}
+{"strategy":"SINGLE","queries":["普通会员无理由退货期是多少"],"reason_code":"SIMPLE_POLICY"}
+{"strategy":"MULTI","queries":["普通会员退货时限","无理由退货的运费承担"],"reason_code":"MULTI_CONDITION"}
 """
+
+# Terms that almost always indicate the user is asking about enterprise policy.
+_STRONG_POLICY_KEYWORDS = (
+    "退货", "退款", "换货", "保修", "维修", "换新", "赔偿", "补偿", "赔付",
+    "运费", "免运费", "优惠券", "积分", "赠品", "会员", "售后", "政策",
+    "规则", "时效", "缺货", "取消", "保留", "审核", "延迟", "超时",
+    "大促", "活动", "有效期", "期限", "到账", "门槛", "无理由",
+)
+
+# Terms that can be business-only, so they only count as policy intent when the
+# user is also asking a policy-style question (how long / how much / can I ...).
+_WEAK_POLICY_KEYWORDS = ("发货", "物流")
+
+_POLICY_QUESTION_HINTS = (
+    "多久", "多少", "几天", "能不能", "是否可以", "是否", "怎么办",
+    "怎么处理", "如何",
+)
+
+
+def _is_policy_question(question: str) -> bool:
+    """Return True when the question looks like it needs knowledge retrieval."""
+    if any(keyword in question for keyword in _STRONG_POLICY_KEYWORDS):
+        return True
+    return any(
+        keyword in question for keyword in _WEAK_POLICY_KEYWORDS
+    ) and any(hint in question for hint in _POLICY_QUESTION_HINTS)
 
 
 class QueryPlanner:
@@ -107,9 +145,38 @@ class QueryPlanner:
                 estimated_tokens=completion.estimated_tokens,
                 degraded=True,
             )
+
+        # Deterministic safety net: if the model says "no search needed" for a
+        # question that clearly mentions policy/rule terms, fall back to a normal
+        # single-query search instead of returning no evidence.
+        if plan.strategy is SearchStrategy.NONE and _is_policy_question(clean_question):
+            plan = SearchPlan(
+                strategy=SearchStrategy.SINGLE,
+                queries=(clean_question,),
+                reason_code=SearchReasonCode.SIMPLE_POLICY,
+            )
+            return PlanDecision(
+                plan=plan,
+                model_calls=1,
+                estimated_tokens=completion.estimated_tokens,
+                degraded=True,
+            )
+
+        # Keep MULTI at two queries for now: three simultaneous retrieval calls
+        # are the main cause of Stage C budget exhaustion before the assessor can
+        # run. This is a Planner-side safety cap, not a change to Baseline RAG.
+        degraded = False
+        if plan.strategy is SearchStrategy.MULTI and len(plan.queries) > 2:
+            plan = SearchPlan(
+                strategy=SearchStrategy.MULTI,
+                queries=plan.queries[:2],
+                reason_code=plan.reason_code,
+            )
+            degraded = True
+
         return PlanDecision(
             plan=plan,
             model_calls=1,
             estimated_tokens=completion.estimated_tokens,
-            degraded=False,
+            degraded=degraded,
         )
