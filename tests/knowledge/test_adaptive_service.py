@@ -221,6 +221,46 @@ def test_single_runs_one_query_and_returns_grounded_citation(adaptive_scope):
     assert len(adaptive_scope.store.events) == 1
 
 
+# 保护行为：Agentic Search 应按 rerank 分数选择证据，而不是沿用 embedding 融合分数顺序。
+def test_single_uses_rerank_order_for_evidence_selection(adaptive_scope):
+    from app.knowledge.reranking import RerankedChunk
+
+    class _ReverseReranker:
+        def rerank(self, *, query, chunks, timeout_seconds):
+            del query, timeout_seconds
+            return (
+                RerankedChunk(chunk=chunks[1], rerank_score=0.95),
+                RerankedChunk(chunk=chunks[0], rerank_score=0.10),
+            )
+
+    adaptive_scope.service._reranker = _ReverseReranker()
+    adaptive_scope.planner.next_plan = _plan(
+        SearchStrategy.SINGLE,
+        ("return answer",),
+        SearchReasonCode.SIMPLE_POLICY,
+    )
+    adaptive_scope.retriever.results["return answer"] = (
+        _scored("embedding-first", 0.99),
+        _scored("rerank-first", 0.40),
+    )
+    adaptive_scope.assessor.decisions = [
+        _assessment(EvidenceStatus.SUFFICIENT)
+    ]
+
+    result = adaptive_scope.service.search(
+        organization_id="org-a", question="how long"
+    )
+
+    assert [item.chunk_id for item in result.citations] == [
+        "rerank-first",
+        "embedding-first",
+    ]
+    assert [item["rerank_score"] for item in result.retrieval_trace["candidates"]] == [
+        0.95,
+        0.10,
+    ]
+
+
 def test_multi_runs_two_rounds_and_deduplicates_global_evidence(adaptive_scope):
     adaptive_scope.planner.next_plan = _plan(
         SearchStrategy.MULTI,

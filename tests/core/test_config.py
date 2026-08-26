@@ -68,6 +68,23 @@ def test_stage_b_settings_are_server_owned(monkeypatch):
     assert settings.search_timeout_seconds == 15.0
 
 
+# 保护行为：重排序默认使用指定的北京业务空间和英文问答检索策略。
+def test_rerank_settings_use_workspace_and_qa_instruction(monkeypatch):
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "key")
+    monkeypatch.delenv("KNOWLEDGE_RERANK_BASE_URL", raising=False)
+    monkeypatch.delenv("KNOWLEDGE_RERANK_INSTRUCT", raising=False)
+
+    settings = get_knowledge_settings()
+
+    assert settings.rerank_model == "qwen3-rerank"
+    assert settings.rerank_base_url == (
+        "https://ws-tocwkn1wc3xhur1f.cn-beijing.maas.aliyuncs.com/api/v1"
+    )
+    assert settings.rerank_instruct == (
+        "Given a web search query, retrieve relevant passages that answer the query."
+    )
+
+
 @pytest.mark.parametrize(
     ("name", "value"),
     [

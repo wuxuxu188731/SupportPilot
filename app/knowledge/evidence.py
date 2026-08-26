@@ -16,11 +16,12 @@ from app.knowledge.structured_llm import StructuredJSONClient
 
 @dataclass(frozen=True)
 class RoundEvidence:
-    chunk: ChunkWithDocumentTitle
-    fused_score: float
-    matched_query_indexes: tuple[int, ...]
-    first_round: int
-    first_query_index: int
+    chunk: ChunkWithDocumentTitle  # 经 SQLite 二次校验后的可信知识分块
+    fused_score: float  # embedding 稠密/稀疏召回阶段的融合分数
+    rerank_score: float = 0.0  # qwen3-rerank 对当前查询给出的相关性分数
+    matched_query_indexes: tuple[int, ...] = ()  # 命中该分块的本轮查询下标集合
+    first_round: int = 0  # 该分块首次出现的检索轮次
+    first_query_index: int = 0  # 该分块首次出现时的查询下标
 
 
 class EvidenceStatus(str, Enum):

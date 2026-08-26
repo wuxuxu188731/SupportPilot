@@ -108,6 +108,8 @@ def test_factory_wires_real_adapters_without_network(tmp_path, monkeypatch):
     from app.knowledge.retrieval import HybridRetriever
     assert isinstance(services.adaptive, AdaptiveKnowledgeSearchService)
     assert isinstance(services.retriever, HybridRetriever)
+    from app.knowledge.reranking import DashScopeQwenReranker
+    assert isinstance(services.adaptive._reranker, DashScopeQwenReranker)
 
     # The injected dashscope client + qdrant vector store are real (not fakes),
     # yet assembly touched the network zero times.

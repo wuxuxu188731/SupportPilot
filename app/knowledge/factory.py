@@ -25,6 +25,7 @@ from app.knowledge.dashscope_embeddings import DashScopeEmbeddingClient
 from app.knowledge.document_loader import DocumentLoader
 from app.knowledge.ingestion import KnowledgeIngestionService
 from app.knowledge.qdrant_store import QdrantVectorStore
+from app.knowledge.reranking import DashScopeQwenReranker
 from app.knowledge.retrieval import BaselineKnowledgeSearchService, HybridRetriever
 from app.knowledge.service import AdaptiveKnowledgeSearchService
 from app.knowledge.structured_llm import OpenAIStructuredJSONClient
@@ -137,6 +138,12 @@ def create_knowledge_services(
         assessor=EvidenceAssessor(
             client=structured,
             min_fused_score=settings.min_fused_score,
+        ),
+        reranker=DashScopeQwenReranker(
+            api_key=settings.dashscope_api_key,
+            base_url=settings.rerank_base_url,
+            model=settings.rerank_model,
+            instruct=settings.rerank_instruct,
         ),
         timeout_seconds=settings.search_timeout_seconds,
     )

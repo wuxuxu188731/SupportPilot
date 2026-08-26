@@ -249,6 +249,19 @@ class SearchBudgetExceededError(KnowledgeError):
         )
 
 
+class RerankUnavailableError(KnowledgeError):
+    """Raised when agentic-search candidates cannot be reranked safely."""
+
+    code = "RERANK_UNAVAILABLE"
+
+    def __init__(self, *, reason: str) -> None:
+        self.reason = reason
+        super().__init__(
+            "RERANK_UNAVAILABLE",
+            "knowledge reranking is temporarily unavailable",
+        )
+
+
 class SearchInternalError(KnowledgeError):
     code = "SEARCH_INTERNAL_ERROR"
 

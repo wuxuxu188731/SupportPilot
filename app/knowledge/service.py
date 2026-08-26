@@ -17,6 +17,7 @@ from app.knowledge.base import (
     InsufficientEvidenceError,
     KnowledgeError,
     KnowledgeStore,
+    RerankUnavailableError,
     RetrievalEvent,
     SearchBudgetExceededError,
     SearchInternalError,
@@ -39,6 +40,7 @@ from app.knowledge.results import (
     RetrievalSummary,
 )
 from app.knowledge.retrieval import HybridRetriever
+from app.knowledge.reranking import IdentityReranker, Reranker
 
 MAX_PLANNER_CALLS = 1
 MAX_ROUNDS = 2
@@ -141,6 +143,7 @@ class AdaptiveKnowledgeSearchService:
         retriever: HybridRetriever,
         planner: QueryPlanner,
         assessor: EvidenceAssessor,
+        reranker: Reranker | None = None,
         timeout_seconds: float = 30.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -148,6 +151,7 @@ class AdaptiveKnowledgeSearchService:
         self._retriever = retriever
         self._planner = planner
         self._assessor = assessor
+        self._reranker = reranker or IdentityReranker()
         self._timeout_seconds = timeout_seconds
         self._clock = clock
 
@@ -225,9 +229,23 @@ class AdaptiveKnowledgeSearchService:
                     )
                     budget.ensure_time()
                     estimated_tokens += retrieval.query_tokens
-                    for rank, scored in enumerate(
-                        retrieval.ranked_chunks, start=1
-                    ):
+                    fused_rank_by_id = {
+                        item.chunk.chunk_id: rank
+                        for rank, item in enumerate(
+                            retrieval.ranked_chunks, start=1
+                        )
+                    }
+                    if retrieval.ranked_chunks:
+                        reranked = self._reranker.rerank(
+                            query=query,
+                            chunks=retrieval.ranked_chunks,
+                            timeout_seconds=budget.external_timeout_seconds(),
+                        )
+                        budget.ensure_time()
+                    else:
+                        reranked = ()
+                    for rank, reranked_item in enumerate(reranked, start=1):
+                        scored = reranked_item.chunk
                         chunk_id = scored.chunk.chunk_id
                         existing = evidence_by_id.get(chunk_id)
                         matched = (query_index,)
@@ -235,6 +253,7 @@ class AdaptiveKnowledgeSearchService:
                             evidence_by_id[chunk_id] = RoundEvidence(
                                 chunk=scored.chunk,
                                 fused_score=scored.fused_score,
+                                rerank_score=reranked_item.rerank_score,
                                 matched_query_indexes=matched,
                                 first_round=round_number,
                                 first_query_index=query_index,
@@ -247,13 +266,13 @@ class AdaptiveKnowledgeSearchService:
                                 )
                             )
                             evidence_by_id[chunk_id] = RoundEvidence(
-                                chunk=(
-                                    scored.chunk
-                                    if scored.fused_score > existing.fused_score
-                                    else existing.chunk
-                                ),
+                                chunk=scored.chunk if reranked_item.rerank_score > existing.rerank_score else existing.chunk,
                                 fused_score=max(
                                     scored.fused_score, existing.fused_score
+                                ),
+                                rerank_score=max(
+                                    reranked_item.rerank_score,
+                                    existing.rerank_score,
                                 ),
                                 matched_query_indexes=merged,
                                 first_round=existing.first_round,
@@ -264,8 +283,10 @@ class AdaptiveKnowledgeSearchService:
                                 "round": round_number,
                                 "query_index": query_index + 1,
                                 "chunk_id": chunk_id,
-                                "fused_rank": rank,
+                                "fused_rank": fused_rank_by_id[chunk_id],
                                 "fused_score": scored.fused_score,
+                                "rerank_rank": rank,
+                                "rerank_score": reranked_item.rerank_score,
                                 "resolution_status": "active",
                                 "selection_reason": "candidate",
                             }
@@ -342,8 +363,8 @@ class AdaptiveKnowledgeSearchService:
             failure_stage = "budget"
             result = self._failure(strategy, budget.round_count, started, exc)
             return result
-        except (EmbeddingUnavailableError, VectorStoreUnavailableError) as exc:
-            failure_stage = "retrieval"
+        except (EmbeddingUnavailableError, VectorStoreUnavailableError, RerankUnavailableError) as exc:
+            failure_stage = "rerank" if isinstance(exc, RerankUnavailableError) else "retrieval"
             result = self._failure(strategy, budget.round_count, started, exc)
             return result
         except SearchInternalError as exc:
@@ -406,7 +427,11 @@ class AdaptiveKnowledgeSearchService:
 
     @staticmethod
     def _select_evidence(items) -> list[RoundEvidence]:
-        ranked = sorted(items, key=lambda item: item.fused_score, reverse=True)
+        ranked = sorted(
+            items,
+            key=lambda item: (item.rerank_score, item.fused_score),
+            reverse=True,
+        )
         selected: list[RoundEvidence] = []
         token_count = 0
         for item in ranked:
