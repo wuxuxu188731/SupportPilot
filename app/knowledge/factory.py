@@ -119,11 +119,18 @@ def create_knowledge_services(
         embedding=embedding,
         vector_store=vector_store,
     )
+    reranker = DashScopeQwenReranker(
+        api_key=settings.dashscope_api_key,
+        base_url=settings.rerank_base_url,
+        model=settings.rerank_model,
+        instruct=settings.rerank_instruct,
+    )
     baseline = BaselineKnowledgeSearchService(
         store=store,
         embedding=embedding,
         vector_store=vector_store,
         retriever=retriever,
+        reranker=reranker,
     )
     if llm_client is None:
         from app.core.config import create_llm_client
@@ -139,12 +146,7 @@ def create_knowledge_services(
             client=structured,
             min_fused_score=settings.min_fused_score,
         ),
-        reranker=DashScopeQwenReranker(
-            api_key=settings.dashscope_api_key,
-            base_url=settings.rerank_base_url,
-            model=settings.rerank_model,
-            instruct=settings.rerank_instruct,
-        ),
+        reranker=reranker,
         timeout_seconds=settings.search_timeout_seconds,
     )
 

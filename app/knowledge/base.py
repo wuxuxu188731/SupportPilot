@@ -250,7 +250,7 @@ class SearchBudgetExceededError(KnowledgeError):
 
 
 class RerankUnavailableError(KnowledgeError):
-    """Raised when agentic-search candidates cannot be reranked safely."""
+    """Raised when recalled knowledge candidates cannot be reranked safely."""
 
     code = "RERANK_UNAVAILABLE"
 

@@ -1,5 +1,9 @@
 # Stage C：传统 RAG 与 Agentic Search 对比
 
+> 历史结果说明：本文记录的是 Planner 与 rerank 优化前的检索实验，不能代表当前版本。
+> 当前优化版本的证据召回率为 Baseline 85%、Agentic Search 90.5%。本文保留用于追踪
+> 演进过程，不应再据此判断当前两条链路的相对质量。
+
 ## 结论
 
 在当前系统和同一批 48 个评测问题下，传统 RAG 明显优于 Agentic Search。

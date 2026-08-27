@@ -46,7 +46,7 @@ class KnowledgeSettings:
     embedding_dimensions: int = 1024  # 稠密向量维度，必须与集合定义一致
     min_fused_score: float = 0.0  # Agentic Search 证据进入评估器的最低融合分数
     search_timeout_seconds: float = 30.0  # 单次 Agentic Search 的总超时时间（秒）
-    rerank_model: str = "qwen3-rerank"  # Agentic Search 使用的重排序模型名称
+    rerank_model: str = "qwen3-rerank"  # Baseline 与 Agentic Search 共享的重排序模型名称
     rerank_base_url: str = (  # 百炼北京业务空间的重排序 API 基础地址
         "https://ws-tocwkn1wc3xhur1f.cn-beijing.maas.aliyuncs.com/api/v1"
     )

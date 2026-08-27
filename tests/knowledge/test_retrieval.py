@@ -16,6 +16,7 @@ import pytest
 from app.knowledge.base import (
     ChunkWithDocumentTitle,
     EmbeddingUnavailableError,
+    RerankUnavailableError,
     VectorStoreUnavailableError,
 )
 from app.knowledge.embeddings import EmbeddingVector
@@ -240,6 +241,75 @@ def test_baseline_uses_one_query_and_fixed_top_k(retrieval_scope):
     assert result.retrieval_summary.strategy == "baseline"
     assert result.retrieval_summary.round_count == 1
     assert result.retrieval_summary.evidence_status == "sufficient"
+
+
+# 保护行为：Baseline 必须按 rerank 分数而非融合召回分数生成最终引用顺序。
+def test_baseline_uses_rerank_order_before_budget_selection(retrieval_scope):
+    from app.knowledge.reranking import RerankedChunk
+
+    class _ReverseReranker:
+        def __init__(self):
+            self.calls = []
+
+        def rerank(self, *, query, chunks, timeout_seconds):
+            self.calls.append((query, chunks, timeout_seconds))
+            return (
+                RerankedChunk(chunk=chunks[1], rerank_score=0.95),
+                RerankedChunk(chunk=chunks[0], rerank_score=0.10),
+            )
+
+    reranker = _ReverseReranker()
+    retrieval_scope.service = BaselineKnowledgeSearchService(
+        store=retrieval_scope.store,
+        embedding=retrieval_scope.embedding,
+        vector_store=retrieval_scope.vector,
+        reranker=reranker,
+    )
+    retrieval_scope.vector.candidates = [
+        _candidate("chunk-a0", score=0.99, ordinal=0),
+        _candidate("chunk-a2", score=0.40, ordinal=2),
+    ]
+
+    result = retrieval_scope.service.search(
+        organization_id="org-a", question="退货期限"
+    )
+
+    assert [item.chunk_id for item in result.citations] == [
+        "chunk-a2",
+        "chunk-a0",
+    ]
+    assert reranker.calls[0][0] == "退货期限"
+    assert reranker.calls[0][2] == 5
+
+
+# 边界情况：rerank 基础设施失败必须明确失败，不能静默退回融合分数顺序。
+def test_baseline_rerank_failure_is_not_converted_to_unreranked_result(
+    retrieval_scope,
+):
+    class _FailingReranker:
+        def rerank(self, *, query, chunks, timeout_seconds):
+            del query, chunks, timeout_seconds
+            raise RerankUnavailableError(reason="provider down")
+
+    retrieval_scope.service = BaselineKnowledgeSearchService(
+        store=retrieval_scope.store,
+        embedding=retrieval_scope.embedding,
+        vector_store=retrieval_scope.vector,
+        reranker=_FailingReranker(),
+    )
+    retrieval_scope.vector.candidates = [
+        _candidate("chunk-a0", score=0.9, ordinal=0)
+    ]
+
+    result = retrieval_scope.service.search(
+        organization_id="org-a", question="退货期限"
+    )
+
+    assert result.ok is False
+    assert result.citations == []
+    assert result.error.code == "RERANK_UNAVAILABLE"
+    assert result.retrieval_summary.evidence_status == "failed"
+    assert retrieval_scope.store.events[-1].outcome == "failed"
 
 
 # ------------------------------------------------------------------ Step 2

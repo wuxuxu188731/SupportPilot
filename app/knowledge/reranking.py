@@ -1,4 +1,4 @@
-"""Qwen3 reranking boundary used only by Agentic Search."""
+"""Qwen3 reranking boundary shared by Baseline and Agentic Search."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ class RerankedChunk:
 
 
 class Reranker(Protocol):
-    """Rerank already-recalled, trusted chunks for one agentic query."""
+    """Rerank already-recalled, trusted chunks for one knowledge query."""
 
     def rerank(
         self,
@@ -45,7 +45,7 @@ class Reranker(Protocol):
 
 
 class IdentityReranker:
-    """Compatibility default for directly constructed adaptive services."""
+    """Compatibility default for directly constructed knowledge services."""
 
     def rerank(
         self,

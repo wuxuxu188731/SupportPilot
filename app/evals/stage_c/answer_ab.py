@@ -623,6 +623,11 @@ def run_stage_c_answer_ab_eval(
         "business_tool_names": sorted(_READ_ONLY_BUSINESS_TOOLS),
         "knowledge_tool_name": "search_knowledge",
         "collection_name": settings.qdrant_collection,
+        "baseline_rerank_enabled": True,
+        "baseline_rerank_model": settings.rerank_model,
+        "adaptive_rerank_model": settings.rerank_model,
+        "rerank_instruct": settings.rerank_instruct,
+        "retrieval_comparison_version": "baseline-rerank-v1-adaptive-rerank-v1",
     }
     checkpoint = AnswerCheckpoint(checkpoint_path, metadata)
     return StageCAnswerABRunner(

@@ -2,8 +2,8 @@
 
 Runs a single raw question through the fixed pipeline: query embedding ->
 tenant/version-filtered dense+sparse RRF (native Qdrant) -> second-pass SQLite
-validation -> Top-5 citations within a 3,000-token budget, recording a body-free
-retrieval event on every path.
+validation -> Qwen rerank -> Top-5 citations within a 3,000-token budget,
+recording a body-free retrieval event on every path.
 
 The algorithm order is fixed (see ``search``):
 
@@ -14,9 +14,10 @@ The algorithm order is fixed (see ``search``):
 5. ``resolve_active_citations`` second-pass validation
 6. dedupe by candidate score descending; same-version ordinal-difference-1
    chunks keep the higher-score one (order rebuilt from candidate scores)
-7. within 3,000 tokens select at most 5; generate C1..Cn in final order
-8. ``time.perf_counter()`` measures latency
-9. a finally path persists the RetrievalEvent (metadata only, no bodies)
+7. rerank the trusted candidates by the original question
+8. within 3,000 tokens select at most 5; generate C1..Cn in final order
+9. ``time.perf_counter()`` measures latency
+10. a finally path persists the RetrievalEvent (metadata only, no bodies)
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ from app.knowledge.base import (
     EmbeddingUnavailableError,
     InvalidDocumentError,
     KnowledgeStore,
+    RerankUnavailableError,
     RetrievalEvent,
     VectorStoreUnavailableError,
 )
@@ -47,6 +49,7 @@ from app.knowledge.results import (
     ScoredChunk,
     SelectionReason,
 )
+from app.knowledge.reranking import IdentityReranker, Reranker
 from app.knowledge.vector_store import VectorCandidate, VectorStore
 
 STRATEGY = "baseline"
@@ -56,6 +59,7 @@ TOKEN_BUDGET = 3000
 PREFETCH_LIMIT = 8
 RESULT_LIMIT = 8
 MODEL_CALLS = 0
+RERANK_TIMEOUT_SECONDS = 5
 
 
 class HybridRetriever:
@@ -148,6 +152,7 @@ class BaselineKnowledgeSearchService:
         embedding: EmbeddingClient,
         vector_store: VectorStore,
         retriever: HybridRetriever | None = None,
+        reranker: Reranker | None = None,
     ) -> None:
         self._store = store
         self._retriever = retriever or HybridRetriever(
@@ -155,6 +160,7 @@ class BaselineKnowledgeSearchService:
             embedding=embedding,
             vector_store=vector_store,
         )
+        self._reranker = reranker or IdentityReranker()
 
     # -------------------------------------------------------------- public
 
@@ -192,7 +198,22 @@ class BaselineKnowledgeSearchService:
                 candidate_by_id, canonical_rank_by_id = (
                     self._canonical_candidates(candidates)
                 )
-                ranked = [item.chunk for item in retrieval.ranked_chunks]
+                reranked = self._reranker.rerank(
+                    query=clean_question,
+                    chunks=retrieval.ranked_chunks,
+                    timeout_seconds=RERANK_TIMEOUT_SECONDS,
+                )
+                reranked = tuple(
+                    sorted(
+                        reranked,
+                        key=lambda item: (
+                            item.rerank_score,
+                            item.chunk.fused_score,
+                        ),
+                        reverse=True,
+                    )
+                )
+                ranked = [item.chunk.chunk for item in reranked]
                 selected, selection_reason_by_id = self._select_within_budget(
                     ranked
                 )
@@ -213,6 +234,11 @@ class BaselineKnowledgeSearchService:
             outcome = "failed"
             evidence_status = "failed"
         except EmbeddingUnavailableError as exc:
+            ok = False
+            error = exc
+            outcome = "failed"
+            evidence_status = "failed"
+        except RerankUnavailableError as exc:
             ok = False
             error = exc
             outcome = "failed"
