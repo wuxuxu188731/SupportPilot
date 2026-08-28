@@ -1,5 +1,8 @@
-"""Loader boundary tests: byte-size guard, utf-8 decode, newline
-normalisation and markdown heading-path extraction."""
+"""Loader boundary tests: decoding, Word extraction and section handling."""
+
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from zipfile import ZipFile
 
 import pytest
 
@@ -8,7 +11,12 @@ from app.knowledge.base import DocumentSourceType, InvalidDocumentError
 from app.knowledge.document_loader import (
     MAX_DOCUMENT_BYTES,
     DocumentLoader,
+    WordDocumentExtractor,
 )
+
+
+WORD_FIXTURES = Path(__file__).parents[2] / "TestWordDocuments"
+WORD_NAMESPACE = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
 
 def test_markdown_loader_normalizes_newlines_and_headings():
@@ -69,3 +77,37 @@ def test_loader_accepts_exactly_max_size_document():
     content = b"x" * MAX_DOCUMENT_BYTES
     loaded = DocumentLoader().load(content, DocumentSourceType.TEXT)
     assert loaded.text == "x" * MAX_DOCUMENT_BYTES
+
+
+# 保护行为：Word 提取器必须覆盖样例正文和全部表格单元格，且保持文字顺序。
+def test_word_extractor_reads_all_text_from_sample_document():
+    path = next(WORD_FIXTURES.glob("*.docx"))
+
+    extracted = WordDocumentExtractor().extract(path.read_bytes())
+
+    with ZipFile(path) as package:
+        document_xml = ET.fromstring(package.read("word/document.xml"))
+    expected_text = "".join(
+        node.text or "" for node in document_xml.iter(f"{WORD_NAMESPACE}t")
+    )
+    assert extracted.replace("\n", "").replace("\t", "") == expected_text
+    assert "招聘录用制度" in extracted
+    assert "第一层：总则" in extracted
+
+
+# 保护行为：DocumentLoader 应把 Word 全文包装成单个未命名 section。
+def test_document_loader_builds_single_section_for_word_document():
+    path = next(WORD_FIXTURES.glob("*.docx"))
+
+    loaded = DocumentLoader().load(path.read_bytes(), DocumentSourceType.WORD)
+
+    assert loaded.text
+    assert len(loaded.sections) == 1
+    assert loaded.sections[0].heading_path is None
+    assert loaded.sections[0].content == loaded.text
+
+
+# 边界情况：损坏或伪造的 DOCX 字节必须转换为统一的文档校验错误。
+def test_word_extractor_rejects_invalid_docx():
+    with pytest.raises(InvalidDocumentError):
+        WordDocumentExtractor().extract(b"not a docx package")

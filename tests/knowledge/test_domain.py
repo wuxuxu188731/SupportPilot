@@ -10,8 +10,13 @@ def _field_names(cls):
 
 
 class TestEnums:
+    # 保护行为：文档来源类型必须包含 Markdown、纯文本和 Word 三种支持格式。
     def test_document_source_type_values(self):
-        assert {e.value for e in kb.DocumentSourceType} == {"markdown", "text"}
+        assert {e.value for e in kb.DocumentSourceType} == {
+            "markdown",
+            "text",
+            "word",
+        }
 
     def test_document_status_values(self):
         assert {e.value for e in kb.DocumentStatus} == {

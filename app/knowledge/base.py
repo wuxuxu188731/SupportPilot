@@ -6,6 +6,7 @@ from typing import Protocol, Sequence
 class DocumentSourceType(str, Enum):
     MARKDOWN = "markdown"
     TEXT = "text"
+    WORD = "word"
 
 
 class DocumentStatus(str, Enum):

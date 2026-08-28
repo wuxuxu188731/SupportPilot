@@ -1,15 +1,21 @@
-"""Markdown/TXT loader: normalise raw bytes into a stable ``LoadedDocument``.
+"""Markdown/TXT/Word loader: normalise bytes into ``LoadedDocument``.
 
-The loader is deliberately dependency-light: it only decodes utf-8, folds
-CRLF/the bare carriage return to LF, guards the byte size, and builds a
-heading-path stack from markdown ATX headings. Splitting into token-bounded
-chunks happens later in ``app.knowledge.chunking``.
+The loader is deliberately dependency-light: Markdown/TXT decoding remains
+local, while Word uses python-docx to validate the OOXML package and extract
+all body paragraphs, including paragraphs nested in tables. Splitting into
+token-bounded chunks happens later in ``app.knowledge.chunking``.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from io import BytesIO
+from zipfile import BadZipFile
+
+from docx import Document
+from docx.opc.exceptions import PackageNotFoundError
+from docx.oxml.ns import qn
 
 from app.knowledge.base import DocumentSourceType, InvalidDocumentError
 
@@ -19,6 +25,47 @@ MAX_DOCUMENT_BYTES = 2 * 1024 * 1024
 
 # ATX headings: line-initial run of 1-6 '#' then whitespace then the title.
 _HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.+?)\s*$")
+
+_WORD_TEXT_TAG = qn("w:t")
+_WORD_TAB_TAG = qn("w:tab")
+_WORD_BREAK_TAGS = {qn("w:br"), qn("w:cr")}
+
+
+class WordDocumentExtractor:
+    """Extract visible body text from a DOCX document in reading order.
+
+    Traversing OOXML paragraphs instead of only ``Document.paragraphs`` is
+    intentional: python-docx excludes paragraphs inside tables from that
+    collection, while policy documents commonly place substantial content in
+    table cells. Inline tabs and explicit line breaks are retained.
+    """
+
+    def extract(self, content: bytes) -> str:
+        try:
+            document = Document(BytesIO(content))
+        except (BadZipFile, PackageNotFoundError, ValueError, KeyError) as exc:
+            raise InvalidDocumentError(
+                reason="document is not a valid docx"
+            ) from exc
+
+        paragraphs: list[str] = []
+        for paragraph in document.element.body.iter(qn("w:p")):
+            parts: list[str] = []
+            for node in paragraph.iter():
+                if node.tag == _WORD_TEXT_TAG:
+                    parts.append(node.text or "")
+                elif node.tag == _WORD_TAB_TAG:
+                    parts.append("\t")
+                elif node.tag in _WORD_BREAK_TAGS:
+                    parts.append("\n")
+            text = "".join(parts)
+            if text.strip():
+                paragraphs.append(text)
+
+        extracted = "\n".join(paragraphs)
+        if not extracted.strip():
+            raise InvalidDocumentError(reason="document is empty")
+        return extracted
 
 
 @dataclass(frozen=True)
@@ -44,6 +91,13 @@ class LoadedDocument:
 class DocumentLoader:
     """Turns raw uploaded bytes into a normalised, sectioned document."""
 
+    def __init__(
+        self,
+        *,
+        word_extractor: WordDocumentExtractor | None = None,
+    ) -> None:
+        self._word_extractor = word_extractor or WordDocumentExtractor()
+
     def load(
         self,
         content: bytes,
@@ -51,6 +105,13 @@ class DocumentLoader:
     ) -> LoadedDocument:
         if len(content) > MAX_DOCUMENT_BYTES:
             raise InvalidDocumentError(reason="document exceeds maximum size")
+
+        if source_type is DocumentSourceType.WORD:
+            text = self._word_extractor.extract(content)
+            return LoadedDocument(
+                text=text,
+                sections=(LoadedSection(heading_path=None, content=text),),
+            )
 
         try:
             text = content.decode("utf-8")
