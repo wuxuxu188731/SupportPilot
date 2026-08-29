@@ -3,9 +3,10 @@
 ## 1. 文档状态
 
 - 日期：2026-08-28
+- 最近更新：2026-08-29
 - 状态：已确认，待实施
 - 目标阶段：阶段 4——人工审批与可靠执行
-- 核心决策：普通聊天继续使用现有 Agent Runtime，仅将退款/补偿审批长流程交给 LangGraph；所有执行型动作必须先形成提案并经过人工审批
+- 核心决策：普通聊天继续使用现有 Agent Runtime；LangGraph 只是提案工具背后的确定性业务工作流，不是第二个 Agent Runtime，不调用 LLM；所有执行型动作必须先形成提案并经过人工审批
 
 ## 2. 背景
 
@@ -17,17 +18,18 @@ SupportPilot 当前已经具备认证、多租户、`admin` / `agent` 最小 RBA
 4. 节点重放、重复审批或请求重试时不重复产生退款/补偿。
 5. 审批、恢复与执行过程能够独立审计。
 
-因此，本阶段只为退款和补偿引入 LangGraph。LangGraph 负责运行位置、条件路由、`interrupt` 和 checkpoint；项目自己的业务数据库继续负责提案、审批决定、执行结果、幂等约束和审计事实。
+因此，本阶段只在 `propose_refund` 和 `propose_compensation` 工具背后引入 LangGraph。现有 Agent Runtime 仍负责模型调用和工具选择；LangGraph 不调用 LLM、不维护聊天消息循环，也不替代现有 `run_one_turn()`。它只负责确定性的运行位置、条件路由、`interrupt` 和 checkpoint。项目自己的业务数据库继续负责提案、审批决定、执行结果、幂等约束和审计事实。
 
 ## 3. 已确认的产品决策
 
 1. 退款和补偿在本阶段全部需要人工审批，不设置自动放行额度。
 2. 只有当前企业的 `admin` 可以作出审批决定。
 3. 为兼容只有一个管理员的演示企业，允许管理员审批自己发起的提案。
-4. 审批支持“批准”“修改后批准”“拒绝”。修改范围仅限金额、原因和类型专属参数，不能更换企业、订单、币种或动作类型。
+4. 审批支持“批准”“修改后批准”“拒绝”。修改范围仅限金额、原因和类型专属参数；退款的 `refund_scope` 属于可修改的类型专属参数。不能更换企业、订单、币种或动作类型。
 5. 本阶段只实现模拟退款与模拟优惠券补偿，不连接真实支付、优惠券、CRM 或物流平台。
 6. “暂停恢复”指等待审批期间暂停、服务重启后恢复，以及已批准可重试失败的显式恢复；不提供任意节点的操作员暂停功能。
 7. 普通聊天、订单查询、物流查询、工单和知识检索继续使用现有 Runtime，不整体迁移到 LangGraph。
+8. 审批发生时原聊天请求已经结束。审批 API 直接恢复 Action Run，不唤醒或恢复原来的 Agent while 循环；后续聊天通过只读状态工具查询结果。
 
 ## 4. 目标与非目标
 
@@ -85,8 +87,8 @@ Chat API
        ActionWorkflowService
         |       |       |
         |       |       +--> 业务 Store / Audit Log
-        |       +----------> LangGraph Runtime + SQLite Checkpointer
-        +------------------> Proposal / Approval / AgentRun
+        |       +----------> LangGraph Workflow Runtime + SQLite Checkpointer
+        +------------------> Proposal / Approval / ActionRun
                                   |
                                   | interrupt
                                   v
@@ -105,10 +107,12 @@ Approval API --> ApprovalService --> 持久化决定 --> Command(resume=...)
 
 - 现有 Agent 负责理解用户意图、查询业务事实和调用“创建提案”工具。
 - `ActionWorkflowService` 负责在业务数据库中原子创建 Run、提案版本和审批请求，然后启动图。
-- LangGraph 负责等待、恢复和流程路由，不负责判断调用者权限。
+- LangGraph 是工具内部的确定性业务状态机，只负责等待、恢复和流程路由；它不调用 LLM、不选择工具，也不负责判断调用者权限。
 - `ApprovalService` 负责 RBAC、审批状态转换和不可变决定。
 - `IdempotentActionExecutor` 只接受已经持久化并批准的提案版本。
 - Store 和数据库约束负责租户隔离、状态一致性、金额上限与幂等。
+
+现有 Agent Runtime 与 Action Workflow Runtime 之间不存在长期存活的进程内通信：首次创建时，现有 Agent Runtime 通过普通工具函数调用启动 Action Run，并从工具结果取得 `awaiting_approval`；审批时，另一个 HTTP 请求依据业务数据库中的 Run 和 LangGraph checkpoint 独立恢复流程。原聊天请求和原 while 循环不会保持等待状态。
 
 ## 7. 模块与文件边界
 
@@ -127,10 +131,13 @@ app/workflows/
   runtime.py              # invoke、interrupt 结果归一化、resume
   checkpointer.py         # SQLite checkpointer 生命周期与配置
 
+app/agent/
+  invocation_context.py   # AgentInvocationContext，携带可信租户、会话和回合标识
+
 app/tools/
-  action_arguments.py     # 两个提案工具的 Pydantic 参数
-  action_definitions.py   # 工具描述
-  action_gateway.py       # TenantContext 绑定和错误映射
+  action_arguments.py     # 两个提案工具和只读状态工具的 Pydantic 参数
+  action_definitions.py   # 提案与状态工具描述
+  action_gateway.py       # AgentInvocationContext 绑定和错误映射
 
 app/api/
   action_router.py        # 提案、审批和 Run 查询/操作 API
@@ -151,10 +158,10 @@ tests/integration/test_action_workflow.py
 
 - `requirement.txt`：增加 LangGraph 及 SQLite checkpointer 依赖。
 - `app/core/config.py`：增加 checkpoint 数据库路径配置。
-- `app/tools/composite_gateway.py` 或装配层：注册提案工具。
+- `app/tools/composite_gateway.py` 和现有 Gateway：统一接收 `AgentInvocationContext`，现有工具只读取其中的可信租户部分。
 - `app/agent/prompts.py`：增加高风险动作规则。
-- `app/agent/runner.py`、`app/agent/support_runner.py`：仅增加提案结果归一化和待审批摘要传递，不把普通循环改写成图。
-- `app/application/chat_service.py`、`app/schemas/chat.py`：在聊天响应中暴露结构化待审批摘要。
+- `app/agent/runner.py`、`app/agent/support_runner.py`：传递调用上下文、增加提案结果归一化和待审批摘要，不改写现有 while 循环。
+- `app/application/chat_service.py`、`app/schemas/chat.py`：由可信会话生成调用上下文，并在聊天响应中暴露结构化待审批摘要。
 - `main.py`：装配工作流、服务和 Router。
 - `README.md` 与运维文档：说明能力、限制和恢复方式。
 
@@ -179,12 +186,35 @@ compensation
 ```text
 amount_cents             正整数，不能超过执行时可退余额
 currency                 必须等于订单币种
-reason_code              枚举化退款原因
+reason_code              使用下方固定退款原因枚举
 reason_text              客服给出的补充说明
 refund_scope             full / partial
 ```
 
-`refund_scope=full` 时，审批版本金额必须等于执行时可退余额。`partial` 只表达人工确认的金额，不做商品行级自动计算。
+退款原因枚举固定为：
+
+```text
+customer_cancellation    客户在允许阶段主动取消订单
+changed_mind_return      符合无理由退货条件
+quality_issue            商品存在功能、性能或制造质量问题
+damaged_item             商品到货时破损
+wrong_item               实际收到的商品与订单不符
+missing_item             订单内部分或全部商品缺失
+not_as_described         商品与页面描述存在实质差异
+out_of_stock             商家缺货，无法履约
+delivery_delay           配送超时，客户选择退款
+lost_in_transit          物流确认丢件
+other                    其他未覆盖原因，必须填写详细说明
+```
+
+不使用含义过宽的 `customer_request`：退款本身通常已经由客户提出，该值不能提供有效的业务分类。`reason_code` 只用于分类、审计和统计，不直接证明退款资格；`reason_text` 始终保留，`other` 必须提供非空且有意义的详细说明。枚举值一旦进入历史记录不得改名或改变含义，后续只能新增或停用。
+
+`refund_scope` 是可由“修改后批准”调整的退款专属参数：
+
+- `full` 表示审批时意图退还全部可退余额，审批版本的 `amount_cents` 必须等于审批时可退余额。
+- `partial` 表示审批一个明确金额，`amount_cents` 必须大于 0 且不超过审批时可退余额；本阶段不做商品行级自动计算。
+- 管理员可以将 `full` 改为 `partial`，或将 `partial` 改为 `full`，但修改后的 `refund_scope` 与金额必须一起通过完整校验。
+- 执行前重新计算可退余额，不因余额变化自动修改已批准金额。批准金额超过最新余额时执行失败；执行成功后是否把订单标记为 `refunded`，以剩余可退余额是否为零判断，而不只看 `refund_scope`。
 
 ### 8.3 补偿参数
 
@@ -200,7 +230,7 @@ coupon_valid_days        本阶段固定为 30，审批不能修改为其他值
 
 ### 8.4 状态模型
 
-#### Agent Run
+#### Action Run
 
 ```text
 queued
@@ -256,12 +286,13 @@ claimed -> running -> succeeded
 
 所有业务表都必须具有 `organization_id`，跨表引用优先使用包含 `organization_id` 的复合外键。所有时间使用 UTC 文本格式，并由数据库或统一时钟产生。
 
-### 9.1 agent_runs
+### 9.1 action_runs
 
 ```text
 id                       TEXT PK
 organization_id          TEXT NOT NULL
 conversation_id          TEXT NOT NULL
+turn_id                  TEXT NOT NULL
 created_by_user_id       TEXT NOT NULL
 workflow_type            TEXT NOT NULL CHECK IN ('refund', 'compensation')
 status                   TEXT NOT NULL
@@ -274,9 +305,10 @@ updated_at               TEXT NOT NULL
 completed_at             TEXT NULL
 UNIQUE (organization_id, id)
 UNIQUE (thread_id)
+UNIQUE (organization_id, conversation_id, turn_id, workflow_type)
 ```
 
-`thread_id` 由服务端生成，默认等于 Run ID。API 请求不能指定或覆盖它。
+`conversation_id` 和 `turn_id` 由 `ChatService` 已验证的会话及本次服务端聊天回合产生，再通过 `AgentInvocationContext` 绑定到提案工具；它们都不是模型工具参数。`thread_id` 由服务端生成，默认等于 Run ID。API 请求不能指定或覆盖这些字段。
 
 ### 9.2 action_proposals
 
@@ -452,7 +484,7 @@ UNIQUE (organization_id, id)
 1. 验证订单属于当前企业。
 2. 验证参数与现有成功记录。
 3. 检查同订单同动作类型是否已有非终态提案。
-4. 创建 `agent_runs`、`action_proposals`、版本 1 和 `approvals`。
+4. 创建 `action_runs`、`action_proposals`、版本 1 和 `approvals`。
 5. 写审计事件。
 6. 提交后才首次调用 LangGraph。
 
@@ -544,7 +576,7 @@ START
 
 - 本地 MVP 使用官方 `langgraph-checkpoint-sqlite` 持久化器。
 - checkpoint 使用独立 SQLite 文件，通过 `LANGGRAPH_CHECKPOINT_DB_PATH` 配置，避免 Alembic 管理的业务表与 LangGraph 内部 schema 混杂。
-- `thread_id` 从 `agent_runs.thread_id` 读取，不接受 HTTP Body、模型参数或查询参数覆盖。
+- `thread_id` 从 `action_runs.thread_id` 读取，不接受 HTTP Body、模型参数或查询参数覆盖。
 - checkpointer schema 初始化作为应用启动步骤，测试使用临时数据库。
 - 进程重启后重新装配相同图定义和 checkpointer，再用同一 `thread_id` 恢复。
 - 图拓扑和 State schema 的不兼容修改必须伴随 `workflow_version` 迁移策略；本阶段固定 `refund-compensation-v1`。
@@ -565,9 +597,61 @@ START
 - 为另一个企业提供 `thread_id`。
 - 修改已经批准的提案版本。
 
+### 11.6 与现有 Agent Runtime 的关系
+
+LangGraph 放在 Action Tool Gateway 后面、业务执行器前面，不放在 `ChatService` 与现有 `AgentRunner` 之间：
+
+```text
+ChatService
+  -> 现有 AgentRunner / run_one_turn()
+      -> propose_refund / propose_compensation
+          -> ActionToolGateway
+              -> ActionWorkflowService
+                  -> LangGraph 确定性工作流
+                      -> IdempotentActionExecutor
+```
+
+首次创建提案时，`run_one_turn()` 像调用普通工具一样同步调用提案工具。LangGraph 运行到 `interrupt()` 后，Action Tool Gateway 把 `awaiting_approval` 作为普通工具结果返回，现有 while 循环继续生成“等待审批”的本轮最终答复，然后结束。
+
+管理员稍后审批时，原聊天 HTTP 请求和 while 循环已经结束。Approval API 持久化决定后直接恢复 LangGraph；它不恢复、唤醒或重新创建原 Agent Runtime。审批 API 返回结构化执行状态，之后的新聊天可以通过 `get_action_status` 只读工具查询结果并生成自然语言解释。
+
 ## 12. Agent 与工具设计
 
-### 12.1 propose_refund
+### 12.1 AgentInvocationContext
+
+现有 `TenantContext` 只表达认证用户的企业身份，不能加入 `conversation_id`，因为它还用于企业管理和知识管理等非聊天场景。本阶段新增请求级调用上下文：
+
+```python
+@dataclass(frozen=True)
+class AgentInvocationContext:
+    tenant: TenantContext  # 当前认证用户及企业身份，由服务端认证链产生
+    conversation_id: str   # 当前会话标识，已经由 ChatService 验证归属
+    turn_id: str           # 当前聊天回合标识，由服务端生成，用于追踪及抑制同回合重复提案
+```
+
+可信传递链固定为：
+
+```text
+ChatService 验证 conversation_id 并生成 turn_id
+  -> CustomerSupportAgentRunner
+      -> CompositeToolGateway.bind(AgentInvocationContext)
+          -> ActionToolGateway 的请求级闭包
+              -> ActionWorkflowService
+                  -> action_runs.conversation_id / turn_id
+```
+
+现有客服和知识 Gateway 改为接收 `AgentInvocationContext`，但只把 `context.tenant` 传给原应用服务。Action Tool Gateway 同时读取可信租户、`conversation_id` 和 `turn_id`。`organization_id`、`user_id`、`role`、`conversation_id`、`turn_id` 和 `thread_id` 都不能出现在模型可见的工具参数 Schema 中。
+
+禁止使用以下替代方案：
+
+- 不把 `conversation_id` 添加到 `propose_refund` 或 `propose_compensation` 的模型参数。
+- 不把会话 ID 写入单例 Gateway 的可变属性，避免并发串线。
+- 不使用全局变量或 `ContextVar` 隐式传递。
+- 不扩充 `TenantContext` 的职责。
+
+该改动只扩展 `ChatService -> CustomerSupportAgentRunner -> Gateway.bind()` 的参数传递和请求级闭包，不改变 `run_one_turn()` 的模型—工具 while 循环。
+
+### 12.2 propose_refund
 
 参数：
 
@@ -587,7 +671,7 @@ reason_text
 - 涉及政策解释时先调用 `search_knowledge`，但政策证据不能代替审批。
 - 工具成功只允许表述“已创建退款提案并等待审批”，禁止表述“退款成功”。
 
-### 12.2 propose_compensation
+### 12.3 propose_compensation
 
 参数：
 
@@ -601,7 +685,11 @@ reason_text
 
 调用规则与退款一致。若资格需要会员等级、不可抗力或用户责任等当前系统不存在的数据，Agent 必须在原因中明确标为“待人工核实”，不能编造结论。
 
-### 12.3 工具返回
+### 12.4 get_action_status
+
+`get_action_status` 是只读工具，接收用户可见的 `run_id`，并使用绑定的 `context.tenant` 查询当前企业中的 Action Run、审批和执行结果。跨租户 Run 与不存在 Run 一样返回 `RUN_NOT_FOUND`。该工具不能审批、恢复或执行动作。
+
+### 12.5 工具返回
 
 ```json
 {
@@ -620,12 +708,12 @@ reason_text
 
 聊天响应在现有 `LLMResponse` 上增加结构化 `pending_approvals`，调用方不应从自然语言或通用事件中解析 Approval ID。
 
-### 12.4 工具暴露边界
+### 12.6 工具暴露边界
 
 - 不向模型注册 `approve_action`、`resume_run`、`execute_refund` 或 `issue_compensation`。
 - 执行器不进入 `CompositeToolGateway`。
 - 审批和恢复只能通过认证 HTTP API 进入应用服务。
-- `organization_id`、`user_id`、`role`、Run ID、Proposal ID、Approval ID 和幂等键均不能由模型构造为执行授权。
+- `organization_id`、`user_id`、`role`、`conversation_id`、`turn_id`、Proposal ID、Approval ID、`thread_id` 和幂等键均不能由模型构造为执行授权。`get_action_status` 的 `run_id` 只是租户限定查询键，不构成执行授权。
 
 ## 13. HTTP API
 
@@ -655,8 +743,9 @@ POST /approvals/{approval_id}/decisions/
   "decision": "approved | approved_with_changes | rejected",
   "changes": {
     "amount_cents": 800,
-    "reason_code": "customer_dispute",
-    "reason_text": "人工核实后的说明"
+    "refund_scope": "partial",
+    "reason_code": "quality_issue",
+    "reason_text": "仅对存在质量问题的商品进行部分退款"
   },
   "comment": "审批备注"
 }
@@ -667,6 +756,9 @@ POST /approvals/{approval_id}/decisions/
 - 仅 `admin` 可调用。
 - `approved` 和 `rejected` 时 `changes` 必须为空。
 - `approved_with_changes` 必须至少改变一个允许字段。
+- 退款允许修改 `amount_cents`、`reason_code`、`reason_text` 和 `refund_scope`；补偿允许修改 `amount_cents`、`reason_code` 和 `reason_text`。
+- `organization_id`、订单、`action_type`、`currency`、提案人和 `coupon_valid_days` 不允许修改。
+- 修改退款 `refund_scope` 时必须连同最终金额通过 8.2 节的完整一致性校验，禁止仅改变标签以绕过金额规则。
 - 修改后的参数仍需通过完整领域校验。
 - 相同审批的相同决定重复提交返回原决定与当前 Run 状态。
 - 不同决定或不同修改内容重复提交返回 409。
@@ -822,11 +914,12 @@ ACTION_WORKFLOW_VERSION=refund-compensation-v1
 ### 18.2 应用服务测试
 
 - 合法退款和补偿创建待审批提案。
-- 金额、币种、原因和订单归属校验。
+- 金额、币种、固定原因枚举和订单归属校验。
 - 同订单非终态提案冲突。
 - `agent` 无法审批，`admin` 可以审批和自审。
 - 批准、修改后批准、拒绝及重复提交语义。
-- 修改禁止更换订单、币种或动作类型。
+- 退款允许 `full` / `partial` 双向修改，并强制校验修改后的金额一致性。
+- 修改禁止更换订单、币种、动作类型或补偿券有效期。
 - 决定提交后恢复失败不会丢失决定。
 
 ### 18.3 执行器测试
@@ -863,8 +956,11 @@ ACTION_WORKFLOW_VERSION=refund-compensation-v1
 
 - 未明确要求退款/补偿时不创建提案。
 - 创建前先查询订单。
+- `ChatService` 生成的 `conversation_id` 和 `turn_id` 通过 `AgentInvocationContext` 到达提案服务。
+- 模型工具参数 Schema 不包含租户、会话、回合或 `thread_id`。
 - Agent 只能声称“等待审批”，不能声称退款或补偿成功。
 - 工具结果结构化进入 `pending_approvals`。
+- 审批完成后的新聊天可通过 `get_action_status` 查询结果，原 Agent while 循环不会被恢复。
 - 攻击提示无法直接调用审批、恢复或执行器。
 - 现有订单、物流、工单、知识检索黄金路径保持通过。
 
@@ -880,10 +976,10 @@ ACTION_WORKFLOW_VERSION=refund-compensation-v1
 
 ### 场景 B：修改后批准
 
-1. 原补偿提案为 30 元。
-2. 管理员改为 20 元并批准。
-3. 原版本仍可审计，新版本金额为 20 元。
-4. 执行结果严格使用新版本。
+1. 原退款提案为全额退款 100 元。
+2. 管理员将 `refund_scope` 改为 `partial`、金额改为 60 元并批准。
+3. 原版本仍可审计，新版本保存部分退款 60 元。
+4. 执行结果严格使用新版本，订单是否进入 `refunded` 由执行后可退余额决定。
 
 ### 场景 C：拒绝
 
@@ -915,7 +1011,7 @@ ACTION_WORKFLOW_VERSION=refund-compensation-v1
 
 ### Task 1：领域契约与迁移
 
-- 新增领域枚举、实体、异常和 Store Protocol。
+- 新增固定退款/补偿原因枚举、实体、异常和 Store Protocol。
 - 新增 0011 迁移、约束与迁移测试。
 - 独立验收：业务事实可持久化，跨租户和唯一约束生效。
 
@@ -951,8 +1047,9 @@ ACTION_WORKFLOW_VERSION=refund-compensation-v1
 
 ### Task 7：Agent 提案工具集成
 
-- 新增两个提案工具、提示词规则和待审批响应。
-- 保持现有普通 Agent Runtime 和知识检索不变。
+- 新增 `AgentInvocationContext`、两个提案工具、一个只读状态工具、提示词规则和待审批响应。
+- 让 `ChatService`、`CustomerSupportAgentRunner` 和 Gateway 绑定链传递可信会话与回合标识。
+- 保持现有 `run_one_turn()` while 循环和知识检索语义不变。
 - 依赖 Task 3、Task 5，可与 Task 6 并行。
 
 ### Task 8：端到端验收与运维文档
