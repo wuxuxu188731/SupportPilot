@@ -375,6 +375,12 @@ class ApprovalInvalidChangesError(ActionError):
     code = "APPROVAL_INVALID_CHANGES"
 
 
+class ProposalNotFoundError(ActionError):
+    """提案不存在或不属于当前企业。"""
+
+    code = "PROPOSAL_NOT_FOUND"
+
+
 class RunNotFoundError(ActionError):
     """动作 Run 不存在或不属于当前企业。"""
 
