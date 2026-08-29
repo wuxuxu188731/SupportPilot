@@ -582,6 +582,272 @@ def upgrade() -> None:
         ),
     )
 
+    # SQLite 无法在循环建表时声明这些跨层级关系，使用触发器补齐同提案引用链。
+    op.execute(
+        """
+        CREATE TRIGGER trg_action_runs_proposal_chain_insert
+        BEFORE INSERT ON action_runs
+        WHEN NEW.proposal_id IS NOT NULL
+             AND NOT EXISTS (
+                 SELECT 1 FROM action_proposals AS proposal
+                 WHERE proposal.organization_id = NEW.organization_id
+                   AND proposal.id = NEW.proposal_id
+                   AND proposal.run_id = NEW.id
+                   AND proposal.action_type = NEW.workflow_type
+             )
+        BEGIN
+            SELECT RAISE(ABORT, 'Run 关联的提案引用链不一致');
+        END
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER trg_action_runs_proposal_chain_update
+        BEFORE UPDATE OF organization_id, proposal_id, workflow_type ON action_runs
+        WHEN NEW.proposal_id IS NOT NULL
+             AND NOT EXISTS (
+                 SELECT 1 FROM action_proposals AS proposal
+                 WHERE proposal.organization_id = NEW.organization_id
+                   AND proposal.id = NEW.proposal_id
+                   AND proposal.run_id = NEW.id
+                   AND proposal.action_type = NEW.workflow_type
+             )
+        BEGIN
+            SELECT RAISE(ABORT, 'Run 关联的提案引用链不一致');
+        END
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER trg_action_proposals_run_chain_insert
+        BEFORE INSERT ON action_proposals
+        WHEN NOT EXISTS (
+            SELECT 1 FROM action_runs AS run
+            WHERE run.organization_id = NEW.organization_id
+              AND run.id = NEW.run_id
+              AND run.workflow_type = NEW.action_type
+        )
+        BEGIN
+            SELECT RAISE(ABORT, '提案与 Run 的动作类型不一致');
+        END
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER trg_action_proposals_identity_immutable
+        BEFORE UPDATE OF organization_id, run_id, order_id, action_type,
+                         created_by_user_id ON action_proposals
+        BEGIN
+            SELECT RAISE(ABORT, '提案身份字段不可修改');
+        END
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER trg_action_proposals_current_version_insert
+        BEFORE INSERT ON action_proposals
+        WHEN NEW.current_version_id IS NOT NULL
+             AND NOT EXISTS (
+                 SELECT 1 FROM action_proposal_versions AS version
+                 WHERE version.organization_id = NEW.organization_id
+                   AND version.proposal_id = NEW.id
+                   AND version.id = NEW.current_version_id
+             )
+        BEGIN
+            SELECT RAISE(ABORT, '当前版本不属于该提案');
+        END
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER trg_action_proposals_current_version_update
+        BEFORE UPDATE OF current_version_id ON action_proposals
+        WHEN (OLD.current_version_id IS NOT NULL AND NEW.current_version_id IS NULL)
+             OR (
+                 NEW.current_version_id IS NOT NULL
+                 AND NOT EXISTS (
+                     SELECT 1 FROM action_proposal_versions AS version
+                     WHERE version.organization_id = NEW.organization_id
+                       AND version.proposal_id = NEW.id
+                       AND version.id = NEW.current_version_id
+                 )
+             )
+        BEGIN
+            SELECT RAISE(ABORT, '当前版本不属于该提案');
+        END
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER trg_action_proposal_versions_no_update
+        BEFORE UPDATE ON action_proposal_versions
+        BEGIN
+            SELECT RAISE(ABORT, '提案版本不可修改');
+        END
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER trg_action_proposal_versions_no_delete
+        BEFORE DELETE ON action_proposal_versions
+        BEGIN
+            SELECT RAISE(ABORT, '提案版本不可删除');
+        END
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER trg_approvals_version_chain_insert
+        BEFORE INSERT ON approvals
+        WHEN NOT EXISTS (
+            SELECT 1 FROM action_proposal_versions AS version
+            WHERE version.organization_id = NEW.organization_id
+              AND version.proposal_id = NEW.proposal_id
+              AND version.id = NEW.requested_version_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, '审批请求版本不属于该提案');
+        END
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER trg_approvals_identity_immutable
+        BEFORE UPDATE OF organization_id, proposal_id, requested_version_id,
+                         requested_by_user_id ON approvals
+        BEGIN
+            SELECT RAISE(ABORT, '审批请求身份字段不可修改');
+        END
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER trg_approval_decisions_version_chain_insert
+        BEFORE INSERT ON approval_decisions
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM approvals AS approval
+            JOIN action_proposal_versions AS version
+              ON version.organization_id = approval.organization_id
+             AND version.proposal_id = approval.proposal_id
+            WHERE approval.organization_id = NEW.organization_id
+              AND approval.id = NEW.approval_id
+              AND version.id = NEW.decided_version_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, '审批决定版本不属于审批提案');
+        END
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER trg_approval_decisions_no_update
+        BEFORE UPDATE ON approval_decisions
+        BEGIN
+            SELECT RAISE(ABORT, '审批决定不可修改');
+        END
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER trg_approval_decisions_no_delete
+        BEFORE DELETE ON approval_decisions
+        BEGIN
+            SELECT RAISE(ABORT, '审批决定不可删除');
+        END
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER trg_tool_executions_version_chain_insert
+        BEFORE INSERT ON tool_executions
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM action_proposals AS proposal
+            JOIN action_proposal_versions AS version
+              ON version.organization_id = proposal.organization_id
+             AND version.proposal_id = proposal.id
+            WHERE proposal.organization_id = NEW.organization_id
+              AND proposal.id = NEW.proposal_id
+              AND proposal.action_type = NEW.action_type
+              AND version.id = NEW.proposal_version_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, '执行记录的提案版本引用链不一致');
+        END
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER trg_tool_executions_identity_immutable
+        BEFORE UPDATE OF organization_id, proposal_id, proposal_version_id,
+                         action_type, idempotency_key ON tool_executions
+        BEGIN
+            SELECT RAISE(ABORT, '执行记录身份字段不可修改');
+        END
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER trg_refund_records_chain_insert
+        BEFORE INSERT ON refund_records
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM action_proposals AS proposal
+            JOIN action_proposal_versions AS version
+              ON version.organization_id = proposal.organization_id
+             AND version.proposal_id = proposal.id
+            JOIN tool_executions AS execution
+              ON execution.organization_id = proposal.organization_id
+             AND execution.proposal_id = proposal.id
+             AND execution.proposal_version_id = version.id
+             AND execution.action_type = proposal.action_type
+            WHERE proposal.organization_id = NEW.organization_id
+              AND proposal.id = NEW.proposal_id
+              AND proposal.order_id = NEW.order_id
+              AND proposal.action_type = 'refund'
+              AND version.id = NEW.proposal_version_id
+              AND version.amount_cents = NEW.amount_cents
+              AND version.currency = NEW.currency
+              AND version.reason_code = NEW.reason_code
+              AND execution.id = NEW.tool_execution_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, '退款结果引用链或批准参数不一致');
+        END
+        """
+    )
+    op.execute(
+        """
+        CREATE TRIGGER trg_compensation_records_chain_insert
+        BEFORE INSERT ON compensation_records
+        WHEN NOT EXISTS (
+            SELECT 1
+            FROM action_proposals AS proposal
+            JOIN action_proposal_versions AS version
+              ON version.organization_id = proposal.organization_id
+             AND version.proposal_id = proposal.id
+            JOIN tool_executions AS execution
+              ON execution.organization_id = proposal.organization_id
+             AND execution.proposal_id = proposal.id
+             AND execution.proposal_version_id = version.id
+             AND execution.action_type = proposal.action_type
+            WHERE proposal.organization_id = NEW.organization_id
+              AND proposal.id = NEW.proposal_id
+              AND proposal.order_id = NEW.order_id
+              AND proposal.action_type = 'compensation'
+              AND version.id = NEW.proposal_version_id
+              AND version.amount_cents = NEW.amount_cents
+              AND version.currency = NEW.currency
+              AND version.reason_code = NEW.reason_code
+              AND execution.id = NEW.tool_execution_id
+        )
+        BEGIN
+            SELECT RAISE(ABORT, '补偿结果引用链或批准参数不一致');
+        END
+        """
+    )
+
     op.create_index(
         "idx_action_runs_org_created",
         "action_runs",
@@ -627,6 +893,28 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # 0010 无法表达动作工作流事实；非空业务表必须阻止降级，避免静默丢失审计数据。
+    connection = op.get_bind()
+    action_tables = (
+        "action_runs",
+        "action_proposals",
+        "action_proposal_versions",
+        "approvals",
+        "approval_decisions",
+        "tool_executions",
+        "refund_records",
+        "compensation_records",
+        "audit_logs",
+    )
+    for table_name in action_tables:
+        has_data = connection.execute(
+            sa.text(f"SELECT 1 FROM {table_name} LIMIT 1")
+        ).first()
+        if has_data is not None:
+            raise RuntimeError(
+                "动作工作流表中存在业务数据，拒绝降级以避免不可恢复的数据丢失"
+            )
+
     op.drop_index(
         "idx_compensation_records_org_order",
         table_name="compensation_records",

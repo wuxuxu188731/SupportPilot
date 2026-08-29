@@ -450,6 +450,23 @@ class ActionStore(Protocol):
     ) -> ActionRun:
         raise NotImplementedError
 
+    def transition_run(
+        self,
+        *,
+        organization_id: str,
+        run_id: str,
+        expected_statuses: tuple[ActionRunStatus, ...],
+        new_status: ActionRunStatus,
+        error_code: str | None,
+        error_retryable: bool,
+        actor_type: AuditActorType,
+        actor_user_id: str | None,
+        event_type: str,
+        details_json: str,
+    ) -> ActionRun:
+        """原子校验并转换 Run 状态，同时写入对应审计事件。"""
+        raise NotImplementedError
+
     def get_proposal(
         self,
         *,
@@ -549,6 +566,15 @@ class ActionStore(Protocol):
     ) -> ToolExecution:
         raise NotImplementedError
 
+    def get_execution_by_version(
+        self,
+        *,
+        organization_id: str,
+        proposal_version_id: str,
+    ) -> ToolExecution | None:
+        """按批准版本读取稳定执行记录，尚未认领时返回 None。"""
+        raise NotImplementedError
+
     def mark_execution_running(
         self,
         *,
@@ -593,4 +619,20 @@ class ActionStore(Protocol):
         organization_id: str,
         run_id: str,
     ) -> list[AuditLog]:
+        raise NotImplementedError
+
+    def append_audit_log(
+        self,
+        *,
+        organization_id: str,
+        run_id: str,
+        proposal_id: str | None,
+        actor_type: AuditActorType,
+        actor_user_id: str | None,
+        event_type: str,
+        resource_type: str,
+        resource_id: str,
+        details_json: str,
+    ) -> AuditLog:
+        """追加不伴随状态变化的审计事件，例如显式恢复请求。"""
         raise NotImplementedError

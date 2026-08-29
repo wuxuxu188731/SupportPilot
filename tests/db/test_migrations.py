@@ -647,3 +647,56 @@ def test_action_workflow_migration_upgrade_and_rollback(tmp_path):
     assert "action_runs" not in table_names(database_path)
     assert "audit_logs" not in table_names(database_path)
     assert "retrieval_events" in table_names(database_path)
+
+
+def test_action_workflow_migration_upgrades_from_0010(tmp_path):
+    # 保护行为：已有 0010 数据库可以原地升级到 0011，且原有检索事件表继续保留。
+    database_path = tmp_path / "action-workflow-from-0010.db"
+    config = alembic_config(database_path)
+    command.upgrade(config, "0010_retrieval_event_unplanned")
+
+    command.upgrade(config, "0011_action_approval_workflow")
+
+    assert "retrieval_events" in table_names(database_path)
+    assert "action_runs" in table_names(database_path)
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT version_num FROM alembic_version"
+        ).fetchone() == ("0011_action_approval_workflow",)
+
+
+def test_action_workflow_downgrade_rejects_business_data_loss(tmp_path):
+    # 保护行为：0011 已存在动作业务事实时必须拒绝降级，不能静默删除审批审计数据。
+    database_path = tmp_path / "action-workflow-with-data.db"
+    config = alembic_config(database_path)
+    command.upgrade(config, "0011_action_approval_workflow")
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            "INSERT INTO users(id, username, password_hash) VALUES ('user-a', 'user-a', 'hash')"
+        )
+        connection.execute(
+            "INSERT INTO organizations(id, name) VALUES ('org-a', '企业 A')"
+        )
+        connection.execute(
+            "INSERT INTO memberships(organization_id, user_id, role) VALUES ('org-a', 'user-a', 'admin')"
+        )
+        connection.execute(
+            """
+            INSERT INTO action_runs(
+                id, organization_id, conversation_id, turn_id,
+                created_by_user_id, workflow_type, status, thread_id
+            ) VALUES (
+                'run-a', 'org-a', 'conversation-a', 'turn-a',
+                'user-a', 'refund', 'queued', 'run-a'
+            )
+            """
+        )
+
+    with pytest.raises(RuntimeError, match="拒绝降级"):
+        command.downgrade(config, "0010_retrieval_event_unplanned")
+
+    assert "action_runs" in table_names(database_path)
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT id FROM action_runs"
+        ).fetchone() == ("run-a",)

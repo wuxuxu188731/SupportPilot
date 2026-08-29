@@ -386,6 +386,7 @@ def test_compensation_rejects_duplicate_reason_per_order(tmp_path):
             "proposal-a",
             "user-a",
             version_no=1,
+            reason_code="delayed_shipment",
             parameters_json='{"coupon_valid_days": 30}',
         )
         _insert_version(
@@ -395,6 +396,7 @@ def test_compensation_rejects_duplicate_reason_per_order(tmp_path):
             "proposal-a",
             "user-a",
             version_no=2,
+            reason_code="delayed_shipment",
             parameters_json='{"coupon_valid_days": 30}',
         )
         _insert_execution(connection, "execution-1", "org-a", "proposal-a", "version-1", action_type="compensation")
@@ -453,6 +455,163 @@ def test_version_rejects_non_positive_amount(tmp_path):
 
         with pytest.raises(sqlite3.IntegrityError):
             _insert_version(connection, "version-a", "org-a", "proposal-a", "user-a", amount_cents=0)
+
+
+def test_proposal_version_is_immutable(tmp_path):
+    # 保护行为：提案版本一旦写入便不可修改或删除，确保审批历史引用的是稳定事实。
+    database_path = _fresh_database(tmp_path)
+    with _connect(database_path) as connection:
+        _seed_scope(connection, "org-a", "user-a")
+        _insert_run(connection, "run-a", "org-a", "user-a")
+        _insert_proposal(connection, "proposal-a", "org-a", "run-a", "ord-org-a", "user-a")
+        _insert_version(connection, "version-a", "org-a", "proposal-a", "user-a")
+
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE action_proposal_versions SET amount_cents = 2000 WHERE id = 'version-a'"
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "DELETE FROM action_proposal_versions WHERE id = 'version-a'"
+            )
+
+
+def test_current_version_must_belong_to_same_proposal(tmp_path):
+    # 保护行为：提案的 current_version_id 只能指向自身版本，不能串用同企业其他提案版本。
+    database_path = _fresh_database(tmp_path)
+    with _connect(database_path) as connection:
+        _seed_scope(connection, "org-a", "user-a")
+        _insert_run(connection, "run-refund", "org-a", "user-a")
+        _insert_proposal(connection, "proposal-refund", "org-a", "run-refund", "ord-org-a", "user-a")
+        _insert_version(connection, "version-refund", "org-a", "proposal-refund", "user-a")
+        _insert_run(connection, "run-compensation", "org-a", "user-a", workflow_type="compensation")
+        _insert_proposal(
+            connection,
+            "proposal-compensation",
+            "org-a",
+            "run-compensation",
+            "ord-org-a",
+            "user-a",
+            action_type="compensation",
+        )
+        _insert_version(connection, "version-compensation", "org-a", "proposal-compensation", "user-a")
+
+        connection.execute(
+            "UPDATE action_proposals SET current_version_id = 'version-refund' WHERE id = 'proposal-refund'"
+        )
+        connection.execute(
+            "UPDATE action_runs SET proposal_id = 'proposal-refund' WHERE id = 'run-refund'"
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE action_proposals SET current_version_id = 'version-compensation' WHERE id = 'proposal-refund'"
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE action_runs SET proposal_id = 'proposal-compensation' WHERE id = 'run-refund'"
+            )
+
+
+def test_approval_and_execution_reject_other_proposal_version(tmp_path):
+    # 保护行为：审批请求和执行记录必须引用所属提案的版本，不能在同租户内拼接授权链。
+    database_path = _fresh_database(tmp_path)
+    with _connect(database_path) as connection:
+        _seed_scope(connection, "org-a", "user-a")
+        _insert_run(connection, "run-refund", "org-a", "user-a")
+        _insert_proposal(connection, "proposal-refund", "org-a", "run-refund", "ord-org-a", "user-a")
+        _insert_version(connection, "version-refund", "org-a", "proposal-refund", "user-a")
+        _insert_run(connection, "run-compensation", "org-a", "user-a", workflow_type="compensation")
+        _insert_proposal(
+            connection,
+            "proposal-compensation",
+            "org-a",
+            "run-compensation",
+            "ord-org-a",
+            "user-a",
+            action_type="compensation",
+        )
+        _insert_version(connection, "version-compensation", "org-a", "proposal-compensation", "user-a")
+
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_approval(
+                connection,
+                "approval-refund",
+                "org-a",
+                "proposal-refund",
+                "version-compensation",
+                "user-a",
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_execution(
+                connection,
+                "execution-refund",
+                "org-a",
+                "proposal-refund",
+                "version-compensation",
+            )
+
+
+def test_proposal_action_type_must_match_run(tmp_path):
+    # 保护行为：提案动作类型必须与所属 Run 的工作流类型一致，禁止拼接不同业务流程。
+    database_path = _fresh_database(tmp_path)
+    with _connect(database_path) as connection:
+        _seed_scope(connection, "org-a", "user-a")
+        _insert_run(connection, "run-a", "org-a", "user-a", workflow_type="refund")
+
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_proposal(
+                connection,
+                "proposal-a",
+                "org-a",
+                "run-a",
+                "ord-org-a",
+                "user-a",
+                action_type="compensation",
+            )
+
+
+def test_refund_result_must_match_approved_version(tmp_path):
+    # 保护行为：退款业务结果的订单、执行记录及金额参数必须与提案版本保持一致。
+    database_path = _fresh_database(tmp_path)
+    with _connect(database_path) as connection:
+        _seed_scope(connection, "org-a", "user-a")
+        _insert_run(connection, "run-a", "org-a", "user-a")
+        _insert_proposal(connection, "proposal-a", "org-a", "run-a", "ord-org-a", "user-a")
+        _insert_version(connection, "version-a", "org-a", "proposal-a", "user-a", amount_cents=1000)
+        _insert_execution(connection, "execution-a", "org-a", "proposal-a", "version-a")
+
+        with pytest.raises(sqlite3.IntegrityError):
+            _insert_refund_record(
+                connection,
+                "record-a",
+                "org-a",
+                "ord-org-a",
+                "proposal-a",
+                "version-a",
+                "execution-a",
+                amount_cents=2000,
+            )
+
+
+def test_approval_decision_is_immutable(tmp_path):
+    # 保护行为：审批决定落库后不可修改或删除，重复请求只能读取原决定。
+    database_path = _fresh_database(tmp_path)
+    with _connect(database_path) as connection:
+        _seed_scope(connection, "org-a", "user-a")
+        _insert_run(connection, "run-a", "org-a", "user-a")
+        _insert_proposal(connection, "proposal-a", "org-a", "run-a", "ord-org-a", "user-a")
+        _insert_version(connection, "version-a", "org-a", "proposal-a", "user-a")
+        _insert_approval(connection, "approval-a", "org-a", "proposal-a", "version-a", "user-a")
+        _insert_decision(connection, "decision-a", "org-a", "approval-a", "version-a", "user-a")
+
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE approval_decisions SET decision = 'rejected' WHERE id = 'decision-a'"
+            )
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "DELETE FROM approval_decisions WHERE id = 'decision-a'"
+            )
 
 
 def test_run_rejects_unknown_status(tmp_path):
@@ -540,6 +699,7 @@ def test_compensation_rejects_non_30_coupon_valid_days(tmp_path):
             "org-a",
             "proposal-a",
             "user-a",
+            reason_code="delayed_shipment",
             parameters_json='{"coupon_valid_days": 30}',
         )
         _insert_execution(connection, "execution-a", "org-a", "proposal-a", "version-a", action_type="compensation")
