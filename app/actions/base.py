@@ -303,6 +303,34 @@ class ExecutionSuccess:
     order_marked_refunded: bool  # 本次执行是否将订单主状态置为 refunded
 
 
+@dataclass(frozen=True)
+class ExecutionClaim:
+    """执行认领结果，用于区分本次调用是否取得执行权。"""
+
+    execution: ToolExecution  # 当前稳定的执行记录
+    acquired: bool  # 本次调用是否新取得执行权；False 时禁止重复执行动作
+
+    @property
+    def execution_id(self) -> str:
+        """返回执行记录标识，兼容只需要稳定标识的调用方。"""
+        return self.execution.execution_id
+
+    @property
+    def status(self) -> ToolExecutionStatus:
+        """返回当前执行状态。"""
+        return self.execution.status
+
+    @property
+    def attempt_count(self) -> int:
+        """返回当前尝试次数。"""
+        return self.execution.attempt_count
+
+    @property
+    def error_code(self) -> str | None:
+        """返回当前稳定错误码。"""
+        return self.execution.error_code
+
+
 class ActionError(Exception):
     """动作领域异常的基类，子类携带稳定错误码。"""
 
@@ -560,8 +588,8 @@ class ActionStore(Protocol):
         proposal_version_id: str,
         action_type: ActionType,
         idempotency_key: str,
-    ) -> ToolExecution:
-        """按幂等键认领或读取已有执行记录。"""
+    ) -> ExecutionClaim:
+        """按幂等键认领执行；重复调用返回稳定记录但不重复授予执行权。"""
         raise NotImplementedError
 
     def get_execution(

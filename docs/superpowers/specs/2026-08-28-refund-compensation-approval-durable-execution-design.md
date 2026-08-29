@@ -243,6 +243,7 @@ queued
 - 审批拒绝使 Run 进入 `cancelled`，表示流程按人工决定终止，不表示系统错误。
 - 校验或执行失败进入 `failed`，并记录稳定错误码及是否可重试。
 - 已进入终态的 Run 不允许恢复。
+- Store 必须内置允许的状态边；调用者传入的预期状态只用于并发比较，不能授权跳过中间状态或直接写入成功终态。
 
 #### Proposal
 
@@ -281,6 +282,8 @@ claimed -> running -> succeeded
 - `succeeded` 和 `failed_terminal` 是终态。
 - `failed_retryable` 可以使用原幂等键再次认领，尝试次数递增。
 - 同一时刻只能有一个调用者持有执行权。
+- `claim_execution` 返回执行记录及 `acquired` 标记；只有本次返回 `acquired=true` 的调用者可以推进执行，重复认领只能读取稳定记录并返回 `acquired=false`。
+- 只有 `running` 执行可以记录成功或失败，禁止从 `claimed` 跳过运行态直接写终态。
 
 ## 9. 数据模型
 
@@ -482,7 +485,7 @@ UNIQUE (organization_id, id)
 在一个 `BEGIN IMMEDIATE` 事务中：
 
 1. 验证订单属于当前企业。
-2. 验证参数与现有成功记录。
+2. 严格验证固定原因枚举及类型专属参数；退款 `full` 金额必须等于事务内可退余额，补偿券有效期必须为 30 天。
 3. 检查同订单同动作类型是否已有非终态提案。
 4. 创建 `action_runs`、`action_proposals`、版本 1 和 `approvals`。
 5. 写审计事件。
@@ -497,12 +500,13 @@ UNIQUE (organization_id, id)
 1. 按 `organization_id + approval_id` 锁定并读取审批。
 2. 验证调用者是当前企业 `admin`。
 3. 验证审批仍为 `pending`。
-4. 若为修改后批准，严格校验修改字段并创建下一版本。
-5. 创建唯一 `approval_decisions`，更新审批和提案状态。
-6. 写审计事件并提交。
-7. 提交后调用 `Command(resume=...)`。
+4. 对批准和修改后批准，在同一个 `BEGIN IMMEDIATE` 事务内按最新退款余额、补偿重复原因和累计上限重验决定版本。
+5. 若为修改后批准，严格校验修改字段并创建下一版本。
+6. 创建唯一 `approval_decisions`，更新审批和提案状态。
+7. 写审计事件并提交。
+8. 提交后调用 `Command(resume=...)`。
 
-如果第 7 步失败，批准决定仍然有效；后续恢复必须读取该持久化决定继续，不能要求管理员再次审批。
+如果第 8 步失败，批准决定仍然有效；后续恢复必须读取该持久化决定继续，不能要求管理员再次审批。
 
 ### 10.3 执行事务
 
@@ -817,6 +821,7 @@ POST /action-runs/{run_id}/resume/
 
 - LangGraph checkpoint 提供运行位置恢复。
 - `tool_executions` 唯一幂等键提供业务副作用保护。
+- 并发认领相同幂等键时只有一个调用者取得 `acquired=true`；其他调用者不得执行副作用。
 - 已成功执行的节点直接返回持久化结果，不再次写业务记录。
 
 ### 15.3 金额竞争

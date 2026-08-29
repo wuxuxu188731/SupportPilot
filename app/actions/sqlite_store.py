@@ -40,11 +40,15 @@ from app.actions.base import (
     AuditActorType,
     AuditLog,
     DecisionResult,
+    ExecutionClaim,
     ExecutionDataIntegrityError,
     ExecutionSuccess,
+    CompensationReasonCode,
     NewProposalVersion,
     ProposalNotFoundError,
     ProposalStatus,
+    RefundReasonCode,
+    RefundScope,
     RunNotFoundError,
     RunStateConflictError,
     ToolExecution,
@@ -74,6 +78,27 @@ COMPENSATION_COUPON_VALID_DAYS = 30
 # 创建与执行时按幂等键重复使用的错误信息片段，用于识别部分唯一索引冲突。
 _ACTIVE_PROPOSAL_INDEX = "uq_action_proposals_org_order_type_active"
 _SAME_TURN_INDEX = "uq_action_runs_org_conversation_turn_type"
+
+# Run 的合法状态边由 Store 固定控制，调用者提供的 expected_statuses 只用于并发比较。
+_RUN_TRANSITIONS = {
+    ActionRunStatus.QUEUED: {
+        ActionRunStatus.RUNNING,
+        ActionRunStatus.FAILED,
+    },
+    ActionRunStatus.RUNNING: {
+        ActionRunStatus.AWAITING_APPROVAL,
+        ActionRunStatus.SUCCEEDED,
+        ActionRunStatus.FAILED,
+        ActionRunStatus.CANCELLED,
+    },
+    ActionRunStatus.AWAITING_APPROVAL: {
+        ActionRunStatus.RUNNING,
+        ActionRunStatus.FAILED,
+    },
+    ActionRunStatus.FAILED: {ActionRunStatus.RUNNING},
+    ActionRunStatus.SUCCEEDED: set(),
+    ActionRunStatus.CANCELLED: set(),
+}
 
 
 class SQLiteActionStore(ActionStore):
@@ -241,14 +266,50 @@ class SQLiteActionStore(ActionStore):
     # —— 内部辅助方法 ——
 
     @staticmethod
-    def _validate_parameters_json(parameters_json: str) -> None:
-        """校验参数 JSON 为合法 JSON 对象，防止未经验证的内容进入业务库。"""
+    def _validate_action_inputs(
+        *,
+        action_type: ActionType,
+        reason_code: str,
+        reason_text: str,
+        parameters_json: str,
+        approval_changes: bool = False,
+    ) -> dict:
+        """严格校验原因枚举和类型专属参数，返回解析后的参数对象。"""
+        error_type = ApprovalInvalidChangesError if approval_changes else ActionError
         try:
             parsed = json.loads(parameters_json)
         except json.JSONDecodeError as exc:
-            raise ActionError("parameters_json 必须是合法 JSON") from exc
+            raise error_type("parameters_json 必须是合法 JSON") from exc
         if not isinstance(parsed, dict):
-            raise ActionError("parameters_json 必须是 JSON 对象")
+            raise error_type("parameters_json 必须是 JSON 对象")
+
+        if action_type is ActionType.REFUND:
+            try:
+                reason = RefundReasonCode(reason_code)
+            except ValueError as exc:
+                raise error_type("退款原因码不在固定枚举中") from exc
+            if set(parsed) != {"refund_scope"}:
+                raise error_type("退款参数只能包含 refund_scope")
+            try:
+                RefundScope(parsed["refund_scope"])
+            except (TypeError, ValueError) as exc:
+                raise error_type("refund_scope 必须是 full 或 partial") from exc
+        else:
+            try:
+                reason = CompensationReasonCode(reason_code)
+            except ValueError as exc:
+                raise error_type("补偿原因码不在固定枚举中") from exc
+            if set(parsed) != {"coupon_valid_days"}:
+                raise error_type("补偿参数只能包含 coupon_valid_days")
+            if (
+                type(parsed["coupon_valid_days"]) is not int
+                or parsed["coupon_valid_days"]
+                != COMPENSATION_COUPON_VALID_DAYS
+            ):
+                raise error_type("补偿优惠券有效期必须为 30 天")
+        if reason.value == "other" and not reason_text.strip():
+            raise error_type("other 原因必须提供非空详细说明")
+        return parsed
 
     @staticmethod
     def _load_order_row(
@@ -313,6 +374,7 @@ class SQLiteActionStore(ActionStore):
         organization_id: str,
         order_id: str,
         amount_cents: int,
+        refund_scope: RefundScope,
     ) -> None:
         """重验退款金额不超过当前可退余额（与写结果同事务，防金额竞争）。"""
         order_row = SQLiteActionStore._load_order_row(
@@ -329,6 +391,10 @@ class SQLiteActionStore(ActionStore):
         if amount_cents > remaining:
             raise ActionRefundBalanceExceededError(
                 "退款金额超过订单当前可退余额"
+            )
+        if refund_scope is RefundScope.FULL and amount_cents != remaining:
+            raise ActionInvalidAmountError(
+                "全额退款金额必须等于当前可退余额"
             )
 
     @staticmethod
@@ -444,6 +510,30 @@ class SQLiteActionStore(ActionStore):
         created_at: str,
     ) -> None:
         """在已开启的事务内追加一条审计事件。"""
+        try:
+            details = json.loads(details_json)
+        except json.JSONDecodeError as exc:
+            raise ExecutionDataIntegrityError(
+                "审计详情必须是合法 JSON"
+            ) from exc
+        if not isinstance(details, dict):
+            raise ExecutionDataIntegrityError(
+                "审计详情必须是 JSON 对象"
+            )
+        if proposal_id is not None:
+            linked = connection.execute(
+                """
+                SELECT 1
+                FROM action_proposals
+                WHERE organization_id = ? AND id = ? AND run_id = ?
+                LIMIT 1
+                """,
+                (organization_id, proposal_id, run_id),
+            ).fetchone()
+            if linked is None:
+                raise ExecutionDataIntegrityError(
+                    "审计提案不属于指定 Run"
+                )
         if actor_type is AuditActorType.SYSTEM:
             actor_user_id = None
         log_id = str(uuid4())
@@ -632,7 +722,12 @@ class SQLiteActionStore(ActionStore):
         """
         if amount_cents <= 0:
             raise ActionInvalidAmountError("金额必须为正整数（单位：分）")
-        self._validate_parameters_json(parameters_json)
+        parameters = self._validate_action_inputs(
+            action_type=action_type,
+            reason_code=reason_code,
+            reason_text=reason_text,
+            parameters_json=parameters_json,
+        )
         normalized_currency = currency.strip().upper()
 
         run_id = str(uuid4())
@@ -658,6 +753,7 @@ class SQLiteActionStore(ActionStore):
                         organization_id=organization_id,
                         order_id=order_id,
                         amount_cents=amount_cents,
+                        refund_scope=RefundScope(parameters["refund_scope"]),
                     )
                 else:
                     self._validate_compensation_amount(
@@ -928,6 +1024,17 @@ class SQLiteActionStore(ActionStore):
             if current not in expected_statuses:
                 raise RunStateConflictError(
                     f"Run 状态 {current.value} 不在预期集合中"
+                )
+            if new_status not in _RUN_TRANSITIONS[current]:
+                raise RunStateConflictError(
+                    f"Run 不允许从 {current.value} 转换到 {new_status.value}"
+                )
+            if new_status is ActionRunStatus.FAILED:
+                if not error_code or not error_code.strip():
+                    raise RunStateConflictError("Run 失败必须记录稳定错误码")
+            elif error_code is not None or error_retryable:
+                raise RunStateConflictError(
+                    "非失败状态不允许携带错误码或可重试标记"
                 )
             now = self._utc_now()
             updated_row = self._transition_run_row(
@@ -1210,21 +1317,22 @@ class SQLiteActionStore(ActionStore):
                     "审批请求版本不属于该提案"
                 )
 
+            proposal_row = self._load_proposal_row(
+                connection,
+                organization_id=organization_id,
+                proposal_id=approval.proposal_id,
+            )
             now = self._utc_now()
             decided_version_row = self._resolve_decided_version(
                 connection,
                 organization_id=organization_id,
                 approval=approval,
+                proposal_row=proposal_row,
                 requested_version_row=requested_version_row,
                 decision=decision,
                 new_version=new_version,
                 decided_by_user_id=decided_by_user_id,
                 created_at=now,
-            )
-            proposal_row = self._load_proposal_row(
-                connection,
-                organization_id=organization_id,
-                proposal_id=approval.proposal_id,
             )
             run_id = proposal_row["run_id"]
 
@@ -1398,6 +1506,7 @@ class SQLiteActionStore(ActionStore):
         *,
         organization_id: str,
         approval: Approval,
+        proposal_row: sqlite3.Row,
         requested_version_row: sqlite3.Row,
         decision: ApprovalDecisionType,
         new_version: NewProposalVersion | None,
@@ -1415,8 +1524,12 @@ class SQLiteActionStore(ActionStore):
             normalized_currency = new_version.currency.strip().upper()
             if normalized_currency != requested_version_row["currency"]:
                 raise ApprovalInvalidChangesError("币种不允许修改")
-            SQLiteActionStore._validate_parameters_json_approval(
-                new_version.parameters_json
+            parameters = SQLiteActionStore._validate_action_inputs(
+                action_type=ActionType(proposal_row["action_type"]),
+                reason_code=new_version.reason_code,
+                reason_text=new_version.reason_text,
+                parameters_json=new_version.parameters_json,
+                approval_changes=True,
             )
             # 至少改变一个允许字段，禁止以“修改后批准”原样重复原版本。
             if (
@@ -1432,6 +1545,15 @@ class SQLiteActionStore(ActionStore):
                 raise ApprovalInvalidChangesError(
                     "修改后批准必须至少改变一个允许字段"
                 )
+            SQLiteActionStore._validate_approval_version_business_rules(
+                connection,
+                organization_id=organization_id,
+                proposal_row=proposal_row,
+                amount_cents=new_version.amount_cents,
+                reason_code=new_version.reason_code,
+                parameters=parameters,
+                invalid_changes=True,
+            )
             return SQLiteActionStore._insert_next_version(
                 connection,
                 organization_id=organization_id,
@@ -1444,19 +1566,63 @@ class SQLiteActionStore(ActionStore):
             raise ApprovalInvalidChangesError(
                 "批准或拒绝不允许附带变更内容"
             )
+        if decision is ApprovalDecisionType.APPROVED:
+            parameters = SQLiteActionStore._validate_action_inputs(
+                action_type=ActionType(proposal_row["action_type"]),
+                reason_code=requested_version_row["reason_code"],
+                reason_text=requested_version_row["reason_text"],
+                parameters_json=requested_version_row["parameters_json"],
+                approval_changes=True,
+            )
+            SQLiteActionStore._validate_approval_version_business_rules(
+                connection,
+                organization_id=organization_id,
+                proposal_row=proposal_row,
+                amount_cents=requested_version_row["amount_cents"],
+                reason_code=requested_version_row["reason_code"],
+                parameters=parameters,
+                invalid_changes=False,
+            )
         return requested_version_row
 
     @staticmethod
-    def _validate_parameters_json_approval(parameters_json: str) -> None:
-        """审批变更参数的 JSON 合法性校验，失败按非法变更处理。"""
+    def _validate_approval_version_business_rules(
+        connection: sqlite3.Connection,
+        *,
+        organization_id: str,
+        proposal_row: sqlite3.Row,
+        amount_cents: int,
+        reason_code: str,
+        parameters: dict,
+        invalid_changes: bool,
+    ) -> None:
+        """在审批决定事务内重验金额、重复原因和类型参数一致性。"""
         try:
-            parsed = json.loads(parameters_json)
-        except json.JSONDecodeError as exc:
-            raise ApprovalInvalidChangesError(
-                "变更参数必须是合法 JSON"
-            ) from exc
-        if not isinstance(parsed, dict):
-            raise ApprovalInvalidChangesError("变更参数必须是 JSON 对象")
+            if ActionType(proposal_row["action_type"]) is ActionType.REFUND:
+                SQLiteActionStore._validate_refund_amount(
+                    connection,
+                    organization_id=organization_id,
+                    order_id=proposal_row["order_id"],
+                    amount_cents=amount_cents,
+                    refund_scope=RefundScope(parameters["refund_scope"]),
+                )
+            else:
+                SQLiteActionStore._validate_compensation_amount(
+                    connection,
+                    organization_id=organization_id,
+                    order_id=proposal_row["order_id"],
+                    amount_cents=amount_cents,
+                    reason_code=reason_code,
+                )
+        except (
+            ActionInvalidAmountError,
+            ActionRefundBalanceExceededError,
+            ActionCompensationDuplicateError,
+            ActionCompensationCapExceededError,
+        ) as exc:
+            if invalid_changes:
+                raise ApprovalInvalidChangesError(str(exc)) from exc
+            raise
 
     @staticmethod
     def _insert_next_version(
@@ -1517,7 +1683,7 @@ class SQLiteActionStore(ActionStore):
         proposal_version_id: str,
         action_type: ActionType,
         idempotency_key: str,
-    ) -> ToolExecution:
+    ) -> ExecutionClaim:
         """按幂等键认领或读取已有执行记录。
 
         设计 8.4 / 15.2：同一幂等键只有一个执行记录；成功执行原样返回；
@@ -1543,7 +1709,7 @@ class SQLiteActionStore(ActionStore):
                 )
                 if execution.status is ToolExecutionStatus.SUCCEEDED:
                     # 稳定结果读取：直接返回既有成功执行，不重复写业务记录。
-                    return execution
+                    return ExecutionClaim(execution=execution, acquired=False)
                 if execution.status is ToolExecutionStatus.FAILED_TERMINAL:
                     raise RunStateConflictError(
                         "执行已进入终态，不能重新认领"
@@ -1582,15 +1748,16 @@ class SQLiteActionStore(ActionStore):
                         execution_id=execution.execution_id,
                         attempt_count=execution.attempt_count + 1,
                     )
-                    return self._to_execution(
-                        self._load_execution_row(
+                    return ExecutionClaim(
+                        execution=self._to_execution(self._load_execution_row(
                             connection,
                             organization_id=organization_id,
                             execution_id=execution.execution_id,
-                        )
+                        )),
+                        acquired=True,
                     )
                 # claimed / running：视为上次进程中断后的重续，原样返回。
-                return execution
+                return ExecutionClaim(execution=execution, acquired=False)
 
             proposal_row = self._load_proposal_row(
                 connection,
@@ -1660,7 +1827,10 @@ class SQLiteActionStore(ActionStore):
                 organization_id=organization_id,
                 execution_id=execution_id,
             )
-        return self._to_execution(execution_row)
+        return ExecutionClaim(
+            execution=self._to_execution(execution_row),
+            acquired=True,
+        )
 
     @staticmethod
     def _assert_execution_chain(
@@ -1872,6 +2042,10 @@ class SQLiteActionStore(ActionStore):
                 )
             if execution.status is ToolExecutionStatus.FAILED_TERMINAL:
                 raise RunStateConflictError("执行已进入终态，不能记录成功")
+            if execution.status is not ToolExecutionStatus.RUNNING:
+                raise RunStateConflictError(
+                    "只有 running 执行可以记录成功结果"
+                )
 
             proposal_row = self._load_proposal_row(
                 connection,
@@ -2044,9 +2218,7 @@ class SQLiteActionStore(ActionStore):
                 organization_id=organization_id,
                 run_id=proposal_row["run_id"],
                 allowed_statuses={
-                    ActionRunStatus.QUEUED,
                     ActionRunStatus.RUNNING,
-                    ActionRunStatus.AWAITING_APPROVAL,
                 },
                 new_status=ActionRunStatus.SUCCEEDED,
                 error_code=None,
@@ -2159,6 +2331,10 @@ class SQLiteActionStore(ActionStore):
                 ToolExecutionStatus.FAILED_TERMINAL,
             ):
                 return execution
+            if execution.status is not ToolExecutionStatus.RUNNING:
+                raise RunStateConflictError(
+                    "只有 running 执行可以记录失败结果"
+                )
             now = self._utc_now()
             new_status = (
                 ToolExecutionStatus.FAILED_RETRYABLE

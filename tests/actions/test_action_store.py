@@ -18,6 +18,7 @@ from app.actions.base import (
     ActionCompensationCapExceededError,
     ActionCompensationDuplicateError,
     ActionCurrencyMismatchError,
+    ActionError,
     ActionInvalidAmountError,
     ActionOrderNotFoundError,
     ActionRefundBalanceExceededError,
@@ -247,7 +248,28 @@ def claim_and_run(
     idempotency_key: str | None = None,
 ) -> ToolExecution:
     """认领执行并把执行推进到 running 状态。"""
-    execution = store.claim_execution(
+    proposal = store.get_proposal(
+        organization_id=organization_id,
+        proposal_id=proposal_id,
+    )
+    run = store.get_run(
+        organization_id=organization_id,
+        run_id=proposal.run_id,
+    )
+    if run.status is not ActionRunStatus.RUNNING:
+        store.transition_run(
+            organization_id=organization_id,
+            run_id=run.run_id,
+            expected_statuses=(run.status,),
+            new_status=ActionRunStatus.RUNNING,
+            error_code=None,
+            error_retryable=False,
+            actor_type=AuditActorType.SYSTEM,
+            actor_user_id=None,
+            event_type="run_started",
+            details_json=json.dumps({}),
+        )
+    claim = store.claim_execution(
         organization_id=organization_id,
         proposal_id=proposal_id,
         proposal_version_id=version_id,
@@ -260,9 +282,10 @@ def claim_and_run(
             action_type.value,
         ),
     )
+    assert claim.acquired is True
     return store.mark_execution_running(
         organization_id=organization_id,
-        execution_id=execution.execution_id,
+        execution_id=claim.execution_id,
     )
 
 
@@ -612,6 +635,50 @@ def test_create_workflow_rejects_non_positive_amount(tmp_path):
         )
 
 
+def test_create_workflow_rejects_invalid_type_parameters(tmp_path):
+    # 边界情况：全额退款金额必须等于余额；补偿原因和类型参数必须使用固定契约。
+    scope = build_action_scope(tmp_path)
+    with pytest.raises(ActionInvalidAmountError):
+        create_refund_workflow(
+            scope.store,
+            organization_id=scope.org_a.organization_id,
+            user_id=scope.alice.user_id,
+            order_id=scope.order_a.order_id,
+            amount_cents=6000,
+            refund_scope="full",
+        )
+    with pytest.raises(ActionError):
+        scope.store.create_workflow(
+            organization_id=scope.org_a.organization_id,
+            conversation_id="conv-invalid-compensation",
+            turn_id="turn-invalid-compensation",
+            created_by_user_id=scope.alice.user_id,
+            order_id=scope.order_a.order_id,
+            action_type=ActionType.COMPENSATION,
+            amount_cents=1000,
+            currency="CNY",
+            reason_code="unknown_reason",
+            reason_text="",
+            parameters_json=json.dumps(
+                {"coupon_valid_days": 10, "unexpected": True}
+            ),
+        )
+
+
+def test_create_workflow_other_reason_requires_details(tmp_path):
+    # 边界情况：退款或补偿使用 other 原因时必须提供非空详细说明。
+    scope = build_action_scope(tmp_path)
+    with pytest.raises(ActionError):
+        create_refund_workflow(
+            scope.store,
+            organization_id=scope.org_a.organization_id,
+            user_id=scope.alice.user_id,
+            order_id=scope.order_a.order_id,
+            reason_code="other",
+            reason_text="   ",
+        )
+
+
 def test_create_workflow_rejects_refund_exceeding_balance(tmp_path):
     # 边界情况：退款金额超过订单可退余额时拒绝创建。
     scope = build_action_scope(tmp_path)
@@ -871,7 +938,7 @@ def test_list_approvals_pagination_and_filter(tmp_path):
 
 
 def test_transition_run_to_awaiting_writes_audit(tmp_path):
-    # 保护行为：Run 可原子从 queued 转换到 awaiting_approval，
+    # 保护行为：Run 按 queued -> running -> awaiting_approval 转换，
     # 并在同一事务写入「进入等待」审计事件。
     scope = build_action_scope(tmp_path)
     creation = create_refund_workflow(
@@ -880,10 +947,22 @@ def test_transition_run_to_awaiting_writes_audit(tmp_path):
         user_id=scope.alice.user_id,
         order_id=scope.order_a.order_id,
     )
-    updated = scope.store.transition_run(
+    running = scope.store.transition_run(
         organization_id=scope.org_a.organization_id,
         run_id=creation.run.run_id,
         expected_statuses=(ActionRunStatus.QUEUED,),
+        new_status=ActionRunStatus.RUNNING,
+        error_code=None,
+        error_retryable=False,
+        actor_type=AuditActorType.SYSTEM,
+        actor_user_id=None,
+        event_type="run_started",
+        details_json=json.dumps({}),
+    )
+    updated = scope.store.transition_run(
+        organization_id=scope.org_a.organization_id,
+        run_id=creation.run.run_id,
+        expected_statuses=(running.status,),
         new_status=ActionRunStatus.AWAITING_APPROVAL,
         error_code=None,
         error_retryable=False,
@@ -913,6 +992,30 @@ def test_transition_run_rejects_unexpected_status(tmp_path):
         user_id=scope.alice.user_id,
         order_id=scope.order_a.order_id,
     )
+
+
+def test_transition_run_rejects_illegal_edge(tmp_path):
+    # 边界情况：即使调用者把 queued 放入预期集合，也不能跳过执行直接进入成功终态。
+    scope = build_action_scope(tmp_path)
+    creation = create_refund_workflow(
+        scope.store,
+        organization_id=scope.org_a.organization_id,
+        user_id=scope.alice.user_id,
+        order_id=scope.order_a.order_id,
+    )
+    with pytest.raises(RunStateConflictError):
+        scope.store.transition_run(
+            organization_id=scope.org_a.organization_id,
+            run_id=creation.run.run_id,
+            expected_statuses=(ActionRunStatus.QUEUED,),
+            new_status=ActionRunStatus.SUCCEEDED,
+            error_code=None,
+            error_retryable=False,
+            actor_type=AuditActorType.SYSTEM,
+            actor_user_id=None,
+            event_type="run_succeeded",
+            details_json=json.dumps({}),
+        )
     with pytest.raises(RunStateConflictError):
         scope.store.transition_run(
             organization_id=scope.org_a.organization_id,
@@ -948,6 +1051,18 @@ def test_transition_run_terminal_blocks_further_transition(tmp_path):
         organization_id=scope.org_a.organization_id,
         run_id=creation.run.run_id,
         expected_statuses=(ActionRunStatus.QUEUED,),
+        new_status=ActionRunStatus.RUNNING,
+        error_code=None,
+        error_retryable=False,
+        actor_type=AuditActorType.SYSTEM,
+        actor_user_id=None,
+        event_type="run_started",
+        details_json=json.dumps({}),
+    )
+    scope.store.transition_run(
+        organization_id=scope.org_a.organization_id,
+        run_id=creation.run.run_id,
+        expected_statuses=(ActionRunStatus.RUNNING,),
         new_status=ActionRunStatus.CANCELLED,
         error_code=None,
         error_retryable=False,
@@ -1396,6 +1511,89 @@ def test_decide_approval_concurrent_same_content_single_decision(tmp_path):
     assert count_rows(scope.database_path, "approval_decisions") == 1
 
 
+def test_decide_approval_revalidates_refund_balance_in_transaction(tmp_path):
+    # 保护行为：审批等待期间余额变化后，批准必须在决定事务内拒绝超额退款。
+    scope = build_action_scope(tmp_path)
+    creation = create_refund_workflow(
+        scope.store,
+        organization_id=scope.org_a.organization_id,
+        user_id=scope.alice.user_id,
+        order_id=scope.order_a.order_id,
+        amount_cents=6000,
+    )
+    insert_phantom_refund(
+        scope.database_path,
+        org_id=scope.org_a.organization_id,
+        user_id=scope.alice.user_id,
+        order_id=scope.order_a.order_id,
+        amount_cents=5000,
+    )
+
+    with pytest.raises(ActionRefundBalanceExceededError):
+        approve_decision(
+            scope.store,
+            organization_id=scope.org_a.organization_id,
+            approval_id=creation.approval.approval_id,
+            user_id=scope.alice.user_id,
+        )
+    assert count_rows(scope.database_path, "approval_decisions") == 0
+
+
+def test_decide_approval_rejects_inconsistent_full_refund_change(tmp_path):
+    # 边界情况：修改后批准把范围改为 full 时，金额必须等于审批时全部可退余额。
+    scope = build_action_scope(tmp_path)
+    creation = create_refund_workflow(
+        scope.store,
+        organization_id=scope.org_a.organization_id,
+        user_id=scope.alice.user_id,
+        order_id=scope.order_a.order_id,
+        amount_cents=6000,
+    )
+    with pytest.raises(ApprovalInvalidChangesError):
+        approve_decision(
+            scope.store,
+            organization_id=scope.org_a.organization_id,
+            approval_id=creation.approval.approval_id,
+            user_id=scope.alice.user_id,
+            decision=ApprovalDecisionType.APPROVED_WITH_CHANGES,
+            new_version=NewProposalVersion(
+                amount_cents=6000,
+                currency="CNY",
+                reason_code="quality_issue",
+                reason_text="改为全额退款",
+                parameters_json=json.dumps({"refund_scope": "full"}),
+            ),
+        )
+
+
+def test_decide_approval_revalidates_compensation_duplicate(tmp_path):
+    # 保护行为：审批等待期间同原因已成功补偿时，决定事务必须拒绝再次批准。
+    scope = build_action_scope(tmp_path)
+    creation = create_compensation_workflow(
+        scope.store,
+        organization_id=scope.org_a.organization_id,
+        user_id=scope.alice.user_id,
+        order_id=scope.order_a.order_id,
+        reason_code="transit_delay",
+    )
+    insert_phantom_compensation(
+        scope.database_path,
+        org_id=scope.org_a.organization_id,
+        user_id=scope.alice.user_id,
+        order_id=scope.order_a.order_id,
+        amount_cents=1000,
+        reason_code="transit_delay",
+    )
+
+    with pytest.raises(ActionCompensationDuplicateError):
+        approve_decision(
+            scope.store,
+            organization_id=scope.org_a.organization_id,
+            approval_id=creation.approval.approval_id,
+            user_id=scope.alice.user_id,
+        )
+
+
 def test_decide_approval_concurrent_different_content_single_winner(tmp_path):
     # 保护行为：两个管理员并发提交不同决定时，恰好一个成功、
     # 另一个收到已决定冲突，数据库中只有一条决定。
@@ -1472,6 +1670,7 @@ def test_claim_execution_creates_claimed_record(tmp_path):
             "refund",
         ),
     )
+    assert execution.acquired is True
     assert execution.status is ToolExecutionStatus.CLAIMED
     assert execution.attempt_count == 1
     proposal = scope.store.get_proposal(
@@ -1517,7 +1716,47 @@ def test_claim_execution_same_key_returns_same_record(tmp_path):
         idempotency_key=key,
     )
     assert first.execution_id == second.execution_id
+    assert first.acquired is True
+    assert second.acquired is False
     assert count_rows(scope.database_path, "tool_executions") == 1
+
+
+def test_concurrent_claim_grants_execution_right_once(tmp_path):
+    # 保护行为：并发使用同一幂等键认领时只有一个结果 acquired=True。
+    scope = build_action_scope(tmp_path)
+    creation = create_refund_workflow(
+        scope.store,
+        organization_id=scope.org_a.organization_id,
+        user_id=scope.alice.user_id,
+        order_id=scope.order_a.order_id,
+    )
+    approve_decision(
+        scope.store,
+        organization_id=scope.org_a.organization_id,
+        approval_id=creation.approval.approval_id,
+        user_id=scope.alice.user_id,
+    )
+    key = make_idempotency_key(
+        scope.org_a.organization_id,
+        creation.proposal.proposal_id,
+        creation.version.version_id,
+        "refund",
+    )
+
+    def claim():
+        # 并发分支：返回值用于验证是否取得本次执行权。
+        return scope.store.claim_execution(
+            organization_id=scope.org_a.organization_id,
+            proposal_id=creation.proposal.proposal_id,
+            proposal_version_id=creation.version.version_id,
+            action_type=ActionType.REFUND,
+            idempotency_key=key,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        claims = [future.result() for future in (pool.submit(claim), pool.submit(claim))]
+    assert sum(claim.acquired for claim in claims) == 1
+    assert len({claim.execution_id for claim in claims}) == 1
 
 
 def test_claim_execution_rejects_mismatched_chain(tmp_path):
@@ -1619,6 +1858,7 @@ def test_claim_execution_retryable_reclaim_increments_attempt(tmp_path):
         idempotency_key=key,
     )
     assert reclaimed.execution_id == execution.execution_id
+    assert reclaimed.acquired is True
     assert reclaimed.attempt_count == 2
     assert reclaimed.status is ToolExecutionStatus.CLAIMED
     assert reclaimed.error_code is None
@@ -1690,6 +1930,10 @@ def test_mark_execution_running_rejects_failed_execution(tmp_path):
             "refund",
         ),
     )
+    scope.store.mark_execution_running(
+        organization_id=scope.org_a.organization_id,
+        execution_id=execution.execution_id,
+    )
     scope.store.record_execution_failure(
         organization_id=scope.org_a.organization_id,
         execution_id=execution.execution_id,
@@ -1700,6 +1944,57 @@ def test_mark_execution_running_rejects_failed_execution(tmp_path):
         scope.store.mark_execution_running(
             organization_id=scope.org_a.organization_id,
             execution_id=execution.execution_id,
+        )
+
+
+def test_execution_result_requires_running_state(tmp_path):
+    # 边界情况：claimed 执行不能跳过 running 直接记录成功或失败。
+    scope = build_action_scope(tmp_path)
+    creation = create_refund_workflow(
+        scope.store,
+        organization_id=scope.org_a.organization_id,
+        user_id=scope.alice.user_id,
+        order_id=scope.order_a.order_id,
+    )
+    approve_decision(
+        scope.store,
+        organization_id=scope.org_a.organization_id,
+        approval_id=creation.approval.approval_id,
+        user_id=scope.alice.user_id,
+    )
+    claim = scope.store.claim_execution(
+        organization_id=scope.org_a.organization_id,
+        proposal_id=creation.proposal.proposal_id,
+        proposal_version_id=creation.version.version_id,
+        action_type=ActionType.REFUND,
+        idempotency_key=make_idempotency_key(
+            scope.org_a.organization_id,
+            creation.proposal.proposal_id,
+            creation.version.version_id,
+            "refund",
+        ),
+    )
+    with pytest.raises(RunStateConflictError):
+        scope.store.record_execution_success(
+            organization_id=scope.org_a.organization_id,
+            execution_id=claim.execution_id,
+            proposal_id=creation.proposal.proposal_id,
+            proposal_version_id=creation.version.version_id,
+            order_id=scope.order_a.order_id,
+            action_type=ActionType.REFUND,
+            amount_cents=6000,
+            currency="CNY",
+            reason_code="quality_issue",
+            business_record_id="record-without-running",
+            coupon_valid_days=None,
+            mark_order_refunded=False,
+        )
+    with pytest.raises(RunStateConflictError):
+        scope.store.record_execution_failure(
+            organization_id=scope.org_a.organization_id,
+            execution_id=claim.execution_id,
+            error_code="EXECUTION_RETRYABLE_FAILURE",
+            retryable=True,
         )
 
 
@@ -2024,10 +2319,11 @@ def test_record_execution_success_compensation(tmp_path):
         approval_id=creation.approval.approval_id,
         user_id=scope.alice.user_id,
     )
-    execution = scope.store.claim_execution(
+    execution = claim_and_run(
+        scope.store,
         organization_id=scope.org_a.organization_id,
         proposal_id=creation.proposal.proposal_id,
-        proposal_version_id=creation.version.version_id,
+        version_id=creation.version.version_id,
         action_type=ActionType.COMPENSATION,
         idempotency_key=(
             "action-execution:v1:"
@@ -2075,10 +2371,11 @@ def test_record_execution_success_revalidates_compensation_duplicate(tmp_path):
         approval_id=creation.approval.approval_id,
         user_id=scope.alice.user_id,
     )
-    execution = scope.store.claim_execution(
+    execution = claim_and_run(
+        scope.store,
         organization_id=scope.org_a.organization_id,
         proposal_id=creation.proposal.proposal_id,
-        proposal_version_id=creation.version.version_id,
+        version_id=creation.version.version_id,
         action_type=ActionType.COMPENSATION,
         idempotency_key=(
             "action-execution:v1:"
@@ -2130,10 +2427,11 @@ def test_record_execution_success_revalidates_compensation_cap(tmp_path):
         approval_id=creation.approval.approval_id,
         user_id=scope.alice.user_id,
     )
-    execution = scope.store.claim_execution(
+    execution = claim_and_run(
+        scope.store,
         organization_id=scope.org_a.organization_id,
         proposal_id=creation.proposal.proposal_id,
-        proposal_version_id=creation.version.version_id,
+        version_id=creation.version.version_id,
         action_type=ActionType.COMPENSATION,
         idempotency_key=(
             "action-execution:v1:"
@@ -2569,6 +2867,36 @@ def test_append_audit_log_and_list_order(tmp_path):
         )
 
 
+def test_append_audit_log_rejects_mismatched_proposal(tmp_path):
+    # 边界情况：审计记录的 Proposal 必须属于指定 Run，不能在同租户内串接。
+    scope = build_action_scope(tmp_path)
+    refund = create_refund_workflow(
+        scope.store,
+        organization_id=scope.org_a.organization_id,
+        user_id=scope.alice.user_id,
+        order_id=scope.order_a.order_id,
+    )
+    compensation = create_compensation_workflow(
+        scope.store,
+        organization_id=scope.org_a.organization_id,
+        user_id=scope.alice.user_id,
+        order_id=scope.order_a.order_id,
+    )
+
+    with pytest.raises(ExecutionDataIntegrityError):
+        scope.store.append_audit_log(
+            organization_id=scope.org_a.organization_id,
+            run_id=refund.run.run_id,
+            proposal_id=compensation.proposal.proposal_id,
+            actor_type=AuditActorType.SYSTEM,
+            actor_user_id=None,
+            event_type="resume_requested",
+            resource_type="action_run",
+            resource_id=refund.run.run_id,
+            details_json=json.dumps({}),
+        )
+
+
 def test_full_lifecycle_audit_trail(tmp_path):
     # 保护行为：完整生命周期形成可查询审计链，覆盖设计 9.9 要求的最小事件集合。
     scope = build_action_scope(tmp_path)
@@ -2582,6 +2910,18 @@ def test_full_lifecycle_audit_trail(tmp_path):
         organization_id=scope.org_a.organization_id,
         run_id=creation.run.run_id,
         expected_statuses=(ActionRunStatus.QUEUED,),
+        new_status=ActionRunStatus.RUNNING,
+        error_code=None,
+        error_retryable=False,
+        actor_type=AuditActorType.SYSTEM,
+        actor_user_id=None,
+        event_type="run_started",
+        details_json=json.dumps({}),
+    )
+    scope.store.transition_run(
+        organization_id=scope.org_a.organization_id,
+        run_id=creation.run.run_id,
+        expected_statuses=(ActionRunStatus.RUNNING,),
         new_status=ActionRunStatus.AWAITING_APPROVAL,
         error_code=None,
         error_retryable=False,
