@@ -621,3 +621,29 @@ def test_unplanned_strategy_downgrade_refuses_data_loss(tmp_path):
         assert connection.execute(
             "SELECT strategy FROM retrieval_events WHERE id='event-unplanned'"
         ).fetchone() == ("unplanned",)
+
+
+def test_action_workflow_migration_upgrade_and_rollback(tmp_path):
+    # 保护行为：0011 动作工作流迁移可创建九张业务表，并可对称回滚到 0010。
+    database_path = tmp_path / "action-workflow.db"
+    config = alembic_config(database_path)
+
+    command.upgrade(config, "0011_action_approval_workflow")
+
+    assert {
+        "action_runs",
+        "action_proposals",
+        "action_proposal_versions",
+        "approvals",
+        "approval_decisions",
+        "tool_executions",
+        "refund_records",
+        "compensation_records",
+        "audit_logs",
+    } <= table_names(database_path)
+
+    command.downgrade(config, "0010_retrieval_event_unplanned")
+
+    assert "action_runs" not in table_names(database_path)
+    assert "audit_logs" not in table_names(database_path)
+    assert "retrieval_events" in table_names(database_path)
