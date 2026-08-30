@@ -2157,9 +2157,11 @@ def test_record_execution_success_full_refund_marks_order_refunded(tmp_path):
     assert order_status == "refunded"
 
 
-def test_record_execution_success_rejects_inconsistent_mark(tmp_path):
-    # 边界情况：传入的 refunded 标记与事务内最新可退余额不一致时，
-    # 拒绝写入，防止订单状态与余额事实脱节。
+def test_record_execution_success_uses_transaction_balance_for_order_status(
+    tmp_path,
+):
+    # 保护行为：refunded 标记必须由 Store 按事务内最新余额决定，
+    # 不信任调用方在事务外根据旧快照计算的提示值。
     scope = build_action_scope(tmp_path)
     creation = create_refund_workflow(
         scope.store,
@@ -2180,22 +2182,28 @@ def test_record_execution_success_rejects_inconsistent_mark(tmp_path):
         version_id=creation.version.version_id,
         action_type=ActionType.REFUND,
     )
-    with pytest.raises(ExecutionDataIntegrityError):
-        scope.store.record_execution_success(
-            organization_id=scope.org_a.organization_id,
-            execution_id=execution.execution_id,
-            proposal_id=creation.proposal.proposal_id,
-            proposal_version_id=creation.version.version_id,
-            order_id=scope.order_a.order_id,
-            action_type=ActionType.REFUND,
-            amount_cents=6000,
-            currency="CNY",
-            reason_code="quality_issue",
-            business_record_id="record-bad-mark",
-            coupon_valid_days=None,
-            mark_order_refunded=True,
-        )
-    assert count_rows(scope.database_path, "refund_records") == 0
+    result = scope.store.record_execution_success(
+        organization_id=scope.org_a.organization_id,
+        execution_id=execution.execution_id,
+        proposal_id=creation.proposal.proposal_id,
+        proposal_version_id=creation.version.version_id,
+        order_id=scope.order_a.order_id,
+        action_type=ActionType.REFUND,
+        amount_cents=6000,
+        currency="CNY",
+        reason_code="quality_issue",
+        business_record_id="record-authoritative-balance",
+        coupon_valid_days=None,
+        mark_order_refunded=True,
+    )
+    assert result.order_marked_refunded is False
+    assert count_rows(scope.database_path, "refund_records") == 1
+    with sqlite3.connect(scope.database_path) as connection:
+        order_status = connection.execute(
+            "SELECT status FROM orders WHERE id = ?",
+            (scope.order_a.order_id,),
+        ).fetchone()[0]
+    assert order_status == "processing"
 
 
 def test_record_execution_success_replay_returns_same_result(tmp_path):

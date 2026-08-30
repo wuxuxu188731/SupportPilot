@@ -1870,6 +1870,78 @@ class SQLiteActionStore(ActionStore):
             acquired=True,
         )
 
+    def reclaim_interrupted_execution(
+        self,
+        *,
+        organization_id: str,
+        execution_id: str,
+    ) -> ExecutionClaim:
+        """重新认领上次进程中断留下的执行记录。
+
+        设计非目标不包含多实例调度；本方法只能由已持有进程内
+        幂等键互斥锁的执行器调用。每次重新认领都递增尝试次数，
+        并沿用原执行记录和幂等键。
+        """
+        with self._immediate_transaction() as connection:
+            row = self._load_execution_row(
+                connection,
+                organization_id=organization_id,
+                execution_id=execution_id,
+            )
+            execution = self._to_execution(row)
+            if execution.status not in (
+                ToolExecutionStatus.CLAIMED,
+                ToolExecutionStatus.RUNNING,
+            ):
+                return ExecutionClaim(execution=execution, acquired=False)
+            now = self._utc_now()
+            attempt_count = execution.attempt_count + 1
+            connection.execute(
+                """
+                UPDATE tool_executions
+                SET status = 'claimed',
+                    attempt_count = ?,
+                    error_code = NULL,
+                    error_retryable = 0,
+                    completed_at = NULL,
+                    updated_at = ?
+                WHERE organization_id = ? AND id = ?
+                """,
+                (
+                    attempt_count,
+                    now,
+                    organization_id,
+                    execution_id,
+                ),
+            )
+            self._transition_proposal(
+                connection,
+                organization_id=organization_id,
+                proposal_id=execution.proposal_id,
+                allowed_statuses={
+                    ProposalStatus.APPROVED,
+                    ProposalStatus.EXECUTING,
+                },
+                new_status=ProposalStatus.EXECUTING,
+                updated_at=now,
+            )
+            self._append_execution_claim_audit(
+                connection,
+                organization_id=organization_id,
+                proposal_id=execution.proposal_id,
+                execution_id=execution_id,
+                attempt_count=attempt_count,
+            )
+            reclaimed_row = self._load_execution_row(
+                connection,
+                organization_id=organization_id,
+                execution_id=execution_id,
+            )
+        return ExecutionClaim(
+            execution=self._to_execution(reclaimed_row),
+            acquired=True,
+        )
+
     @staticmethod
     def _assert_execution_chain(
         execution: ToolExecution,
@@ -2031,8 +2103,8 @@ class SQLiteActionStore(ActionStore):
 
         设计 10.3：金额上限必须在写业务结果的同一 BEGIN IMMEDIATE 事务中
         重新计算；已成功的执行原样返回既有业务结果（节点重放安全）；
-        订单是否标记 refunded 以事务内最新可退余额是否为零决定，调用方
-        传入的标记仅作一致性校验。
+        订单是否标记 refunded 完全以事务内最新可退余额是否为零决定。
+        `mark_order_refunded` 仅为兼容 Task 2 既有接口保留，不参与判断。
         """
         if action_type is ActionType.REFUND:
             if coupon_valid_days is not None:
@@ -2158,11 +2230,6 @@ class SQLiteActionStore(ActionStore):
                     raise ActionCompensationCapExceededError(
                         "补偿累计金额超过订单总金额的 50%"
                     )
-            if mark_order_refunded != expected_mark_refunded:
-                raise ExecutionDataIntegrityError(
-                    "订单 refunded 标记与最新可退余额不一致"
-                )
-
             now = self._utc_now()
             try:
                 if action_type is ActionType.REFUND:

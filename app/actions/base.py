@@ -605,6 +605,19 @@ class ActionStore(Protocol):
         """按幂等键认领执行；重复调用返回稳定记录但不重复授予执行权。"""
         raise NotImplementedError
 
+    def reclaim_interrupted_execution(
+        self,
+        *,
+        organization_id: str,
+        execution_id: str,
+    ) -> ExecutionClaim:
+        """重新认领上次进程中断留下的 claimed/running 执行。
+
+        调用方必须已持有单进程执行互斥权，确保本进程内没有
+        其他调用者正在执行该幂等键对应的副作用。
+        """
+        raise NotImplementedError
+
     def get_execution(
         self,
         *,
@@ -646,7 +659,11 @@ class ActionStore(Protocol):
         coupon_valid_days: int | None,
         mark_order_refunded: bool,
     ) -> ExecutionSuccess:
-        """在同一事务内重验上限、写入业务结果并更新执行/提案/Run 状态。"""
+        """在同一事务内重验上限、写入业务结果并更新执行/提案/Run 状态。
+
+        订单是否标记 refunded 由 Store 按事务内最新余额自主决定；
+        `mark_order_refunded` 仅为兼容既有调用签名保留。
+        """
         raise NotImplementedError
 
     def record_execution_failure(

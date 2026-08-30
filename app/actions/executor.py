@@ -20,6 +20,7 @@
 
 import json
 from dataclasses import dataclass
+from threading import Lock
 from typing import Callable, Protocol
 from uuid import uuid4
 
@@ -54,6 +55,21 @@ IDEMPOTENCY_KEY_PREFIX = "action-execution:v1:"
 RESULT_FIELD_BUSINESS_RECORD_ID = "business_record_id"  # 业务结果标识字段
 RESULT_FIELD_ORDER_MARKED_REFUNDED = "order_marked_refunded"  # 订单 refunded 标记字段
 
+# 单进程 MVP 中的幂等键执行锁。锁表由一把全局锁保护，
+# 确保多个执行器实例也不会并发执行同一业务副作用。
+_EXECUTION_LOCKS_GUARD = Lock()
+_EXECUTION_LOCKS: dict[str, Lock] = {}
+
+
+def _get_execution_lock(idempotency_key: str) -> Lock:
+    """返回幂等键对应的进程内共享执行锁。"""
+    with _EXECUTION_LOCKS_GUARD:
+        lock = _EXECUTION_LOCKS.get(idempotency_key)
+        if lock is None:
+            lock = Lock()
+            _EXECUTION_LOCKS[idempotency_key] = lock
+        return lock
+
 
 def build_idempotency_key(
     *,
@@ -79,7 +95,6 @@ class SimulatedRefundResult:
     """退款模拟适配器的执行结果。"""
 
     business_record_id: str  # 模拟退款记录标识（真实记录行由 Store 写入）
-    mark_order_refunded: bool  # 本次执行是否应把订单主状态置为 refunded
 
 
 @dataclass(frozen=True)
@@ -121,9 +136,8 @@ class RetryableFailureInjector:
 class SimulatedRefundAdapter:
     """退款模拟适配器：模拟执行一次退款，不连接真实支付渠道。
 
-    只生成业务结果标识，并根据执行时可退余额计算订单 refunded 标记；
-    金额、余额和引用链校验由 Store 在写结果事务内完成，本适配器不重复
-    判断业务规则。
+    只生成业务结果标识；金额、余额、订单 refunded 标记和引用链
+    校验由 Store 在写结果事务内完成，本适配器不重复判断业务规则。
     """
 
     def __init__(self, *, failure_injector: Callable[[], None] | None = None):
@@ -137,21 +151,16 @@ class SimulatedRefundAdapter:
         currency: str,
         reason_code: str,
         refund_scope: RefundScope,
-        remaining_balance_cents: int,
     ) -> SimulatedRefundResult:
-        """模拟执行退款并返回业务结果标识与订单 refunded 标记。
+        """模拟执行退款并返回业务结果标识。
 
         ``order_id`` 等参数当前仅用于语义表达与日志，模拟实现不产生外部
-        渠道流水；``remaining_balance_cents`` 由执行器在执行前读取。
+        渠道流水；订单是否全额退完由 Store 在成功事务内判断。
         """
         if self._failure_injector is not None:
             self._failure_injector()
-        # 设计 8.2：订单是否标记 refunded 以剩余可退余额是否归零判断，
-        # 不只看 refund_scope（部分退款恰好等于剩余余额时同样全额退完）。
-        mark_order_refunded = amount_cents == remaining_balance_cents
         return SimulatedRefundResult(
             business_record_id=f"refund-sim-{uuid4()}",
-            mark_order_refunded=mark_order_refunded,
         )
 
 
@@ -242,21 +251,49 @@ class IdempotentActionExecutor:
         报告：审批恢复后先进入 running，再认领和执行）；Run 已成功的
         重复调用走只读重放路径，不要求 running。
         """
-        run, proposal, approval, decision, version = (
+        _, proposal, _, _, version = (
             self._load_approved_chain(
                 organization_id=organization_id,
                 run_id=run_id,
             )
         )
+        idempotency_key = build_idempotency_key(
+            organization_id=organization_id,
+            proposal_id=proposal.proposal_id,
+            proposal_version_id=version.version_id,
+            action_type=proposal.action_type,
+        )
+        # 设计非目标不包含多实例调度。单进程内使用全局幂等键锁，
+        # 使同一时刻只有一个调用者能执行模拟副作用；进程重启后
+        # 锁表自然清空，因而可安全重新认领中断留下的记录。
+        with _get_execution_lock(idempotency_key):
+            return self._execute_with_lock(
+                organization_id=organization_id,
+                run_id=run_id,
+                idempotency_key=idempotency_key,
+            )
 
-        # 已成功的执行直接重放稳定结果（设计 15.2），不检查 Run 状态。
+    def _execute_with_lock(
+        self,
+        *,
+        organization_id: str,
+        run_id: str,
+        idempotency_key: str,
+    ) -> ExecutionOutcome:
+        """在进程内幂等键互斥权下执行或恢复一次动作。"""
+        run, proposal, _, _, version = self._load_approved_chain(
+            organization_id=organization_id,
+            run_id=run_id,
+        )
         existing = self._store.get_execution_by_version(
             organization_id=organization_id,
             proposal_version_id=version.version_id,
         )
-        if existing is not None and existing.status is ToolExecutionStatus.SUCCEEDED:
+        if (
+            existing is not None
+            and existing.status is ToolExecutionStatus.SUCCEEDED
+        ):
             return self._replay_success(existing)
-
         if run.status is not ActionRunStatus.RUNNING:
             raise RunStateConflictError(
                 "只有 running 状态的 Run 才能执行动作"
@@ -267,20 +304,23 @@ class IdempotentActionExecutor:
             proposal_id=proposal.proposal_id,
             proposal_version_id=version.version_id,
             action_type=proposal.action_type,
-            idempotency_key=build_idempotency_key(
-                organization_id=organization_id,
-                proposal_id=proposal.proposal_id,
-                proposal_version_id=version.version_id,
-                action_type=proposal.action_type,
-            ),
+            idempotency_key=idempotency_key,
         )
+        if not claim.acquired and claim.status in (
+            ToolExecutionStatus.CLAIMED,
+            ToolExecutionStatus.RUNNING,
+        ):
+            # 已持有全局幂等键锁，因此本进程没有其他活跃调用者。
+            # 此记录必然是上次进程中断残留，可沿用原幂等键重新认领。
+            claim = self._store.reclaim_interrupted_execution(
+                organization_id=organization_id,
+                execution_id=claim.execution_id,
+            )
         if not claim.acquired:
-            # 重复认领：已成功由上方重放路径处理；claimed/running 表示
-            # 执行权不在本次调用方且执行尚未完成，禁止执行副作用。
             if claim.status is ToolExecutionStatus.SUCCEEDED:
                 return self._replay_success(claim.execution)
             raise RunStateConflictError(
-                "执行权不在本次调用方，且执行尚未完成"
+                "执行记录已进入不可重新认领的状态"
             )
 
         execution = self._store.mark_execution_running(
@@ -415,16 +455,8 @@ class IdempotentActionExecutor:
         version: ActionProposalVersion,
         execution: ToolExecution,
     ) -> ExecutionOutcome:
-        """执行退款：读取最新可退余额，调用退款适配器并落库结果。"""
+        """执行退款：调用退款适配器，由 Store 在成功事务内计算余额。"""
         try:
-            remaining_balance = self._store.get_refundable_balance(
-                organization_id=organization_id,
-                order_id=proposal.order_id,
-            )
-            if remaining_balance is None:
-                raise ExecutionDataIntegrityError(
-                    "提案订单不存在或不属于当前企业"
-                )
             parameters = self._parse_version_parameters(
                 version=version,
                 action_type=ActionType.REFUND,
@@ -435,7 +467,6 @@ class IdempotentActionExecutor:
                 currency=version.currency,
                 reason_code=version.reason_code,
                 refund_scope=RefundScope(parameters["refund_scope"]),
-                remaining_balance_cents=remaining_balance,
             )
         except ExecutionRetryableFailureError as exc:
             self._record_failure(
@@ -460,7 +491,6 @@ class IdempotentActionExecutor:
             execution=execution,
             business_record_id=simulated.business_record_id,
             coupon_valid_days=None,
-            mark_order_refunded=simulated.mark_order_refunded,
         )
 
     def _run_compensation(
@@ -507,7 +537,6 @@ class IdempotentActionExecutor:
             execution=execution,
             business_record_id=simulated.business_record_id,
             coupon_valid_days=parameters["coupon_valid_days"],
-            mark_order_refunded=False,
         )
 
     def _record_success(
@@ -519,7 +548,6 @@ class IdempotentActionExecutor:
         execution: ToolExecution,
         business_record_id: str,
         coupon_valid_days: int | None,
-        mark_order_refunded: bool,
     ) -> ExecutionOutcome:
         """由 Store 在同一事务内重验上限、写入业务结果并更新状态。
 
@@ -539,7 +567,9 @@ class IdempotentActionExecutor:
                 reason_code=version.reason_code,
                 business_record_id=business_record_id,
                 coupon_valid_days=coupon_valid_days,
-                mark_order_refunded=mark_order_refunded,
+                # 兼容 Task 2 Store 既有签名；Store 已改为在事务内
+                # 按最新余额自主计算，不再信任该事务外提示值。
+                mark_order_refunded=False,
             )
         except (
             ActionRefundBalanceExceededError,

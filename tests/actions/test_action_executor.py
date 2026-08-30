@@ -8,8 +8,10 @@
 
 import json
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Event
 from uuid import uuid4
 
 import pytest
@@ -773,6 +775,118 @@ def test_executor_replay_returns_same_business_record(tmp_path):
     assert count_rows(scope.database_path, "refund_records") == 1
 
 
+@pytest.mark.parametrize("mark_running", [False, True])
+def test_executor_reclaims_interrupted_claimed_or_running_execution(
+    tmp_path,
+    mark_running,
+):
+    # 保护行为：上次进程在 claimed 或 running 状态中断后，
+    # 新进程沿用原执行记录和幂等键重新认领，不会永久卡死。
+    scope = build_scope(tmp_path)
+    creation = create_refund_workflow(
+        scope.store,
+        organization_id=scope.org_a.organization_id,
+        user_id=scope.alice.user_id,
+        order_id=scope.order_a.order_id,
+    )
+    approve_decision(
+        scope.store,
+        organization_id=scope.org_a.organization_id,
+        approval_id=creation.approval.approval_id,
+        user_id=scope.alice.user_id,
+    )
+    advance_run_to_running(
+        scope.store,
+        organization_id=scope.org_a.organization_id,
+        run_id=creation.run.run_id,
+    )
+    idempotency_key = build_idempotency_key(
+        organization_id=scope.org_a.organization_id,
+        proposal_id=creation.proposal.proposal_id,
+        proposal_version_id=creation.version.version_id,
+        action_type=ActionType.REFUND,
+    )
+    claim = scope.store.claim_execution(
+        organization_id=scope.org_a.organization_id,
+        proposal_id=creation.proposal.proposal_id,
+        proposal_version_id=creation.version.version_id,
+        action_type=ActionType.REFUND,
+        idempotency_key=idempotency_key,
+    )
+    if mark_running:
+        scope.store.mark_execution_running(
+            organization_id=scope.org_a.organization_id,
+            execution_id=claim.execution_id,
+        )
+    outcome = build_executor(scope).execute(
+        organization_id=scope.org_a.organization_id,
+        run_id=creation.run.run_id,
+    )
+    assert outcome.execution.execution_id == claim.execution_id
+    assert outcome.execution.idempotency_key == idempotency_key
+    assert outcome.execution.attempt_count == 2
+    assert outcome.execution.status is ToolExecutionStatus.SUCCEEDED
+    assert count_rows(scope.database_path, "refund_records") == 1
+
+
+def test_executor_process_lock_prevents_active_execution_from_being_reclaimed(tmp_path):
+    # 保护行为：同一进程的首个调用仍在执行适配器时，
+    # 第二个调用必须等待并重放成功结果，不能抢占 running 记录。
+    scope = build_scope(tmp_path)
+    creation = create_refund_workflow(
+        scope.store,
+        organization_id=scope.org_a.organization_id,
+        user_id=scope.alice.user_id,
+        order_id=scope.order_a.order_id,
+    )
+    approve_decision(
+        scope.store,
+        organization_id=scope.org_a.organization_id,
+        approval_id=creation.approval.approval_id,
+        user_id=scope.alice.user_id,
+    )
+    advance_run_to_running(
+        scope.store,
+        organization_id=scope.org_a.organization_id,
+        run_id=creation.run.run_id,
+    )
+    adapter_entered = Event()
+    adapter_release = Event()
+    adapter_calls: list[int] = []  # 退款适配器实际调用次数
+
+    def pause_adapter() -> None:
+        """暂停首次适配器调用，为并发调用创造可观测窗口。"""
+        adapter_calls.append(1)
+        adapter_entered.set()
+        assert adapter_release.wait(timeout=5)
+
+    executor = IdempotentActionExecutor(
+        store=scope.store,
+        refund_adapter=SimulatedRefundAdapter(
+            failure_injector=pause_adapter,
+        ),
+    )
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_future = pool.submit(
+            executor.execute,
+            organization_id=scope.org_a.organization_id,
+            run_id=creation.run.run_id,
+        )
+        assert adapter_entered.wait(timeout=5)
+        second_future = pool.submit(
+            executor.execute,
+            organization_id=scope.org_a.organization_id,
+            run_id=creation.run.run_id,
+        )
+        adapter_release.set()
+        first = first_future.result(timeout=5)
+        second = second_future.result(timeout=5)
+    assert len(adapter_calls) == 1
+    assert first.business_record_id == second.business_record_id
+    assert {first.replayed, second.replayed} == {False, True}
+    assert count_rows(scope.database_path, "refund_records") == 1
+
+
 def test_executor_executes_approved_with_changes_version(tmp_path):
     # 保护行为：修改后批准执行新版本参数（金额与范围），
     # 业务结果严格使用批准版本，原版本保持可审计。
@@ -886,6 +1000,59 @@ def test_executor_refund_balance_exceeded_at_execution(tmp_path):
     )
     assert run.status is ActionRunStatus.FAILED
     assert run.completed_at is not None
+
+
+def test_executor_uses_success_transaction_balance_for_refunded_status(tmp_path):
+    # 保护行为：适配器调用期间发生另一笔合法退款后，
+    # 本次退款仍按成功事务内最新余额判断订单是否全额退完。
+    scope = build_scope(tmp_path)
+    creation = create_refund_workflow(
+        scope.store,
+        organization_id=scope.org_a.organization_id,
+        user_id=scope.alice.user_id,
+        order_id=scope.order_a.order_id,
+        amount_cents=4000,
+    )
+    approve_decision(
+        scope.store,
+        organization_id=scope.org_a.organization_id,
+        approval_id=creation.approval.approval_id,
+        user_id=scope.alice.user_id,
+    )
+    advance_run_to_running(
+        scope.store,
+        organization_id=scope.org_a.organization_id,
+        run_id=creation.run.run_id,
+    )
+
+    def insert_concurrent_refund() -> None:
+        """在适配器与成功写入事务之间插入另一笔退款。"""
+        insert_phantom_refund(
+            scope.database_path,
+            org_id=scope.org_a.organization_id,
+            user_id=scope.alice.user_id,
+            order_id=scope.order_a.order_id,
+            amount_cents=6000,
+        )
+
+    executor = IdempotentActionExecutor(
+        store=scope.store,
+        refund_adapter=SimulatedRefundAdapter(
+            failure_injector=insert_concurrent_refund,
+        ),
+    )
+    outcome = executor.execute(
+        organization_id=scope.org_a.organization_id,
+        run_id=creation.run.run_id,
+    )
+    assert outcome.order_marked_refunded is True
+    assert count_rows(scope.database_path, "refund_records") == 2
+    with sqlite3.connect(scope.database_path) as connection:
+        order_status = connection.execute(
+            "SELECT status FROM orders WHERE id = ?",
+            (scope.order_a.order_id,),
+        ).fetchone()[0]
+    assert order_status == "refunded"
 
 
 # —— 补偿执行 ——
@@ -1107,30 +1274,26 @@ def test_executor_retryable_failure_reuses_key_and_increments_attempt(tmp_path):
 # —— 适配器单元行为 ——
 
 
-def test_refund_adapter_marks_order_refunded_only_when_balance_exhausted():
-    # 边界情况：退款适配器只有在金额等于可退余额（退完）时才标记
-    # 订单 refunded，部分退款即使接近全额也不标记（设计 8.2）。
+def test_refund_adapter_only_generates_simulated_record_id():
+    # 保护行为：退款适配器只生成模拟业务结果标识，
+    # 不根据事务外余额快照决定订单 refunded 状态。
     adapter = SimulatedRefundAdapter()
-    partial = adapter.execute(
+    first = adapter.execute(
         order_id="order-1",
         amount_cents=6000,
         currency="CNY",
         reason_code="quality_issue",
         refund_scope=RefundScope.PARTIAL,
-        remaining_balance_cents=10000,
     )
-    assert partial.mark_order_refunded is False
-    # 部分退款恰好等于剩余余额（等于全部退完）时同样标记 refunded。
-    exhausted = adapter.execute(
+    second = adapter.execute(
         order_id="order-1",
-        amount_cents=4000,
+        amount_cents=6000,
         currency="CNY",
         reason_code="quality_issue",
         refund_scope=RefundScope.PARTIAL,
-        remaining_balance_cents=4000,
     )
-    assert exhausted.mark_order_refunded is True
-    assert partial.business_record_id != exhausted.business_record_id
+    assert first.business_record_id.startswith("refund-sim-")
+    assert first.business_record_id != second.business_record_id
 
 
 def test_compensation_adapter_generates_stable_record_id():
