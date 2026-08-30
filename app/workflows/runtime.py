@@ -16,12 +16,12 @@ from langgraph.types import Command
 
 from app.actions.base import (
     ActionError,
-    ActionRunStatus,
     ActionStore,
     CheckpointUnavailableError,
 )
 from app.actions.service import ActionWorkflowRunner
 from app.core.config import get_action_workflow_version
+from app.workflows.action_graph import NODE_AWAIT_DECISION
 
 
 class LangGraphActionWorkflowRunner:
@@ -50,43 +50,44 @@ class LangGraphActionWorkflowRunner:
             organization_id=organization_id,
             run_id=run_id,
             resume_decision_id=None,
+            resume=False,
         )
 
     def resume(self, *, organization_id: str, run_id: str) -> None:
         """恢复：从既有 checkpoint 继续运行图（含首次启动失败后的重试）。
 
-        等待审批的 Run 处于中断点，需要携带持久化的 ``decision_id``
-        通过 ``Command(resume=...)`` 推进；其余状态（queued/running/
-        可重试失败）没有待恢复的中断，从 START 重新运行并按业务库状态
-        路由。``thread_id`` 始终取自 ``action_runs.thread_id``。
+        运行器先读取真实 checkpoint：审批中断使用持久化 ``decision_id``
+        和 ``Command(resume=...)``，其他未完成节点使用 ``invoke(None)``
+        原位继续；checkpoint 不存在或图已结束时从 START 按业务库事实
+        重建路由。``thread_id`` 始终取自 ``action_runs.thread_id``。
         """
         run = self._store.get_run(
             organization_id=organization_id,
             run_id=run_id,
         )
         resume_decision_id = None
-        if run.status is ActionRunStatus.AWAITING_APPROVAL:
-            # 中断点在审批节点：读取持久化决定作为恢复值；
-            # 决定缺失时仍显式恢复，由图的执行分支失败关闭。
-            if run.proposal_id is not None:
-                proposal = self._store.get_proposal(
-                    organization_id=organization_id,
-                    proposal_id=run.proposal_id,
-                )
-                approval = self._store.get_approval_by_proposal(
-                    organization_id=organization_id,
-                    proposal_id=proposal.proposal_id,
-                )
-                decision = self._store.get_decision(
-                    organization_id=organization_id,
-                    approval_id=approval.approval_id,
-                )
-                if decision is not None:
-                    resume_decision_id = decision.decision_id
+        if run.proposal_id is not None:
+            # 决定是否存在与 Run 当前状态分开判断：进程可能已把 Run 推进到
+            # running，却尚未来得及完成审批中断节点的 checkpoint。
+            proposal = self._store.get_proposal(
+                organization_id=organization_id,
+                proposal_id=run.proposal_id,
+            )
+            approval = self._store.get_approval_by_proposal(
+                organization_id=organization_id,
+                proposal_id=proposal.proposal_id,
+            )
+            decision = self._store.get_decision(
+                organization_id=organization_id,
+                approval_id=approval.approval_id,
+            )
+            if decision is not None:
+                resume_decision_id = decision.decision_id
         self._invoke(
             organization_id=organization_id,
             run_id=run_id,
             resume_decision_id=resume_decision_id,
+            resume=True,
         )
 
     # —— 内部实现 ——
@@ -97,6 +98,7 @@ class LangGraphActionWorkflowRunner:
         organization_id: str,
         run_id: str,
         resume_decision_id: str | None,
+        resume: bool,
     ) -> None:
         """执行一次图调用，并把基础设施异常归一化为稳定错误码。"""
         run = self._store.get_run(
@@ -112,7 +114,7 @@ class LangGraphActionWorkflowRunner:
             }
         }
         try:
-            if resume_decision_id is None:
+            if not resume:
                 self._graph.invoke(
                     {
                         "run_id": run_id,
@@ -121,16 +123,37 @@ class LangGraphActionWorkflowRunner:
                     config,
                 )
             else:
-                self._graph.invoke(
-                    Command(
-                        resume={"decision_id": resume_decision_id},
-                        update={
+                snapshot = self._graph.get_state(config)
+                pending_nodes = tuple(snapshot.next)
+                if (
+                    NODE_AWAIT_DECISION in pending_nodes
+                    and resume_decision_id is not None
+                ):
+                    # 存在真实审批中断 checkpoint 时使用 Command 恢复。
+                    self._graph.invoke(
+                        Command(
+                            resume={"decision_id": resume_decision_id},
+                            update={
+                                "run_id": run_id,
+                                "organization_id": organization_id,
+                            },
+                        ),
+                        config,
+                    )
+                elif pending_nodes:
+                    # 非审批中断节点在崩溃后从原 checkpoint 继续，避免从
+                    # START 错误重置业务阶段。
+                    self._graph.invoke(None, config)
+                else:
+                    # checkpoint 不存在或图已结束：从 START 按业务库事实
+                    # 重建路由，支持决定提交后 checkpoint 丢失与失败重试。
+                    self._graph.invoke(
+                        {
                             "run_id": run_id,
                             "organization_id": organization_id,
                         },
-                    ),
-                    config,
-                )
+                        config,
+                    )
         except ActionError:
             # 领域稳定错误码原样传播，由应用服务统一映射。
             raise

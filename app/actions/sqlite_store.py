@@ -2556,6 +2556,86 @@ class SQLiteActionStore(ActionStore):
             execution_id=execution_id,
         )
 
+    def record_workflow_failure(
+        self,
+        *,
+        organization_id: str,
+        run_id: str,
+        error_code: str,
+        retryable: bool,
+    ) -> ActionRun:
+        """在执行认领前失败时原子更新 Proposal、Run 与失败审计。
+
+        批准链损坏等错误可能发生在创建 ``tool_executions`` 之前，此时不能
+        调用 ``record_execution_failure``。本方法保证图进入失败终点前，
+        业务数据库中已经形成可查询的稳定失败事实。
+        """
+        with self._immediate_transaction() as connection:
+            run_row = self._load_run_row(
+                connection,
+                organization_id=organization_id,
+                run_id=run_id,
+            )
+            run = self._to_run(run_row)
+            if run.status is ActionRunStatus.FAILED:
+                return run
+            if run.status is not ActionRunStatus.RUNNING:
+                raise RunStateConflictError(
+                    "只有 running 状态的 Run 可以记录工作流失败"
+                )
+            if run.proposal_id is None:
+                raise ExecutionDataIntegrityError(
+                    "工作流失败时 Run 缺少提案引用"
+                )
+            proposal_row = self._load_proposal_row(
+                connection,
+                organization_id=organization_id,
+                proposal_id=run.proposal_id,
+            )
+            if proposal_row["run_id"] != run_id:
+                raise ExecutionDataIntegrityError(
+                    "工作流失败时 Run 与提案引用链不一致"
+                )
+            now = self._utc_now()
+            self._transition_proposal(
+                connection,
+                organization_id=organization_id,
+                proposal_id=run.proposal_id,
+                allowed_statuses={
+                    ProposalStatus.APPROVED,
+                    ProposalStatus.EXECUTING,
+                    ProposalStatus.FAILED,
+                },
+                new_status=ProposalStatus.FAILED,
+                updated_at=now,
+            )
+            failed_run_row = self._transition_run_row(
+                connection,
+                organization_id=organization_id,
+                run_id=run_id,
+                allowed_statuses={ActionRunStatus.RUNNING},
+                new_status=ActionRunStatus.FAILED,
+                error_code=error_code,
+                error_retryable=retryable,
+                updated_at=now,
+            )
+            self._append_audit(
+                connection,
+                organization_id=organization_id,
+                run_id=run_id,
+                proposal_id=run.proposal_id,
+                actor_type=AuditActorType.SYSTEM,
+                actor_user_id=None,
+                event_type=EVENT_RUN_FAILED,
+                resource_type="action_run",
+                resource_id=run_id,
+                details_json=json.dumps(
+                    {"error_code": error_code, "retryable": retryable}
+                ),
+                created_at=now,
+            )
+        return self._to_run(failed_run_row)
+
     # —— 审计 ——
 
     def list_audit_logs(

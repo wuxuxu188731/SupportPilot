@@ -689,6 +689,17 @@ class ActionStore(Protocol):
         """把执行标记为可重试或终态失败，并更新关联 Run 状态。"""
         raise NotImplementedError
 
+    def record_workflow_failure(
+        self,
+        *,
+        organization_id: str,
+        run_id: str,
+        error_code: str,
+        retryable: bool,
+    ) -> ActionRun:
+        """在尚无执行记录时原子记录 Proposal 与 Run 的失败终态。"""
+        raise NotImplementedError
+
     def list_audit_logs(
         self,
         *,

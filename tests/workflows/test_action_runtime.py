@@ -17,11 +17,15 @@ from app.actions.base import (
     ActionStore,
     ActionType,
     ApprovalDecisionType,
+    AuditActorType,
     CheckpointUnavailableError,
     ProposalStatus,
     ToolExecutionStatus,
 )
-from app.actions.executor import RetryableFailureInjector
+from app.actions.executor import (
+    RetryableFailureInjector,
+    build_idempotency_key,
+)
 from app.actions.factory import build_action_executor
 from app.actions.sqlite_store import SQLiteActionStore
 from app.customers.sqlite_store import SQLiteCustomerStore
@@ -259,6 +263,124 @@ def test_runtime_resume_after_decision_executes(tmp_path):
         proposal_version_id=decided.decided_version.version_id,
     )
     assert execution.status is ToolExecutionStatus.SUCCEEDED
+
+
+def test_runtime_rebuilds_from_business_state_when_checkpoint_is_missing(tmp_path):
+    # 保护行为：审批决定已经持久化但原 checkpoint 丢失时，恢复应从 START
+    # 按业务库事实重建并执行成功，不能静默返回后仍停留在等待审批。
+    scope = build_scope(tmp_path)
+    creation = create_refund_workflow(
+        scope.store,
+        organization_id=scope.org_a.organization_id,
+        user_id=scope.alice.user_id,
+        order_id=scope.order_a.order_id,
+    )
+    original_runner = build_runtime(scope, tmp_path)
+    original_runner.start(
+        organization_id=scope.org_a.organization_id,
+        run_id=creation.run.run_id,
+    )
+    approve_decision(
+        scope.store,
+        organization_id=scope.org_a.organization_id,
+        approval_id=creation.approval.approval_id,
+        user_id=scope.alice.user_id,
+    )
+
+    replacement_checkpointer = create_sqlite_checkpointer(
+        tmp_path / "replacement-checkpoints.db"
+    )
+    replacement_graph = build_action_graph(
+        store=scope.store,
+        executor=build_action_executor(scope.store),
+        checkpointer=replacement_checkpointer,
+    )
+    replacement_runner = LangGraphActionWorkflowRunner(
+        store=scope.store,
+        graph=replacement_graph,
+    )
+    replacement_runner.resume(
+        organization_id=scope.org_a.organization_id,
+        run_id=creation.run.run_id,
+    )
+
+    run = scope.store.get_run(
+        organization_id=scope.org_a.organization_id,
+        run_id=creation.run.run_id,
+    )
+    assert run.status is ActionRunStatus.SUCCEEDED
+    assert count_rows(scope.database_path, "refund_records") == 1
+
+
+def test_runtime_recovers_approved_running_execution_without_regression(tmp_path):
+    # 保护行为：审批后 Run 和执行记录已进入 running 但进程中断时，恢复应
+    # 重新认领原执行记录并成功，不能把 Run 退回 awaiting_approval。
+    scope = build_scope(tmp_path)
+    creation = create_refund_workflow(
+        scope.store,
+        organization_id=scope.org_a.organization_id,
+        user_id=scope.alice.user_id,
+        order_id=scope.order_a.order_id,
+    )
+    runner = build_runtime(scope, tmp_path)
+    runner.start(
+        organization_id=scope.org_a.organization_id,
+        run_id=creation.run.run_id,
+    )
+    decided = approve_decision(
+        scope.store,
+        organization_id=scope.org_a.organization_id,
+        approval_id=creation.approval.approval_id,
+        user_id=scope.alice.user_id,
+    )
+    scope.store.transition_run(
+        organization_id=scope.org_a.organization_id,
+        run_id=creation.run.run_id,
+        expected_statuses=(ActionRunStatus.AWAITING_APPROVAL,),
+        new_status=ActionRunStatus.RUNNING,
+        error_code=None,
+        error_retryable=False,
+        actor_type=AuditActorType.SYSTEM,
+        actor_user_id=None,
+        event_type="run_resumed",
+        details_json="{}",
+    )
+    idempotency_key = build_idempotency_key(
+        organization_id=scope.org_a.organization_id,
+        proposal_id=creation.proposal.proposal_id,
+        proposal_version_id=decided.decided_version.version_id,
+        action_type=ActionType.REFUND,
+    )
+    claim = scope.store.claim_execution(
+        organization_id=scope.org_a.organization_id,
+        proposal_id=creation.proposal.proposal_id,
+        proposal_version_id=decided.decided_version.version_id,
+        action_type=ActionType.REFUND,
+        idempotency_key=idempotency_key,
+    )
+    interrupted = scope.store.mark_execution_running(
+        organization_id=scope.org_a.organization_id,
+        execution_id=claim.execution_id,
+    )
+
+    runner.resume(
+        organization_id=scope.org_a.organization_id,
+        run_id=creation.run.run_id,
+    )
+
+    run = scope.store.get_run(
+        organization_id=scope.org_a.organization_id,
+        run_id=creation.run.run_id,
+    )
+    execution = scope.store.get_execution_by_version(
+        organization_id=scope.org_a.organization_id,
+        proposal_version_id=decided.decided_version.version_id,
+    )
+    assert run.status is ActionRunStatus.SUCCEEDED
+    assert execution.execution_id == interrupted.execution_id
+    assert execution.status is ToolExecutionStatus.SUCCEEDED
+    assert execution.attempt_count == 2
+    assert count_rows(scope.database_path, "refund_records") == 1
 
 
 def test_runtime_resume_rejected_run_cancels(tmp_path):

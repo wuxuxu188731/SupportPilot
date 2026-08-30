@@ -135,11 +135,32 @@ def build_action_graph(
             organization_id=organization_id,
             run_id=run_id,
         )
-        if run.status in (ActionRunStatus.QUEUED, ActionRunStatus.RUNNING):
-            # 首次启动或中断后的重放：先进等待节点，再按业务库决定分支。
+        if run.status is ActionRunStatus.QUEUED:
+            # 首次启动：必须经过 running 再进入等待审批。
             return NODE_MARK_AWAITING
-        if run.status is ActionRunStatus.AWAITING_APPROVAL:
-            # checkpoint 丢失后的恢复：重新进入审批中断点。
+        if run.status in (
+            ActionRunStatus.RUNNING,
+            ActionRunStatus.AWAITING_APPROVAL,
+        ):
+            proposal = store.get_proposal_by_run(
+                organization_id=organization_id,
+                run_id=run_id,
+            )
+            approval = store.get_approval_by_proposal(
+                organization_id=organization_id,
+                proposal_id=proposal.proposal_id,
+            )
+            decision = store.get_decision(
+                organization_id=organization_id,
+                approval_id=approval.approval_id,
+            )
+            if decision is not None:
+                # 审批后或 checkpoint 丢失的恢复必须直接进入决定分支，
+                # 不能把已批准的 running Run 退回 awaiting_approval。
+                return NODE_LOAD_DECISION
+            if run.status is ActionRunStatus.RUNNING:
+                # 首次启动在两次状态转换之间中断，补齐等待状态。
+                return NODE_MARK_AWAITING
             return NODE_AWAIT_DECISION
         if run.status is ActionRunStatus.FAILED and run.last_error_retryable:
             # 可重试失败恢复：跳过等待，直接读取决定并重试执行。
@@ -334,15 +355,27 @@ def build_action_graph(
                 run_id=run_id,
             )
         except ActionError as exc:
-            # 执行器已把失败写入执行记录与 Run 状态（可重试或终态），
-            # 这里只把稳定错误码映射进图状态。
+            # 执行器通常会把失败写入执行记录与 Run；批准链校验等异常可能
+            # 发生在执行认领之前，此时由工作流补齐 Proposal、Run 与审计。
+            failed_run = store.get_run(
+                organization_id=organization_id,
+                run_id=run_id,
+            )
+            retryable = isinstance(exc, ExecutionRetryableFailureError)
+            if failed_run.status is ActionRunStatus.RUNNING:
+                failed_run = store.record_workflow_failure(
+                    organization_id=organization_id,
+                    run_id=run_id,
+                    error_code=exc.code,
+                    retryable=retryable,
+                )
+            elif failed_run.status is not ActionRunStatus.FAILED:
+                raise
             return {
                 "execution_id": None,
                 "outcome": OUTCOME_FAILED,
-                "error_code": exc.code,
-                "error_retryable": isinstance(
-                    exc, ExecutionRetryableFailureError
-                ),
+                "error_code": failed_run.last_error_code or exc.code,
+                "error_retryable": failed_run.last_error_retryable,
             }
         return {
             "execution_id": outcome.execution.execution_id,

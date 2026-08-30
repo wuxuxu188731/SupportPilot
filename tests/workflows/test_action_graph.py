@@ -23,6 +23,7 @@ from app.actions.base import (
     ActionStore,
     ActionType,
     ApprovalDecisionType,
+    ExecutionDataIntegrityError,
     NewProposalVersion,
     ProposalStatus,
     RunStateConflictError,
@@ -715,6 +716,71 @@ def test_retryable_failure_then_resume_succeeds(tmp_path):
     assert succeeded.execution_id == failed.execution_id
     assert succeeded.attempt_count == 2
     assert count_rows(scope.database_path, "refund_records") == 1
+
+
+class PreClaimFailureExecutor:
+    """在创建执行记录前模拟批准链数据损坏的执行器。"""
+
+    def execute(self, *, organization_id: str, run_id: str):
+        """抛出稳定的数据完整性错误，不自行写入执行失败记录。"""
+        raise ExecutionDataIntegrityError("批准链数据损坏")
+
+
+def test_pre_claim_executor_failure_persists_run_and_proposal_failure(tmp_path):
+    # 保护行为：执行认领前发生稳定领域错误时，图进入 END 之前必须原子
+    # 写入 Proposal、Run 和失败审计，不能留下永久 running 状态。
+    scope = build_scope(tmp_path)
+    creation = create_refund_workflow(
+        scope.store,
+        organization_id=scope.org_a.organization_id,
+        user_id=scope.alice.user_id,
+        order_id=scope.order_a.order_id,
+    )
+    graph = build_action_graph(
+        store=scope.store,
+        executor=PreClaimFailureExecutor(),
+        checkpointer=create_sqlite_checkpointer(tmp_path / "checkpoints.db"),
+    )
+    start_graph(
+        graph,
+        organization_id=scope.org_a.organization_id,
+        run_id=creation.run.run_id,
+        thread_id=creation.run.thread_id,
+    )
+    decided = approve_decision(
+        scope.store,
+        organization_id=scope.org_a.organization_id,
+        approval_id=creation.approval.approval_id,
+        user_id=scope.alice.user_id,
+    )
+    result = resume_graph(
+        graph,
+        organization_id=scope.org_a.organization_id,
+        run_id=creation.run.run_id,
+        thread_id=creation.run.thread_id,
+        decision_id=decided.decision.decision_id,
+    )
+
+    run = scope.store.get_run(
+        organization_id=scope.org_a.organization_id,
+        run_id=creation.run.run_id,
+    )
+    proposal = scope.store.get_proposal(
+        organization_id=scope.org_a.organization_id,
+        proposal_id=creation.proposal.proposal_id,
+    )
+    assert result.get("outcome") == OUTCOME_FAILED
+    assert result.get("error_code") == "EXECUTION_DATA_INTEGRITY_ERROR"
+    assert run.status is ActionRunStatus.FAILED
+    assert run.last_error_code == "EXECUTION_DATA_INTEGRITY_ERROR"
+    assert run.last_error_retryable is False
+    assert proposal.status is ProposalStatus.FAILED
+    assert count_audit_events(
+        scope,
+        run_id=creation.run.run_id,
+        event_type="run_failed",
+    ) == 1
+    assert count_rows(scope.database_path, "tool_executions") == 0
 
 
 def test_terminal_run_restart_rejected(tmp_path):
