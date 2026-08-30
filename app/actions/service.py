@@ -92,13 +92,17 @@ class ActionWorkflowRunner(Protocol):
     Task 5 由 LangGraph 实现：只负责按 Run 推进确定性状态机，
     不调用 LLM、不选择工具、不判断调用者权限。失败必须抛出携带
     稳定错误码的 ``ActionError``。
+
+    所有方法必须显式接收 ``organization_id``：运行器需要按租户读取
+    Run（含 checkpoint 的 ``thread_id``）与持久化决定，不允许使用
+    不带租户条件的查询。
     """
 
-    def start(self, *, run_id: str) -> None:
+    def start(self, *, organization_id: str, run_id: str) -> None:
         """首次启动：从当前 Run 位置运行图直到 interrupt 或终态。"""
         raise NotImplementedError
 
-    def resume(self, *, run_id: str) -> None:
+    def resume(self, *, organization_id: str, run_id: str) -> None:
         """恢复：从既有 checkpoint 继续运行图（含首次启动失败后的重试）。"""
         raise NotImplementedError
 
@@ -249,7 +253,10 @@ class ActionWorkflowService:
             reason_text=reason_text,
             parameters_json=parameters_json,
         )
-        start_ok, start_error_code = self._try_start(creation.run.run_id)
+        start_ok, start_error_code = self._try_start(
+            organization_id,
+            creation.run.run_id,
+        )
         latest_run = self._store.get_run(
             organization_id=organization_id,
             run_id=creation.run.run_id,
@@ -438,7 +445,10 @@ class ActionWorkflowService:
                 resume_error_code=None,
                 self_approved=self._is_self_approved(result),
             )
-        resume_ok, resume_error_code = self._try_resume(run.run_id)
+        resume_ok, resume_error_code = self._try_resume(
+            organization_id,
+            run.run_id,
+        )
         latest_run = self._store.get_run(
             organization_id=organization_id,
             run_id=run.run_id,
@@ -646,7 +656,10 @@ class ActionWorkflowService:
                 {"requested_by_user_id": requested_by_user_id}
             ),
         )
-        resume_ok, error_code = self._try_resume(run_id)
+        resume_ok, error_code = self._try_resume(
+            organization_id,
+            run_id,
+        )
         status = self.get_run_status(
             organization_id=organization_id,
             run_id=run_id,
@@ -716,22 +729,36 @@ class ActionWorkflowService:
                 "只有当前企业管理员可以执行此操作"
             )
 
-    def _try_start(self, run_id: str) -> tuple[bool, str | None]:
+    def _try_start(
+        self,
+        organization_id: str,
+        run_id: str,
+    ) -> tuple[bool, str | None]:
         """尝试首次启动工作流；失败时业务事实已持久化，可稍后显式恢复。"""
         if self._runner is None:
             return False, CheckpointUnavailableError.code
         try:
-            self._runner.start(run_id=run_id)
+            self._runner.start(
+                organization_id=organization_id,
+                run_id=run_id,
+            )
         except ActionError as exc:
             return False, exc.code
         return True, None
 
-    def _try_resume(self, run_id: str) -> tuple[bool, str | None]:
+    def _try_resume(
+        self,
+        organization_id: str,
+        run_id: str,
+    ) -> tuple[bool, str | None]:
         """尝试恢复工作流；失败时决定仍然有效，可再次显式恢复。"""
         if self._runner is None:
             return False, CheckpointUnavailableError.code
         try:
-            self._runner.resume(run_id=run_id)
+            self._runner.resume(
+                organization_id=organization_id,
+                run_id=run_id,
+            )
         except ActionError as exc:
             return False, exc.code
         return True, None

@@ -2,6 +2,9 @@ from fastapi import FastAPI
 
 from app.agent.prompts import SUPPORT_SYSTEM_PROMPT
 from app.agent.support_runner import CustomerSupportAgentRunner
+from app.actions.factory import build_action_executor
+from app.actions.service import ActionWorkflowService
+from app.actions.sqlite_store import SQLiteActionStore
 from app.api.router import creat_conversation_router
 from app.api.auth_router import create_auth_router
 from app.api.dependencies import create_current_user_dependency, create_current_tenant_dependency
@@ -16,7 +19,8 @@ from app.core.config import (
   get_chat_db_path,
   get_auth_secret_key,
   get_access_token_ttl_seconds,
-  get_knowledge_settings
+  get_knowledge_settings,
+  get_checkpoint_db_path
 )
 from app.api.knowledge_router import create_knowledge_router
 from app.knowledge.factory import create_knowledge_services
@@ -26,6 +30,9 @@ from app.users.sqlite_store import SQLiteUserStore
 from app.tools.support_factory import create_customer_support_tool_gateway
 from app.tools.knowledge_gateway import KnowledgeToolGateway
 from app.tools.composite_gateway import CompositeToolGateway
+from app.workflows.action_graph import build_action_graph
+from app.workflows.checkpointer import create_sqlite_checkpointer
+from app.workflows.runtime import LangGraphActionWorkflowRunner
 
 
 
@@ -41,6 +48,26 @@ organization_store = SQLiteOrganizationStore(database_path=database_path)
 organization_service = OrganizationService(
     organization_store=organization_store,
     user_store=user_store,
+)
+
+# 退款/补偿审批工作流装配：业务 Store -> 幂等执行器 -> LangGraph 图 ->
+# 运行器 -> 应用服务。checkpoint 使用独立 SQLite 文件（设计 11.4）。
+action_store = SQLiteActionStore(database_path=database_path)
+action_executor = build_action_executor(action_store)
+action_checkpointer = create_sqlite_checkpointer(get_checkpoint_db_path())
+action_graph = build_action_graph(
+    store=action_store,
+    executor=action_executor,
+    checkpointer=action_checkpointer,
+)
+action_runner = LangGraphActionWorkflowRunner(
+    store=action_store,
+    graph=action_graph,
+)
+action_service = ActionWorkflowService(
+    store=action_store,
+    organization_service=organization_service,
+    runner=action_runner,
 )
 
 support_tool_gateway = create_customer_support_tool_gateway(

@@ -87,18 +87,18 @@ class FakeWorkflowRunner:
         start_error: ActionError | None = None,
         resume_error: ActionError | None = None,
     ):
-        self.started: list[str] = []  # 已启动的 Run 标识
-        self.resumed: list[str] = []  # 已恢复的 Run 标识
+        self.started: list[tuple[str, str]] = []  # 已启动的（企业, Run）标识
+        self.resumed: list[tuple[str, str]] = []  # 已恢复的（企业, Run）标识
         self.start_error = start_error  # 首次启动注入的失败，可运行中修改
         self.resume_error = resume_error  # 恢复注入的失败，可运行中修改
 
-    def start(self, *, run_id: str) -> None:
-        self.started.append(run_id)
+    def start(self, *, organization_id: str, run_id: str) -> None:
+        self.started.append((organization_id, run_id))
         if self.start_error is not None:
             raise self.start_error
 
-    def resume(self, *, run_id: str) -> None:
-        self.resumed.append(run_id)
+    def resume(self, *, organization_id: str, run_id: str) -> None:
+        self.resumed.append((organization_id, run_id))
         if self.resume_error is not None:
             raise self.resume_error
 
@@ -111,16 +111,16 @@ class StateChangingWorkflowRunner(FakeWorkflowRunner):
         self.store = store  # 被测动作存储
         self.organization_id = organization_id  # 状态推进所属企业
 
-    def start(self, *, run_id: str) -> None:
-        super().start(run_id=run_id)
+    def start(self, *, organization_id: str, run_id: str) -> None:
+        super().start(organization_id=organization_id, run_id=run_id)
         advance_to_awaiting(
             self.store,
             organization_id=self.organization_id,
             run_id=run_id,
         )
 
-    def resume(self, *, run_id: str) -> None:
-        super().resume(run_id=run_id)
+    def resume(self, *, organization_id: str, run_id: str) -> None:
+        super().resume(organization_id=organization_id, run_id=run_id)
         run = self.store.get_run(
             organization_id=self.organization_id,
             run_id=run_id,
@@ -545,7 +545,9 @@ def test_create_starts_workflow_after_persist(tmp_path):
     outcome = create_refund(service, scope)
     assert outcome.start_ok is True
     assert outcome.start_error_code is None
-    assert runner.started == [outcome.creation.run.run_id]
+    assert runner.started == [
+        (scope.org_a.organization_id, outcome.creation.run.run_id)
+    ]
 
 
 def test_create_returns_latest_run_after_workflow_start(tmp_path):
@@ -624,7 +626,7 @@ def test_decide_approved_records_decision_and_resumes(tmp_path):
     assert decision_outcome.result.decided_version.version_id == outcome.creation.version.version_id
     assert decision_outcome.resume_required is False
     assert decision_outcome.resume_error_code is None
-    assert runner.resumed == [run_id]
+    assert runner.resumed == [(scope.org_a.organization_id, run_id)]
 
 
 def test_decide_returns_latest_run_after_workflow_resume(tmp_path):
@@ -1074,7 +1076,9 @@ def test_resume_succeeded_run_returns_stable_result(tmp_path):
         == execution_success.business_record_id
     )
     # 只有决定落库时触发过一次自动恢复，成功重试不再执行图。
-    assert runner.resumed == [outcome.creation.run.run_id]
+    assert runner.resumed == [
+        (scope.org_a.organization_id, outcome.creation.run.run_id)
+    ]
 
 
 def test_resume_run_rejects_unapproved_waiting_run(tmp_path):
@@ -1130,8 +1134,8 @@ def test_resume_run_recovers_after_failed_auto_resume(tmp_path):
     )
     # 恢复失败的自动恢复也记录了调用。
     assert runner.resumed == [
-        outcome.creation.run.run_id,
-        outcome.creation.run.run_id,
+        (scope.org_a.organization_id, outcome.creation.run.run_id),
+        (scope.org_a.organization_id, outcome.creation.run.run_id),
     ]
 
 

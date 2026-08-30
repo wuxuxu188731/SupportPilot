@@ -497,6 +497,18 @@ class ActionStore(Protocol):
         """
         raise NotImplementedError
 
+    def get_order_number(
+        self,
+        *,
+        organization_id: str,
+        order_id: str,
+    ) -> str | None:
+        """返回订单号，用于审批中断载荷中的掩码展示。
+
+        订单不存在或不属于当前企业时返回 None，调用方按引用链损坏处理。
+        """
+        raise NotImplementedError
+
     def transition_run(
         self,
         *,

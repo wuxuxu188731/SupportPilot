@@ -1015,6 +1015,29 @@ class SQLiteActionStore(ActionStore):
             )
         return int(order_row["total_amount_cents"]) - refunded
 
+    def get_order_number(
+        self,
+        *,
+        organization_id: str,
+        order_id: str,
+    ) -> str | None:
+        """返回订单号，供审批中断载荷掩码展示使用。
+
+        订单不存在或不属于当前企业时返回 None，调用方按引用链损坏处理。
+        """
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT order_no
+                FROM orders
+                WHERE organization_id = ? AND id = ?
+                """,
+                (organization_id, order_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return row["order_no"]
+
     def transition_run(
         self,
         *,

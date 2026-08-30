@@ -15,6 +15,22 @@ def create_llm_client()-> OpenAI:
 def get_chat_db_path()->str:
   return os.getenv("CHAT_DB_PATH","chat_history.db")
 
+def get_checkpoint_db_path()->str:
+  """返回 LangGraph checkpoint 数据库路径。
+
+  设计 11.4：checkpoint 使用独立 SQLite 文件，避免与 Alembic 管理的
+  业务表混杂。
+  """
+  return os.getenv("LANGGRAPH_CHECKPOINT_DB_PATH","langgraph_checkpoint.db")
+
+def get_action_workflow_version()->str:
+  """返回动作工作流版本标识。
+
+  设计 11.4：图拓扑与 State schema 的不兼容修改必须伴随 workflow
+  版本迁移策略；本阶段固定为 refund-compensation-v1。
+  """
+  return os.getenv("ACTION_WORKFLOW_VERSION","refund-compensation-v1")
+
 def get_auth_secret_key()->str:
   secret_key = os.getenv("AUTH_SECRET_KEY","")
   if len(secret_key)<32 :
