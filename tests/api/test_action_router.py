@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
@@ -786,6 +787,28 @@ def test_invalid_changes_amount_rejected_422(tmp_path):
     assert count_rows(scope.database_path, "approval_decisions") == 0
 
 
+@pytest.mark.parametrize("invalid_amount", [800.0, "800", True])
+def test_changes_amount_rejects_coercible_non_integer_types(
+    tmp_path,
+    invalid_amount,
+):
+    # 边界情况：金额即使可被 Pydantic 转换为整数，只要 JSON 原始类型
+    # 不是整数就必须返回 422，禁止浮点、字符串和布尔值进入批准版本。
+    scope, clients, service, runner = build_fake_clients(tmp_path)
+    ids = create_refund_proposal(service, scope)
+
+    response = clients["alice_a"].post(
+        f"/approvals/{ids['approval_id']}/decisions/",
+        json={
+            "decision": "approved_with_changes",
+            "changes": {"amount_cents": invalid_amount},
+        },
+    )
+
+    assert response.status_code == 422
+    assert count_rows(scope.database_path, "approval_decisions") == 0
+
+
 # —— 恢复接口 ——
 
 
@@ -834,6 +857,31 @@ def test_concurrent_different_decisions_single_winner(tmp_path):
     )
     assert ok_count == 1
     assert conflict_count == 1
+    assert count_rows(scope.database_path, "approval_decisions") == 1
+
+
+def test_concurrent_same_decision_returns_created_and_replayed_once(tmp_path):
+    # 边界情况：两个管理员并发提交完全相同的决定时，Store 事务必须
+    # 原子区分首次创建与幂等重放，只允许一次自动恢复并返回 201/200。
+    scope, clients, service, runner = build_fake_clients(tmp_path)
+    ids = create_refund_proposal(service, scope)
+
+    def decide(client_name: str):
+        return clients[client_name].post(
+            f"/approvals/{ids['approval_id']}/decisions/",
+            json={"decision": "approved"},
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(decide, "alice_a"),
+            pool.submit(decide, "dave_a"),
+        ]
+        responses = [future.result() for future in futures]
+
+    assert sorted(response.status_code for response in responses) == [200, 201]
+    assert len({response.json()["decision_id"] for response in responses}) == 1
+    assert len(runner.resumed) == 1
     assert count_rows(scope.database_path, "approval_decisions") == 1
 
 

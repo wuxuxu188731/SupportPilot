@@ -428,6 +428,24 @@ class ActionWorkflowService:
             new_version=new_version,
         )
         run = result.run
+        if not result.created:
+            # 幂等重放只返回首次决定与当前 Run，不再次触发自动恢复。
+            # 首次恢复若失败，调用方应使用显式恢复 API，避免并发相同
+            # 决定重复推进同一个 checkpoint。
+            latest_run = self._store.get_run(
+                organization_id=organization_id,
+                run_id=run.run_id,
+            )
+            result = replace(result, run=latest_run)
+            return DecisionOutcome(
+                result=result,
+                resume_required=latest_run.status in (
+                    ActionRunStatus.QUEUED,
+                    ActionRunStatus.AWAITING_APPROVAL,
+                ),
+                resume_error_code=None,
+                self_approved=self._is_self_approved(result),
+            )
         is_terminal = (
             run.status in (
                 ActionRunStatus.SUCCEEDED,

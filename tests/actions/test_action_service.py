@@ -676,7 +676,8 @@ def test_decide_self_approval_allowed_and_audited(tmp_path):
 def test_duplicate_same_decision_keeps_original_decider_and_single_audit(tmp_path):
     # 边界情况：第二位管理员幂等重试相同决定时，返回值与审计
     # 必须保留首次实际决定人，不能把重试者伪装成审批人。
-    service, scope = build_service(tmp_path)
+    runner = FakeWorkflowRunner()
+    service, scope = build_service(tmp_path, runner=runner)
     SQLiteOrganizationStore(scope.database_path).add_membership(
         organization_id=scope.org_a.organization_id,
         user_id=scope.carol.user_id,
@@ -696,9 +697,12 @@ def test_duplicate_same_decision_keeps_original_decider_and_single_audit(tmp_pat
         approval_id=approval_id,
         user_id=scope.carol.user_id,
     )
+    assert first.result.created is True
+    assert second.result.created is False
     assert second.result.decision.decision_id == first.result.decision.decision_id
     assert second.result.decision.decided_by_user_id == scope.alice.user_id
     assert second.self_approved is True
+    assert len(runner.resumed) == 1
     logs = scope.store.list_audit_logs(
         organization_id=scope.org_a.organization_id,
         run_id=outcome.creation.run.run_id,

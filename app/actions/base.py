@@ -287,6 +287,7 @@ class WorkflowCreation:
 class DecisionResult:
     """审批决定的完整业务结果。"""
 
+    created: bool  # 本次事务是否首次创建决定；False 表示返回既有幂等结果
     decision: ApprovalDecision  # 落库的决定
     approval: Approval  # 更新后的审批
     proposal: ActionProposal  # 更新后的提案

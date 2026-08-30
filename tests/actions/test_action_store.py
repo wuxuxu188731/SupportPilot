@@ -1455,6 +1455,8 @@ def test_decide_approval_same_content_returns_first_decision(tmp_path):
         approval_id=creation.approval.approval_id,
         user_id=scope.bob.user_id,
     )
+    assert first.created is True
+    assert second.created is False
     assert first.decision.decision_id == second.decision.decision_id
     assert second.decision.decided_by_user_id == scope.alice.user_id
     assert count_rows(scope.database_path, "approval_decisions") == 1
@@ -1542,13 +1544,13 @@ def test_decide_approval_concurrent_same_content_single_decision(tmp_path):
         order_id=scope.order_a.order_id,
     )
 
-    def decide(user_id: str) -> ApprovalDecision:
+    def decide(user_id: str):
         return approve_decision(
             scope.store,
             organization_id=scope.org_a.organization_id,
             approval_id=creation.approval.approval_id,
             user_id=user_id,
-        ).decision
+        )
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [
@@ -1556,7 +1558,8 @@ def test_decide_approval_concurrent_same_content_single_decision(tmp_path):
             pool.submit(decide, scope.bob.user_id),
         ]
         first, second = [future.result() for future in futures]
-    assert first.decision_id == second.decision_id
+    assert sorted([first.created, second.created]) == [False, True]
+    assert first.decision.decision_id == second.decision.decision_id
     assert count_rows(scope.database_path, "approval_decisions") == 1
 
 

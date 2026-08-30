@@ -61,7 +61,11 @@ class DecisionChanges(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    amount_cents: int | None = Field(default=None, gt=0)  # 修改后的金额（分），必须为正整数
+    amount_cents: int | None = Field(  # 修改后的金额（分），必须为严格正整数
+        default=None,
+        gt=0,
+        strict=True,
+    )
     reason_code: ReasonCodeField | None = None  # 修改后的原因码，必须属于固定枚举
     reason_text: ReasonTextField | None = None  # 修改后的补充说明
     refund_scope: RefundScope | None = None  # 退款专属参数；补偿动作不允许修改

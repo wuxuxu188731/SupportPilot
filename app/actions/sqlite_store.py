@@ -664,6 +664,7 @@ class SQLiteActionStore(ActionStore):
         organization_id: str,
         approval: Approval,
         decision: ApprovalDecision,
+        created: bool,
     ) -> DecisionResult:
         """按已落库决定组装完整 DecisionResult，任何引用缺失都按数据损坏处理。"""
         proposal = SQLiteActionStore._load_proposal_row(
@@ -682,6 +683,7 @@ class SQLiteActionStore(ActionStore):
             version_id=decision.decided_version_id,
         )
         return DecisionResult(
+            created=created,
             decision=decision,
             approval=SQLiteActionStore._to_approval(
                 connection.execute(
@@ -1368,6 +1370,7 @@ class SQLiteActionStore(ActionStore):
                         organization_id=organization_id,
                         approval=approval,
                         decision=existing,
+                        created=False,
                     )
                 raise ApprovalAlreadyDecidedError(
                     "审批已由其他决定占用"
@@ -1542,6 +1545,7 @@ class SQLiteActionStore(ActionStore):
                 organization_id=organization_id,
                 approval=updated_approval,
                 decision=self._to_decision(decision_row),
+                created=True,
             )
 
     @staticmethod

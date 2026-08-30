@@ -123,12 +123,6 @@ def create_action_router(
         if not approval_id:
             raise _blank_resource_id("APPROVAL_NOT_FOUND", "审批")
         try:
-            # 先读取既有决定，用于区分「首次决定」与「相同决定重复提交」。
-            detail = action_service.get_approval_detail(
-                organization_id=context.organization_id,
-                approval_id=approval_id,
-            )
-            was_decided = detail.decision is not None
             outcome = action_service.decide_approval(
                 organization_id=context.organization_id,
                 approval_id=approval_id,
@@ -149,7 +143,9 @@ def create_action_router(
         except ActionError as exc:
             _raise_action_error(exc)
         response.status_code = (
-            200 if was_decided else (202 if outcome.resume_required else 201)
+            200
+            if not outcome.result.created
+            else (202 if outcome.resume_required else 201)
         )
         return DecisionResponse.from_outcome(outcome)
 
