@@ -985,6 +985,36 @@ class SQLiteActionStore(ActionStore):
             )
         return self._to_run(row)
 
+    def get_refundable_balance(
+        self,
+        *,
+        organization_id: str,
+        order_id: str,
+    ) -> int | None:
+        """返回订单当前可退余额（分）。
+
+        设计 8.2：执行成功后是否把订单标记为 refunded 以最新可退余额是否
+        为零判断，而不是只看 refund_scope；本方法供执行器在执行前计算该
+        标记使用。订单不存在或不属于当前企业时返回 None。
+        """
+        with self._connection() as connection:
+            order_row = connection.execute(
+                """
+                SELECT total_amount_cents
+                FROM orders
+                WHERE organization_id = ? AND id = ?
+                """,
+                (organization_id, order_id),
+            ).fetchone()
+            if order_row is None:
+                return None
+            refunded = self._sum_refunded_cents(
+                connection,
+                organization_id=organization_id,
+                order_id=order_id,
+            )
+        return int(order_row["total_amount_cents"]) - refunded
+
     def transition_run(
         self,
         *,

@@ -484,6 +484,19 @@ class ActionStore(Protocol):
     ) -> ActionRun:
         raise NotImplementedError
 
+    def get_refundable_balance(
+        self,
+        *,
+        organization_id: str,
+        order_id: str,
+    ) -> int | None:
+        """返回订单当前可退余额（分）。
+
+        供执行器在执行前计算订单 refunded 标记使用；订单不存在或不属于
+        当前企业时返回 None，调用方按引用链损坏处理。
+        """
+        raise NotImplementedError
+
     def transition_run(
         self,
         *,
