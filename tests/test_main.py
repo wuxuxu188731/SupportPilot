@@ -44,6 +44,7 @@ def test_main_wires_sqlite_service_without_global_messages(
   ] == [
       "get_order", "get_logistics", "create_ticket",
       "add_ticket_note", "search_knowledge",
+      "propose_refund", "propose_compensation", "get_action_status",
   ]
   assert not hasattr(main, "messages")
   assert not hasattr(main, "TOOL_FUNCTIONS")

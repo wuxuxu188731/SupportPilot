@@ -3,6 +3,10 @@ from typing import Any, Protocol
 
 from pydantic import ValidationError
 
+from app.agent.invocation_context import (
+    AgentInvocationContext,
+    tenant_of,
+)
 from app.application.customer_support_service import (
     CustomerSupportService,
     InvalidSupportRequestError,
@@ -113,11 +117,13 @@ class CustomerSupportToolGateway:
     def bind(
         self,
         *,
-        context: TenantContext,
+        context: AgentInvocationContext | TenantContext,
     ) -> dict[str, ToolFunction]:
+        # 设计 12.1：现有客服 Gateway 只读取可信租户部分。
+        tenant = tenant_of(context)
         return {
             tool_name: self._bind_one(
-                context=context,
+                context=tenant,
                 tool_name=tool_name,
             )
             for tool_name in SUPPORT_ARGUMENT_MODELS

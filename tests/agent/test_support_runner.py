@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 
+from app.agent.invocation_context import tenant_of
 from app.agent.support_runner import CustomerSupportAgentRunner
 from app.application.organization_service import TenantContext
 from app.organizations.base import MembershipRole
@@ -32,13 +33,15 @@ class FakeGateway:
         ]
 
     def bind(self, *, context):
-        self.bound_contexts.append(context)
+        # 与真实客服 Gateway 一致：只读取可信租户部分（设计 12.1）。
+        tenant = tenant_of(context)
+        self.bound_contexts.append(tenant)
 
         def get_order(**arguments):
             return {
                 "ok": True,
                 "data": {
-                    "organization": context.organization_id,
+                    "organization": tenant.organization_id,
                     "arguments": arguments,
                 },
             }
@@ -75,6 +78,9 @@ def test_support_runner_binds_gateway_for_each_context():
         context=ORG_B,
     )
 
+    # 运行器把纯 TenantContext 包装为 AgentInvocationContext 后传给
+    # Gateway；Gateway 只读取租户部分（生产链路由 ChatService 提供
+    # 真实会话与回合标识）。
     assert gateway.bound_contexts == [ORG_A, ORG_B]
     first_function = run_turn.calls[0]["tool_functions"]["get_order"]
     second_function = run_turn.calls[1]["tool_functions"]["get_order"]

@@ -14,6 +14,41 @@ import time
 DEFAULT_MAX_TOOL_ROUNDS = 20
 _CITATION_PATTERN = re.compile(r"\[(C[1-9]\d*)\]")
 
+# 会创建待审批提案的工具名，用于归一化 LLMResponse.pending_approvals
+PENDING_APPROVAL_TOOLS = ("propose_refund", "propose_compensation")
+# 提案结果中必须存在的展示字段（设计 12.5），缺失时不做归一化
+_PENDING_APPROVAL_FIELDS = (
+    "run_id",
+    "proposal_id",
+    "approval_id",
+    "action_type",
+    "status",
+    "amount_cents",
+    "currency",
+)
+
+
+def extract_pending_approval(
+    tool_name: str,
+    result: Any,
+) -> dict | None:
+    """从提案工具结果中提取结构化待审批摘要。
+
+    只认 ``propose_refund`` / ``propose_compensation`` 的成功结果，
+    且结果必须携带设计 12.5 的全部展示字段；其他工具与失败结果返回
+    ``None``，不影响既有事件与消息处理。
+    """
+    if tool_name not in PENDING_APPROVAL_TOOLS:
+        return None
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        return None
+    data = result.get("data")
+    if not isinstance(data, dict):
+        return None
+    if not all(field in data for field in _PENDING_APPROVAL_FIELDS):
+        return None
+    return {field: data[field] for field in _PENDING_APPROVAL_FIELDS}
+
 
 @dataclass(frozen=True)
 class CitationValidationResult:
@@ -125,6 +160,7 @@ def run_one_turn(
   events : list[AgentEvent] = []
   knowledge_payload: dict | None = None
   knowledge_call_id: str | None = None
+  pending_approvals: list[dict] = []
 
   #this function is used to add agent_event into events && extension operation
   def emit(event : AgentEvent):
@@ -178,6 +214,7 @@ def run_one_turn(
         citations=list(validation.citations),
         retrieval_summary=validation.retrieval_summary,
         answer_incomplete=validation.answer_incomplete,
+        pending_approvals=pending_approvals,
       )
     
     if tool_rounds >= max_tool_rounds:
@@ -288,6 +325,12 @@ def run_one_turn(
       ):
         knowledge_payload = func_result
         knowledge_call_id = tool_call.id
+
+      # 提案工具成功结果归一化为结构化待审批摘要（设计 12.5），
+      # 调用方不需要从自然语言或事件中解析 Approval ID。
+      pending = extract_pending_approval(func_name, func_result)
+      if pending is not None:
+        pending_approvals.append(pending)
       
       #执行工具没有抛出异常，工具正常执行，添加事件，将消息append进入messages
       emit(

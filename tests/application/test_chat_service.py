@@ -83,7 +83,11 @@ def test_chat_prepends_base_prompt_and_passes_context(tmp_path):
   )
 
   messages, received_context = received[0]
-  assert received_context is CONTEXT
+  # 设计 12.1：ChatService 验证会话归属并生成回合标识后，
+  # 通过 AgentInvocationContext 传给 Agent 运行器。
+  assert received_context.tenant is CONTEXT
+  assert received_context.conversation_id == conversation.conversation_id
+  assert received_context.turn_id
   assert messages[:3] == [
     {"role": "system", "content": SUPPORT_SYSTEM_PROMPT},
     {
@@ -92,6 +96,35 @@ def test_chat_prepends_base_prompt_and_passes_context(tmp_path):
     },
     {"role": "user", "content": "查询订单"},
   ]
+
+
+def test_chat_generates_distinct_turn_id_per_request(tmp_path):
+  # 保护行为：同一会话的每次聊天请求生成不同的回合标识，
+  # 用于抑制同一回合内重复提案（设计 12.1 / 9.1）。
+  received = []
+
+  def runner(*, messages, context):
+    received.append(context)
+    messages.append({"role": "assistant", "content": "answer"})
+    return LLMResponse(llm_answer="answer")
+
+  service, _ = build_service(tmp_path, runner)
+  conversation = service.create_conversation(context=CONTEXT)
+
+  service.chat(
+    context=CONTEXT,
+    conversation_id=conversation.conversation_id,
+    question="第一次",
+  )
+  service.chat(
+    context=CONTEXT,
+    conversation_id=conversation.conversation_id,
+    question="第二次",
+  )
+
+  assert len(received) == 2
+  assert received[0].conversation_id == received[1].conversation_id
+  assert received[0].turn_id != received[1].turn_id
 
 
 def test_chat_persists_only_current_conversation(tmp_path):

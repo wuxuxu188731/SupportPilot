@@ -1,5 +1,9 @@
 from typing import Any, Protocol
 
+from app.agent.invocation_context import (
+    AgentInvocationContext,
+    tenant_of,
+)
 from app.agent.runner import (
     AgentToolFunction,
     DEFAULT_MAX_TOOL_ROUNDS,
@@ -48,13 +52,24 @@ class CustomerSupportAgentRunner:
         self,
         *,
         messages: list[dict],
-        context: TenantContext,
+        context: AgentInvocationContext | TenantContext,
     ) -> LLMResponse:
+        # 设计 12.1：生产链路由 ChatService 传入 AgentInvocationContext；
+        # 兼容直接传入 TenantContext 的旧调用方（测试与评估脚本）。
+        invocation = (
+            context
+            if isinstance(context, AgentInvocationContext)
+            else AgentInvocationContext(
+                tenant=tenant_of(context),
+                conversation_id="",
+                turn_id="",
+            )
+        )
         return self._run_turn(
             messages=messages,
             client=self._client,
             tool_definitions=self._gateway.definitions,
-            tool_functions=self._gateway.bind(context=context),
+            tool_functions=self._gateway.bind(context=invocation),
             on_event=self._on_event,
             model_name=self._model_name,
             max_tool_rounds=self._max_tool_rounds,

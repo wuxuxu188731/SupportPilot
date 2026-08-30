@@ -1,5 +1,7 @@
 from typing import Callable
+from uuid import uuid4
 
+from app.agent.invocation_context import AgentInvocationContext
 from app.application.organization_service import TenantContext
 from app.concurrency.conversation_locks import ConversationLockRegistry
 from app.schemas.chat import LLMResponse
@@ -83,7 +85,17 @@ class ChatService:
       if question.strip():
         messages.append({"role":"user","content":question})
 
-      response = self._run_agent(messages=messages, context=context)
+      # 设计 12.1：会话标识已经由本服务验证归属，回合标识由服务端生成，
+      # 两者通过 AgentInvocationContext 绑定到提案工具，不作为模型参数。
+      invocation = AgentInvocationContext(
+        tenant=context,
+        conversation_id=conversation_id,
+        turn_id=str(uuid4()),
+      )
+      response = self._run_agent(
+        messages=messages,
+        context=invocation,
+      )
 
       self._store.append_messages(
         organization_id=context.organization_id,

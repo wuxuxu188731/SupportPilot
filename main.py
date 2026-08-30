@@ -26,9 +26,11 @@ from app.core.config import (
 from app.api.knowledge_router import create_knowledge_router
 from app.knowledge.factory import create_knowledge_services
 from app.organizations.sqlite_store import SQLiteOrganizationStore
+from app.orders.sqlite_store import SQLiteOrderStore
 from app.sessions.sqlite_store import SQLiteSessionStore
 from app.users.sqlite_store import SQLiteUserStore
 from app.tools.support_factory import create_customer_support_tool_gateway
+from app.tools.action_gateway import ActionToolGateway
 from app.tools.knowledge_gateway import KnowledgeToolGateway
 from app.tools.composite_gateway import CompositeToolGateway
 from app.workflows.action_graph import build_action_graph
@@ -102,9 +104,16 @@ knowledge_services = create_knowledge_services(
 knowledge_tool_gateway = KnowledgeToolGateway(
   service=knowledge_services.adaptive,
 )
+# 动作工具 Gateway（设计 12）：只暴露 propose_refund / propose_compensation /
+# get_action_status；审批、恢复与执行不进入工具面，只能通过认证 HTTP API。
+action_tool_gateway = ActionToolGateway(
+  service=action_service,
+  order_store=SQLiteOrderStore(database_path),
+)
 composite_tool_gateway = CompositeToolGateway([
   support_tool_gateway,
   knowledge_tool_gateway,
+  action_tool_gateway,
 ])
 support_agent_runner = CustomerSupportAgentRunner(
   client=client,

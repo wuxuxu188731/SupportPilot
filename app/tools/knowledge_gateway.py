@@ -2,6 +2,10 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from app.agent.invocation_context import (
+    AgentInvocationContext,
+    tenant_of,
+)
 from app.application.organization_service import TenantContext
 from app.knowledge.service import AdaptiveKnowledgeSearchService
 from app.tools.knowledge_arguments import SearchKnowledgeArguments
@@ -17,7 +21,13 @@ class KnowledgeToolGateway:
     def definitions(self) -> list[dict]:
         return get_knowledge_tool_definitions()
 
-    def bind(self, *, context: TenantContext):
+    def bind(
+        self,
+        *,
+        context: AgentInvocationContext | TenantContext,
+    ):
+        # 设计 12.1：知识 Gateway 只读取可信租户部分。
+        tenant = tenant_of(context)
         used = False
 
         def search_knowledge(**arguments: Any) -> dict:
@@ -36,7 +46,7 @@ class KnowledgeToolGateway:
                 )
             used = True
             result = self._service.search(
-                organization_id=context.organization_id,
+                organization_id=tenant.organization_id,
                 question=parsed.question,
                 conversation_id=None,
             )
