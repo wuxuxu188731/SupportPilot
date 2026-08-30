@@ -1409,6 +1409,14 @@ class SQLiteActionStore(ActionStore):
                     {
                         "decision": decision.value,
                         "decided_version_id": decided_version_row["id"],
+                        "proposer_user_id": proposal_row[
+                            "created_by_user_id"
+                        ],
+                        "decider_user_id": decided_by_user_id,
+                        "self_approved": (
+                            proposal_row["created_by_user_id"]
+                            == decided_by_user_id
+                        ),
                     }
                 ),
                 created_at=now,

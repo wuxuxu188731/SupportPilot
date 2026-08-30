@@ -38,14 +38,13 @@ from app.actions.base import (
     ToolExecutionStatus,
 )
 from app.actions.service import (
-    EVENT_DECISION_REVIEW_NOTE,
     EVENT_RUN_RESUME_REQUESTED,
     ActionWorkflowService,
     ApprovalChanges,
     HTTP_STATUS_BY_ERROR_CODE,
     http_status_for_action_error,
 )
-from app.actions.sqlite_store import SQLiteActionStore
+from app.actions.sqlite_store import EVENT_DECISION_RECORDED, SQLiteActionStore
 from app.application.organization_service import OrganizationService
 from app.customers.sqlite_store import SQLiteCustomerStore
 from app.orders.base import Order, OrderStatus
@@ -102,6 +101,43 @@ class FakeWorkflowRunner:
         self.resumed.append(run_id)
         if self.resume_error is not None:
             raise self.resume_error
+
+
+class StateChangingWorkflowRunner(FakeWorkflowRunner):
+    """测试用状态推进运行器：用于验证应用服务返回工作流调用后的最新状态。"""
+
+    def __init__(self, *, store: ActionStore, organization_id: str):
+        super().__init__()
+        self.store = store  # 被测动作存储
+        self.organization_id = organization_id  # 状态推进所属企业
+
+    def start(self, *, run_id: str) -> None:
+        super().start(run_id=run_id)
+        advance_to_awaiting(
+            self.store,
+            organization_id=self.organization_id,
+            run_id=run_id,
+        )
+
+    def resume(self, *, run_id: str) -> None:
+        super().resume(run_id=run_id)
+        run = self.store.get_run(
+            organization_id=self.organization_id,
+            run_id=run_id,
+        )
+        if run.status is ActionRunStatus.AWAITING_APPROVAL:
+            self.store.transition_run(
+                organization_id=self.organization_id,
+                run_id=run_id,
+                expected_statuses=(ActionRunStatus.AWAITING_APPROVAL,),
+                new_status=ActionRunStatus.RUNNING,
+                error_code=None,
+                error_retryable=False,
+                actor_type=AuditActorType.SYSTEM,
+                actor_user_id=None,
+                event_type="run_resumed",
+                details_json="{}",
+            )
 
 
 def build_scope(tmp_path) -> ActionScope:
@@ -398,6 +434,8 @@ def test_create_refund_proposal_creates_awaiting_workflow(tmp_path):
     }
     assert creation.approval.status is ApprovalStatus.PENDING
     assert creation.approval.requested_version_id == creation.version.version_id
+    assert outcome.start_ok is False
+    assert outcome.start_error_code == "CHECKPOINT_UNAVAILABLE"
 
 
 def test_create_compensation_proposal_creates_awaiting_workflow(tmp_path):
@@ -510,6 +548,20 @@ def test_create_starts_workflow_after_persist(tmp_path):
     assert runner.started == [outcome.creation.run.run_id]
 
 
+def test_create_returns_latest_run_after_workflow_start(tmp_path):
+    # 保护行为：首次启动把 Run 推进到等待审批后，
+    # 创建结果必须返回最新状态，不能继续暴露事务创建时的 queued 快照。
+    service, scope = build_service(tmp_path)
+    runner = StateChangingWorkflowRunner(
+        store=scope.store,
+        organization_id=scope.org_a.organization_id,
+    )
+    service._runner = runner
+    outcome = create_refund(service, scope)
+    assert outcome.start_ok is True
+    assert outcome.creation.run.status is ActionRunStatus.AWAITING_APPROVAL
+
+
 def test_create_start_failure_keeps_business_facts(tmp_path):
     # 边界情况：首次图启动失败时，Run/提案/版本/审批事实仍然持久化，
     # 结果携带稳定错误码且不重复创建提案。
@@ -575,9 +627,27 @@ def test_decide_approved_records_decision_and_resumes(tmp_path):
     assert runner.resumed == [run_id]
 
 
+def test_decide_returns_latest_run_after_workflow_resume(tmp_path):
+    # 保护行为：审批自动恢复改变 Run 状态后，
+    # 决定结果必须重新读取并返回恢复后的最新状态。
+    service, scope = build_service(tmp_path)
+    runner = StateChangingWorkflowRunner(
+        store=scope.store,
+        organization_id=scope.org_a.organization_id,
+    )
+    service._runner = runner
+    outcome = create_refund(service, scope)
+    decision_outcome = decide(
+        service,
+        scope,
+        approval_id=outcome.creation.approval.approval_id,
+    )
+    assert decision_outcome.result.run.status is ActionRunStatus.RUNNING
+
+
 def test_decide_self_approval_allowed_and_audited(tmp_path):
-    # 保护行为：MVP 允许管理员自审；自审标记为 True 且审计补充事件
-    # 明确记录提案人与审批人相同。
+    # 保护行为：MVP 允许管理员自审；自审信息必须和审批决定
+    # 在同一事务的 decision_recorded 审计事件中持久化。
     service, scope = build_service(tmp_path)
     outcome = create_refund(service, scope, user_id=scope.alice.user_id)
     decision_outcome = decide(
@@ -587,16 +657,57 @@ def test_decide_self_approval_allowed_and_audited(tmp_path):
         user_id=scope.alice.user_id,
     )
     assert decision_outcome.self_approved is True
+    assert decision_outcome.resume_required is True
+    assert decision_outcome.resume_error_code == "CHECKPOINT_UNAVAILABLE"
     logs = scope.store.list_audit_logs(
         organization_id=scope.org_a.organization_id,
         run_id=outcome.creation.run.run_id,
     )
-    notes = [log for log in logs if log.event_type == EVENT_DECISION_REVIEW_NOTE]
+    notes = [log for log in logs if log.event_type == EVENT_DECISION_RECORDED]
     assert len(notes) == 1
     details = json.loads(notes[0].details_json)
     assert details["self_approved"] is True
     assert details["proposer_user_id"] == scope.alice.user_id
     assert details["decider_user_id"] == scope.alice.user_id
+
+
+def test_duplicate_same_decision_keeps_original_decider_and_single_audit(tmp_path):
+    # 边界情况：第二位管理员幂等重试相同决定时，返回值与审计
+    # 必须保留首次实际决定人，不能把重试者伪装成审批人。
+    service, scope = build_service(tmp_path)
+    SQLiteOrganizationStore(scope.database_path).add_membership(
+        organization_id=scope.org_a.organization_id,
+        user_id=scope.carol.user_id,
+        role=MembershipRole.ADMIN,
+    )
+    outcome = create_refund(service, scope)
+    approval_id = outcome.creation.approval.approval_id
+    first = decide(
+        service,
+        scope,
+        approval_id=approval_id,
+        user_id=scope.alice.user_id,
+    )
+    second = decide(
+        service,
+        scope,
+        approval_id=approval_id,
+        user_id=scope.carol.user_id,
+    )
+    assert second.result.decision.decision_id == first.result.decision.decision_id
+    assert second.result.decision.decided_by_user_id == scope.alice.user_id
+    assert second.self_approved is True
+    logs = scope.store.list_audit_logs(
+        organization_id=scope.org_a.organization_id,
+        run_id=outcome.creation.run.run_id,
+    )
+    decision_logs = [
+        log for log in logs if log.event_type == EVENT_DECISION_RECORDED
+    ]
+    assert len(decision_logs) == 1
+    details = json.loads(decision_logs[0].details_json)
+    assert details["decider_user_id"] == scope.alice.user_id
+    assert details["self_approved"] is True
 
 
 def test_decide_rejected_marks_proposal_rejected(tmp_path):
@@ -928,8 +1039,9 @@ def test_resume_run_requires_admin(tmp_path):
     assert runner.resumed == []
 
 
-def test_resume_run_rejects_terminal_run(tmp_path):
-    # 边界情况：已成功终态的 Run 不允许恢复。
+def test_resume_succeeded_run_returns_stable_result(tmp_path):
+    # 保护行为：已成功 Run 的重复恢复请求幂等返回现有稳定结果，
+    # 不再调用运行器，也不返回 RUN_NOT_RESUMABLE。
     runner = FakeWorkflowRunner()
     service, scope = build_service(tmp_path, runner=runner)
     outcome = create_refund(service, scope)
@@ -943,20 +1055,25 @@ def test_resume_run_rejects_terminal_run(tmp_path):
         scope,
         approval_id=outcome.creation.approval.approval_id,
     )
-    complete_refund_execution(
+    execution_success = complete_refund_execution(
         scope.store,
         scope,
         creation=outcome.creation,
         amount_cents=6000,
     )
-    with pytest.raises(RunNotResumableError) as exc_info:
-        service.resume_run(
-            organization_id=scope.org_a.organization_id,
-            run_id=outcome.creation.run.run_id,
-            requested_by_user_id=scope.alice.user_id,
-        )
-    assert exc_info.value.code == "RUN_NOT_RESUMABLE"
-    # 只有决定落库时触发过一次自动恢复，终态 Run 不再触发恢复。
+    resume_outcome = service.resume_run(
+        organization_id=scope.org_a.organization_id,
+        run_id=outcome.creation.run.run_id,
+        requested_by_user_id=scope.alice.user_id,
+    )
+    assert resume_outcome.run.status is ActionRunStatus.SUCCEEDED
+    assert resume_outcome.resume_ok is True
+    assert resume_outcome.error_code is None
+    assert (
+        resume_outcome.result["business_record_id"]
+        == execution_success.business_record_id
+    )
+    # 只有决定落库时触发过一次自动恢复，成功重试不再执行图。
     assert runner.resumed == [outcome.creation.run.run_id]
 
 
@@ -1016,6 +1133,33 @@ def test_resume_run_recovers_after_failed_auto_resume(tmp_path):
         outcome.creation.run.run_id,
         outcome.creation.run.run_id,
     ]
+
+
+def test_resume_run_returns_latest_status_after_runner_progress(tmp_path):
+    # 保护行为：显式恢复成功推进 Run 后，返回值必须展示恢复后
+    # 的最新状态，不能返回调用运行器之前的 awaiting_approval 快照。
+    service, scope = build_service(tmp_path)
+    runner = StateChangingWorkflowRunner(
+        store=scope.store,
+        organization_id=scope.org_a.organization_id,
+    )
+    service._runner = runner
+    outcome = create_refund(service, scope)
+    runner.resume_error = CheckpointUnavailableError("checkpoint 不可用")
+    decide(
+        service,
+        scope,
+        approval_id=outcome.creation.approval.approval_id,
+    )
+    runner.resume_error = None
+    resume_outcome = service.resume_run(
+        organization_id=scope.org_a.organization_id,
+        run_id=outcome.creation.run.run_id,
+        requested_by_user_id=scope.alice.user_id,
+    )
+    assert resume_outcome.resume_ok is True
+    assert resume_outcome.run.status is ActionRunStatus.RUNNING
+    assert resume_outcome.result is None
 
 
 def test_resume_run_failure_returns_stable_code(tmp_path):

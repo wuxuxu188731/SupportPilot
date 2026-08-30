@@ -13,7 +13,7 @@ Run 状态查询与显式恢复，以及领域错误到 HTTP 状态码的映射�
 """
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Protocol
 
 from app.actions.base import (
@@ -32,6 +32,7 @@ from app.actions.base import (
     ApprovalNotFoundError,
     ApprovalStatus,
     AuditActorType,
+    CheckpointUnavailableError,
     DecisionResult,
     ExecutionDataIntegrityError,
     NewProposalVersion,
@@ -49,10 +50,7 @@ from app.application.organization_service import (
 from app.organizations.base import MembershipRole
 
 # —— 应用服务追加的审计事件类型 ——
-# 设计 9.9 要求审计记录恢复请求；设计 14 要求明确记录提案人与审批人是否相同。
-# 这两类事件不伴随状态变化，由应用服务通过 append_audit_log 补充写入。
-
-EVENT_DECISION_REVIEW_NOTE = "decision_review_note"  # 决定审计补充：记录提案人与审批人是否相同
+# 设计 9.9 要求审计记录管理员显式恢复请求。
 EVENT_RUN_RESUME_REQUESTED = "run_resume_requested"  # 管理员显式恢复请求
 
 # —— 错误映射（设计 13.4 建议状态码） ——
@@ -138,9 +136,10 @@ class DecisionOutcome:
 class ResumeOutcome:
     """显式恢复 Run 的结果。"""
 
-    run: ActionRun  # 恢复请求时的 Run 当前状态
+    run: ActionRun  # 恢复请求完成后重新读取的 Run 最新状态
     resume_ok: bool  # 是否成功调用工作流恢复
     error_code: str | None  # 恢复失败时的稳定错误码，成功时为 None
+    result: dict | None  # 恢复后的稳定业务结果，尚未执行成功时为 None
 
 
 @dataclass(frozen=True)
@@ -251,6 +250,11 @@ class ActionWorkflowService:
             parameters_json=parameters_json,
         )
         start_ok, start_error_code = self._try_start(creation.run.run_id)
+        latest_run = self._store.get_run(
+            organization_id=organization_id,
+            run_id=creation.run.run_id,
+        )
+        creation = replace(creation, run=latest_run)
         return ProposalCreationOutcome(
             creation=creation,
             start_ok=start_ok,
@@ -410,11 +414,6 @@ class ActionWorkflowService:
             comment=comment,
             new_version=new_version,
         )
-        self._append_decision_review_note(
-            organization_id=organization_id,
-            result=result,
-            decided_by_user_id=decided_by_user_id,
-        )
         run = result.run
         is_terminal = (
             run.status in (
@@ -428,27 +427,39 @@ class ActionWorkflowService:
         )
         if is_terminal:
             # Run 已进入终态（例如重复提交相同决定），无需再恢复。
+            latest_run = self._store.get_run(
+                organization_id=organization_id,
+                run_id=run.run_id,
+            )
+            result = replace(result, run=latest_run)
             return DecisionOutcome(
                 result=result,
                 resume_required=False,
                 resume_error_code=None,
-                self_approved=self._is_self_approved(result, decided_by_user_id),
+                self_approved=self._is_self_approved(result),
             )
         resume_ok, resume_error_code = self._try_resume(run.run_id)
+        latest_run = self._store.get_run(
+            organization_id=organization_id,
+            run_id=run.run_id,
+        )
+        result = replace(result, run=latest_run)
         return DecisionOutcome(
             result=result,
             resume_required=not resume_ok,
             resume_error_code=resume_error_code,
-            self_approved=self._is_self_approved(result, decided_by_user_id),
+            self_approved=self._is_self_approved(result),
         )
 
     @staticmethod
     def _is_self_approved(
         result: DecisionResult,
-        decided_by_user_id: str,
     ) -> bool:
-        """判断本次决定是否为提案人自审。"""
-        return result.proposal.created_by_user_id == decided_by_user_id
+        """根据已持久化的实际决定人判断是否为提案人自审。"""
+        return (
+            result.proposal.created_by_user_id
+            == result.decision.decided_by_user_id
+        )
 
     def _build_new_version(
         self,
@@ -520,33 +531,6 @@ class ActionWorkflowService:
                 else requested.reason_text
             ),
             parameters_json=parameters_json,
-        )
-
-    def _append_decision_review_note(
-        self,
-        *,
-        organization_id: str,
-        result: DecisionResult,
-        decided_by_user_id: str,
-    ) -> None:
-        """写决定审计补充：明确记录提案人与审批人是否相同（设计 14 自审透明）。"""
-        proposer = result.proposal.created_by_user_id
-        self._store.append_audit_log(
-            organization_id=organization_id,
-            run_id=result.run.run_id,
-            proposal_id=result.proposal.proposal_id,
-            actor_type=AuditActorType.USER,
-            actor_user_id=decided_by_user_id,
-            event_type=EVENT_DECISION_REVIEW_NOTE,
-            resource_type="approval",
-            resource_id=result.decision.approval_id,
-            details_json=json.dumps(
-                {
-                    "proposer_user_id": proposer,
-                    "decider_user_id": decided_by_user_id,
-                    "self_approved": proposer == decided_by_user_id,
-                }
-            ),
         )
 
     # —— Run 状态查询与显式恢复 ——
@@ -634,6 +618,17 @@ class ActionWorkflowService:
             organization_id=organization_id,
             run_id=run_id,
         )
+        if run.status is ActionRunStatus.SUCCEEDED:
+            status = self.get_run_status(
+                organization_id=organization_id,
+                run_id=run_id,
+            )
+            return ResumeOutcome(
+                run=status.run,
+                resume_ok=True,
+                error_code=None,
+                result=status.result,
+            )
         self._require_resumable(
             run,
             organization_id=organization_id,
@@ -652,10 +647,15 @@ class ActionWorkflowService:
             ),
         )
         resume_ok, error_code = self._try_resume(run_id)
+        status = self.get_run_status(
+            organization_id=organization_id,
+            run_id=run_id,
+        )
         return ResumeOutcome(
-            run=run,
+            run=status.run,
             resume_ok=resume_ok,
             error_code=error_code,
+            result=status.result,
         )
 
     def _require_resumable(
@@ -666,13 +666,11 @@ class ActionWorkflowService:
     ) -> None:
         """校验 Run 是否允许显式恢复。
 
-        已终态（成功、取消、不可重试失败）禁止恢复；等待审批但没有持久化
+        已取消或不可重试失败禁止恢复；已成功 Run 由入口幂等返回
+        稳定结果；等待审批但没有持久化
         决定的 Run 属于「未批准的执行分支」，同样禁止恢复。
         """
-        if run.status in (
-            ActionRunStatus.SUCCEEDED,
-            ActionRunStatus.CANCELLED,
-        ):
+        if run.status is ActionRunStatus.CANCELLED:
             raise RunNotResumableError("已终态的 Run 不允许恢复")
         if run.status is ActionRunStatus.FAILED and not run.last_error_retryable:
             raise RunNotResumableError("不可恢复失败的 Run 不允许恢复")
@@ -721,7 +719,7 @@ class ActionWorkflowService:
     def _try_start(self, run_id: str) -> tuple[bool, str | None]:
         """尝试首次启动工作流；失败时业务事实已持久化，可稍后显式恢复。"""
         if self._runner is None:
-            return False, None
+            return False, CheckpointUnavailableError.code
         try:
             self._runner.start(run_id=run_id)
         except ActionError as exc:
@@ -731,7 +729,7 @@ class ActionWorkflowService:
     def _try_resume(self, run_id: str) -> tuple[bool, str | None]:
         """尝试恢复工作流；失败时决定仍然有效，可再次显式恢复。"""
         if self._runner is None:
-            return False, None
+            return False, CheckpointUnavailableError.code
         try:
             self._runner.resume(run_id=run_id)
         except ActionError as exc:
