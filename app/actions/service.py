@@ -154,6 +154,7 @@ class ApprovalListItem:
     proposal: ActionProposal  # 关联提案
     run_status: ActionRunStatus  # 关联 Run 的当前状态
     current_version: ActionProposalVersion | None  # 当前生效版本，尚未产生时为空
+    version_count: int  # 提案版本总数，供「历史版本摘要」展示
     decision: ApprovalDecision | None  # 已落库决定，未决定时为 None
 
 
@@ -322,11 +323,16 @@ class ActionWorkflowService:
             organization_id=organization_id,
             approval_id=approval.approval_id,
         )
+        version_count = self._store.count_versions(
+            organization_id=organization_id,
+            proposal_id=proposal.proposal_id,
+        )
         return ApprovalListItem(
             approval=approval,
             proposal=proposal,
             run_status=run.status,
             current_version=current_version,
+            version_count=version_count,
             decision=decision,
         )
 

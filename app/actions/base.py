@@ -582,6 +582,15 @@ class ActionStore(Protocol):
     ) -> list[ActionProposalVersion]:
         raise NotImplementedError
 
+    def count_versions(
+        self,
+        *,
+        organization_id: str,
+        proposal_id: str,
+    ) -> int:
+        """返回提案的版本总数，供审批列表展示历史版本摘要。"""
+        raise NotImplementedError
+
     def list_approvals(
         self,
         *,

@@ -53,6 +53,11 @@ def test_main_wires_sqlite_service_without_global_messages(
   assert "/conversations/{conversation_id}/chat/" in paths
   assert "/organizations/" in paths
   assert "/organizations/{organization_id}/members/" in paths
+  assert "/approvals/" in paths
+  assert "/approvals/{approval_id}/" in paths
+  assert "/approvals/{approval_id}/decisions/" in paths
+  assert "/action-runs/{run_id}/" in paths
+  assert "/action-runs/{run_id}/resume/" in paths
 
 def load_app(monkeypatch, tmp_path):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-only-key")

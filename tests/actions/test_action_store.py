@@ -1254,6 +1254,55 @@ def test_decide_approval_with_changes_creates_next_version(tmp_path):
     assert versions[0].amount_cents == 6000  # 原版本不被覆盖
 
 
+def test_count_versions_tracks_history_and_tenant(tmp_path):
+    # 保护行为：版本计数随修改后批准递增，供审批列表展示历史版本摘要；
+    # 跨租户计数统一返回 0，不泄露其他企业的版本数量。
+    scope = build_action_scope(tmp_path)
+    creation = create_refund_workflow(
+        scope.store,
+        organization_id=scope.org_a.organization_id,
+        user_id=scope.alice.user_id,
+        order_id=scope.order_a.order_id,
+    )
+    assert (
+        scope.store.count_versions(
+            organization_id=scope.org_a.organization_id,
+            proposal_id=creation.proposal.proposal_id,
+        )
+        == 1
+    )
+    approve_decision(
+        scope.store,
+        organization_id=scope.org_a.organization_id,
+        approval_id=creation.approval.approval_id,
+        user_id=scope.alice.user_id,
+        decision=ApprovalDecisionType.APPROVED_WITH_CHANGES,
+        comment="调整为部分退款",
+        new_version=NewProposalVersion(
+            amount_cents=4000,
+            currency="CNY",
+            reason_code="quality_issue",
+            reason_text="仅对质量问题商品退款",
+            parameters_json=json.dumps({"refund_scope": "partial"}),
+        ),
+    )
+    assert (
+        scope.store.count_versions(
+            organization_id=scope.org_a.organization_id,
+            proposal_id=creation.proposal.proposal_id,
+        )
+        == 2
+    )
+    # 跨租户计数与不存在提案一样返回 0。
+    assert (
+        scope.store.count_versions(
+            organization_id=scope.org_b.organization_id,
+            proposal_id=creation.proposal.proposal_id,
+        )
+        == 0
+    )
+
+
 def test_decide_approval_with_changes_requires_changes(tmp_path):
     # 边界情况：修改后批准必须至少改变一个允许字段，原样重复原版本被拒绝。
     scope = build_action_scope(tmp_path)

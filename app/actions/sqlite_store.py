@@ -1245,6 +1245,24 @@ class SQLiteActionStore(ActionStore):
             ).fetchall()
         return [self._to_version(row) for row in rows]
 
+    def count_versions(
+        self,
+        *,
+        organization_id: str,
+        proposal_id: str,
+    ) -> int:
+        """返回提案的版本总数（审批列表「历史版本摘要」用）。"""
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM action_proposal_versions
+                WHERE organization_id = ? AND proposal_id = ?
+                """,
+                (organization_id, proposal_id),
+            ).fetchone()
+        return int(row["total"])
+
     def list_approvals(
         self,
         *,

@@ -6,6 +6,7 @@ from app.actions.factory import build_action_executor
 from app.actions.service import ActionWorkflowService
 from app.actions.sqlite_store import SQLiteActionStore
 from app.api.router import creat_conversation_router
+from app.api.action_router import create_action_router
 from app.api.auth_router import create_auth_router
 from app.api.dependencies import create_current_user_dependency, create_current_tenant_dependency
 from app.api.organization_router import create_organization_router
@@ -141,5 +142,11 @@ app.include_router(
   create_organization_router(
     organization_service=organization_service,
     get_current_user=get_current_user,
+  )
+)
+app.include_router(
+  create_action_router(
+    action_service=action_service,
+    get_current_tenant=get_current_tenant,
   )
 )
