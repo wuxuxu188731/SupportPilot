@@ -426,8 +426,8 @@ def test_agent_can_list_and_read_approval_detail(tmp_path):
     assert body["decision"] is None
 
 
-def test_cross_tenant_access_returns_404(tmp_path):
-    # 边界情况：企业 B 管理员使用企业 A 的 Approval ID / Run ID 时，
+def test_acceptance_scenario_f_cross_tenant_access_returns_404(tmp_path):
+    # 验收场景 F：企业 B 管理员使用企业 A 的 Approval ID / Run ID 时，
     # 所有读取、决定与恢复接口统一返回 404，不泄露资源存在性；
     # 企业 A 非成员在租户依赖层即被拒绝（设计 19 场景 F / 14）。
     scope, clients, service, runner = build_fake_clients(tmp_path)
@@ -464,6 +464,8 @@ def test_cross_tenant_access_returns_404(tmp_path):
         assert response.status_code == 404
     # 跨租户尝试没有产生任何副作用。
     assert count_rows(scope.database_path, "approval_decisions") == 0
+    assert count_rows(scope.database_path, "tool_executions") == 0
+    assert count_rows(scope.database_path, "refund_records") == 0
     assert runner.resumed == []
 
 

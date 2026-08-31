@@ -1,11 +1,13 @@
 """退款/补偿审批工作流端到端集成测试。
 
 把应用服务（Task 3）、幂等执行器（Task 4）与 LangGraph 运行器（Task 5）
-按真实装配方式组合，覆盖设计 19 的验收场景：退款批准、拒绝、重启恢复、
-可重试失败显式恢复。所有暂停恢复验收都使用真实临时 SQLite checkpointer
-并重新创建运行时实例。
+按真实装配方式组合，覆盖设计 19 的验收场景 A-E：退款批准、修改后批准、
+拒绝、重复恢复和重启恢复，并额外覆盖可重试失败显式恢复。场景 F 的 HTTP
+跨租户攻击验收位于 ``tests/api/test_action_router.py``。所有暂停恢复验收都
+使用真实临时 SQLite checkpointer，并在重启场景中重新创建运行时实例。
 """
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,7 +23,7 @@ from app.actions.base import (
 )
 from app.actions.executor import RetryableFailureInjector
 from app.actions.factory import build_action_executor
-from app.actions.service import ActionWorkflowService
+from app.actions.service import ActionWorkflowService, ApprovalChanges
 from app.actions.sqlite_store import SQLiteActionStore
 from app.application.organization_service import OrganizationService
 from app.customers.sqlite_store import SQLiteCustomerStore
@@ -128,9 +130,9 @@ def count_rows(database_path: Path, table: str) -> int:
     return int(row[0])
 
 
-def test_full_approval_flow_with_real_runtime(tmp_path):
-    # 保护行为：创建提案 -> 等待审批 -> 批准 -> 自动恢复执行成功，
-    # 全程由真实 LangGraph 运行器推进，只产生一条模拟退款记录。
+def test_acceptance_scenario_a_refund_approval(tmp_path):
+    # 验收场景 A：创建提案 -> 等待审批 -> 批准 -> 自动恢复执行成功，
+    # 全程由真实 LangGraph 运行器推进，批准前无副作用且最终只有一条模拟退款记录。
     stack = build_stack(tmp_path)
     service = build_service(stack, tmp_path)
     creation = service.create_proposal(
@@ -148,6 +150,7 @@ def test_full_approval_flow_with_real_runtime(tmp_path):
     )
     assert creation.start_ok is True
     assert creation.creation.run.status is ActionRunStatus.AWAITING_APPROVAL
+    assert count_rows(stack.database_path, "refund_records") == 0
 
     decision = service.decide_approval(
         organization_id=stack.org_a.organization_id,
@@ -174,8 +177,69 @@ def test_full_approval_flow_with_real_runtime(tmp_path):
     assert status.result["business_record_id"] is not None
 
 
-def test_rejected_flow_with_real_runtime(tmp_path):
-    # 保护行为：拒绝决定恢复后 Run 进入 cancelled 终态，
+def test_acceptance_scenario_b_approved_with_changes(tmp_path):
+    # 验收场景 B：原全额退款提案修改为部分退款后批准，必须保留原版本，
+    # 执行严格使用新版本金额，部分退款不把订单主状态改为 refunded。
+    stack = build_stack(tmp_path)
+    service = build_service(stack, tmp_path)
+    creation = service.create_proposal(
+        organization_id=stack.org_a.organization_id,
+        user_id=stack.alice.user_id,
+        conversation_id="conv-b",
+        turn_id="turn-b",
+        order_id=stack.order_a.order_id,
+        action_type=ActionType.REFUND,
+        amount_cents=10000,
+        currency="CNY",
+        reason_code="quality_issue",
+        reason_text="原申请全额退款",
+        refund_scope=RefundScope.FULL,
+    )
+
+    outcome = service.decide_approval(
+        organization_id=stack.org_a.organization_id,
+        approval_id=creation.creation.approval.approval_id,
+        decided_by_user_id=stack.alice.user_id,
+        decision=ApprovalDecisionType.APPROVED_WITH_CHANGES,
+        changes=ApprovalChanges(
+            amount_cents=6000,
+            reason_text="仅对质量问题商品部分退款",
+            refund_scope=RefundScope.PARTIAL,
+        ),
+        comment="调整为部分退款",
+    )
+
+    assert outcome.result.run.status is ActionRunStatus.SUCCEEDED
+    detail = service.get_approval_detail(
+        organization_id=stack.org_a.organization_id,
+        approval_id=creation.creation.approval.approval_id,
+    )
+    assert [version.version_no for version in detail.versions] == [1, 2]
+    assert detail.versions[0].amount_cents == 10000
+    assert json.loads(detail.versions[0].parameters_json) == {
+        "refund_scope": "full"
+    }
+    assert detail.current_version.amount_cents == 6000
+    assert json.loads(detail.current_version.parameters_json) == {
+        "refund_scope": "partial"
+    }
+    assert detail.decision.decided_version_id == (
+        detail.current_version.version_id
+    )
+    with sqlite3.connect(stack.database_path) as connection:
+        refund = connection.execute(
+            "SELECT amount_cents FROM refund_records"
+        ).fetchone()
+    assert refund[0] == 6000
+    order = SQLiteOrderStore(stack.database_path).get_by_id(
+        organization_id=stack.org_a.organization_id,
+        order_id=stack.order_a.order_id,
+    )
+    assert order.status is OrderStatus.PROCESSING
+
+
+def test_acceptance_scenario_c_rejected(tmp_path):
+    # 验收场景 C：拒绝决定恢复后 Run 进入 cancelled 终态，
     # 不创建执行与业务结果，查询接口可解释拒绝原因。
     stack = build_stack(tmp_path)
     service = build_service(stack, tmp_path)
@@ -203,10 +267,70 @@ def test_rejected_flow_with_real_runtime(tmp_path):
     assert decision.result.proposal.status is ProposalStatus.REJECTED
     assert count_rows(stack.database_path, "tool_executions") == 0
     assert count_rows(stack.database_path, "refund_records") == 0
+    detail = service.get_approval_detail(
+        organization_id=stack.org_a.organization_id,
+        approval_id=creation.creation.approval.approval_id,
+    )
+    assert detail.decision.comment == "不满足退换政策"
 
 
-def test_restart_recovery_with_real_runtime(tmp_path):
-    # 保护行为：Run 在审批节点暂停后关闭并重新创建所有组件，
+def test_acceptance_scenario_d_repeated_resume_is_idempotent(tmp_path):
+    # 验收场景 D：同一批准 Run 重复恢复时返回相同 Execution ID 和业务结果 ID，
+    # 数据库中仍只有一条执行记录和一条模拟退款记录。
+    stack = build_stack(tmp_path)
+    service = build_service(stack, tmp_path)
+    creation = service.create_proposal(
+        organization_id=stack.org_a.organization_id,
+        user_id=stack.alice.user_id,
+        conversation_id="conv-d",
+        turn_id="turn-d",
+        order_id=stack.order_a.order_id,
+        action_type=ActionType.REFUND,
+        amount_cents=6000,
+        currency="CNY",
+        reason_code="quality_issue",
+        reason_text="商品存在质量问题",
+        refund_scope=RefundScope.PARTIAL,
+    )
+    service.decide_approval(
+        organization_id=stack.org_a.organization_id,
+        approval_id=creation.creation.approval.approval_id,
+        decided_by_user_id=stack.alice.user_id,
+        decision=ApprovalDecisionType.APPROVED,
+    )
+    first_status = service.get_run_status(
+        organization_id=stack.org_a.organization_id,
+        run_id=creation.creation.run.run_id,
+    )
+
+    first_resume = service.resume_run(
+        organization_id=stack.org_a.organization_id,
+        run_id=creation.creation.run.run_id,
+        requested_by_user_id=stack.alice.user_id,
+    )
+    second_resume = service.resume_run(
+        organization_id=stack.org_a.organization_id,
+        run_id=creation.creation.run.run_id,
+        requested_by_user_id=stack.alice.user_id,
+    )
+    final_status = service.get_run_status(
+        organization_id=stack.org_a.organization_id,
+        run_id=creation.creation.run.run_id,
+    )
+
+    assert first_resume.result == second_resume.result == first_status.result
+    assert final_status.execution.execution_id == (
+        first_status.execution.execution_id
+    )
+    assert final_status.result["business_record_id"] == (
+        first_status.result["business_record_id"]
+    )
+    assert count_rows(stack.database_path, "tool_executions") == 1
+    assert count_rows(stack.database_path, "refund_records") == 1
+
+
+def test_acceptance_scenario_e_restart_recovery(tmp_path):
+    # 验收场景 E：Run 在审批节点暂停后关闭并重新创建所有组件，
     # 使用原 thread_id 恢复并正常进入终态（设计 19 场景 E）。
     stack = build_stack(tmp_path)
     service = build_service(stack, tmp_path)
@@ -224,6 +348,7 @@ def test_restart_recovery_with_real_runtime(tmp_path):
         refund_scope=RefundScope.PARTIAL,
     )
     assert creation.creation.run.status is ActionRunStatus.AWAITING_APPROVAL
+    original_thread_id = creation.creation.run.thread_id
 
     # 重新装配所有组件（同一业务库与 checkpoint 文件）。
     service2 = build_service(stack, tmp_path)
@@ -236,6 +361,7 @@ def test_restart_recovery_with_real_runtime(tmp_path):
     )
     assert decision.resume_required is False
     assert decision.result.run.status is ActionRunStatus.SUCCEEDED
+    assert decision.result.run.thread_id == original_thread_id
     assert count_rows(stack.database_path, "refund_records") == 1
 
 

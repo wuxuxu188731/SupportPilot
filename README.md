@@ -12,6 +12,21 @@ SupportPilot 是一个面向电商售后客服团队的多租户工单处理 Age
 - 不依赖 LLM 的确定性客服业务服务。
 - 使用可信 `TenantContext` 为每个请求重新绑定的受控 Tool Gateway。
 - “查询订单 → 查询物流 → 创建工单 → 生成回复”Agent 黄金路径。
+- 退款与优惠券补偿提案、管理员审批、修改后批准和拒绝。
+- 使用独立 SQLite checkpointer 的 LangGraph 确定性暂停/恢复工作流。
+- 版本化幂等执行、可重试失败恢复、跨租户隐藏和结构化待审批响应。
+
+### 退款/补偿审批与可靠执行
+
+- Agent 只暴露 `propose_refund`、`propose_compensation` 和只读
+  `get_action_status`；审批、恢复与执行器不会暴露给模型。
+- 提案创建不产生退款或补偿副作用，只有当前企业 `admin` 的持久化批准决定才能授权
+  执行。
+- 审批支持批准、修改后批准和拒绝；重复决定、重复恢复与节点重放由业务幂等键保护。
+- 等待审批、决定提交后恢复失败和可重试执行失败都可以使用原 Run 恢复。
+- 退款与补偿结果均为模拟业务记录，不代表真实到账或真实发券。
+- 部署、备份、状态判断和故障恢复步骤见
+  [`docs/refund-compensation-operations.md`](docs/refund-compensation-operations.md)。
 
 知识库：
 
@@ -42,6 +57,6 @@ Embedding、模型或 Qdrant 基础设施失败会写入可续跑 checkpoint 并
 
 当前不包含：
 
-- 退款、补偿和审批。
-- LangGraph 工作流。
+- 真实支付退款、真实优惠券发放或外部 CRM 写入。
+- 审批前端、消息通知、Worker、定时重试和多实例分布式执行租约。
 - 真实电商、物流和 CRM 集成。
