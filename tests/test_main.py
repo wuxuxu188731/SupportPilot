@@ -7,6 +7,7 @@ def test_main_wires_sqlite_service_without_global_messages(
   monkeypatch,
   tmp_path
 ):
+  # 保护行为：主应用应装配完整工具面与动作 API，且不保留全局聊天消息状态。
   from app.agent.support_runner import CustomerSupportAgentRunner
   from app.tools.support_gateway import CustomerSupportToolGateway
 

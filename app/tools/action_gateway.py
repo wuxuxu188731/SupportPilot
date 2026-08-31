@@ -13,6 +13,7 @@
   或堆栈。
 """
 
+import json
 from typing import Any
 
 from pydantic import ValidationError
@@ -20,6 +21,7 @@ from pydantic import ValidationError
 from app.actions.base import (
     ActionError,
     ActionType,
+    ExecutionDataIntegrityError,
     RefundScope,
 )
 from app.actions.service import (
@@ -35,6 +37,8 @@ from app.tools.support_results import JsonObject, tool_failure, tool_success
 
 # 提案工具的固定参数：补偿券有效期本阶段固定为 30 天（设计 8.3）
 COMPENSATION_COUPON_VALID_DAYS = 30
+# 未预期基础设施失败的稳定工具错误码
+ACTION_TOOL_UNAVAILABLE = "ACTION_TOOL_UNAVAILABLE"
 
 
 class ActionToolGateway:
@@ -164,6 +168,12 @@ class ActionToolGateway:
                 code="ACTION_ORDER_NOT_FOUND",
                 message="订单不存在或不属于当前企业",
             )
+        except Exception:
+            # 工具边界禁止把数据库、文件路径、堆栈或提供方响应返回给模型。
+            return tool_failure(
+                code=ACTION_TOOL_UNAVAILABLE,
+                message="动作工具暂时不可用，请稍后重试",
+            )
 
     # —— 工具实现 ——
 
@@ -194,6 +204,8 @@ class ActionToolGateway:
                 "status": outcome.creation.run.status.value,
                 "amount_cents": outcome.creation.version.amount_cents,
                 "currency": outcome.creation.version.currency,
+                "resume_required": not outcome.start_ok,
+                "error_code": outcome.start_error_code,
             }
         )
 
@@ -284,10 +296,32 @@ class ActionToolGateway:
             except OrderNotFoundError:
                 # 引用链损坏由业务侧数据完整性校验负责，这里只影响展示。
                 order_no = None
+        current_version = None
+        if view.current_version is not None:
+            try:
+                parameters = json.loads(view.current_version.parameters_json)
+            except (json.JSONDecodeError, TypeError) as exc:
+                raise ExecutionDataIntegrityError(
+                    "提案版本参数 JSON 损坏"
+                ) from exc
+            if not isinstance(parameters, dict):
+                raise ExecutionDataIntegrityError(
+                    "提案版本参数必须是 JSON 对象"
+                )
+            current_version = {
+                "version_no": view.current_version.version_no,
+                "amount_cents": view.current_version.amount_cents,
+                "currency": view.current_version.currency,
+                "reason_code": view.current_version.reason_code,
+                "reason_text": view.current_version.reason_text,
+                "parameters": parameters,
+            }
         return {
             "run_id": view.run.run_id,
             "workflow_type": view.run.workflow_type.value,
             "status": view.run.status.value,
+            "run_error_code": view.run.last_error_code,
+            "run_error_retryable": view.run.last_error_retryable,
             "order_no": order_no,
             "proposal_status": (
                 view.proposal.status.value
@@ -304,6 +338,12 @@ class ActionToolGateway:
                 if view.decision is not None
                 else None
             ),
+            "decision_comment": (
+                view.decision.comment
+                if view.decision is not None
+                else None
+            ),
+            "current_version": current_version,
             "execution_status": (
                 view.execution.status.value
                 if view.execution is not None
@@ -311,6 +351,11 @@ class ActionToolGateway:
             ),
             "execution_error_code": (
                 view.execution.error_code
+                if view.execution is not None
+                else None
+            ),
+            "execution_error_retryable": (
+                view.execution.error_retryable
                 if view.execution is not None
                 else None
             ),

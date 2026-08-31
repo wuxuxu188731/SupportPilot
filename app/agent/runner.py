@@ -25,6 +25,13 @@ _PENDING_APPROVAL_FIELDS = (
     "status",
     "amount_cents",
     "currency",
+    "resume_required",
+    "error_code",
+)
+
+_MODEL_RESPONSE_UNAVAILABLE_MESSAGE = (
+    "提案已创建，但模型暂时无法生成完整回复。"
+    "请根据结构化待审批信息查看当前状态，必要时由管理员恢复工作流。"
 )
 
 
@@ -162,30 +169,53 @@ def run_one_turn(
   knowledge_call_id: str | None = None
   pending_approvals: list[dict] = []
 
-  #this function is used to add agent_event into events && extension operation
+  # 统一收集 Agent 事件，并按需通知外部监听器。
   def emit(event : AgentEvent):
     events.append(event)
-    #database connection,SSE,websocket
+    # 外部监听器可用于数据库记录、SSE 或 WebSocket 推送。
     if(on_event is not None):
       on_event(event)
 
-
-  while True:
-    response = client.chat.completions.create(
-      model=model_name,
-      messages=messages,
-      tools=tool_definitions,
-      extra_body={
-        "thinking":{
-          "type":"enabled"
-        }
+  def pending_approval_fallback() -> LLMResponse:
+    """在提案已持久化后返回确定性降级答复。"""
+    messages.append(
+      {
+        "role": "assistant",
+        "content": _MODEL_RESPONSE_UNAVAILABLE_MESSAGE,
+        "reasoning_content": None,
       }
     )
+    return LLMResponse(
+      llm_answer=_MODEL_RESPONSE_UNAVAILABLE_MESSAGE,
+      events=events,
+      answer_incomplete=True,
+      pending_approvals=pending_approvals,
+    )
+
+
+  while True:
+    try:
+      response = client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        tools=tool_definitions,
+        extra_body={
+          "thinking":{
+            "type":"enabled"
+          }
+        }
+      )
+    except Exception:
+      # 提案属于已经提交的持久化业务事实。提案创建后的模型调用失败时，
+      # 返回确定性降级答复，避免客户端收到错误却无法取得 Run/Approval ID。
+      if not pending_approvals:
+        raise
+      return pending_approval_fallback()
 
     llm_res = response.choices[0].message.content
     reason_content = response.choices[0].message.reasoning_content
 
-    #no tool was called
+    # 模型未调用工具，本轮结束并校验知识引用。
     if not response.choices[0].message.tool_calls:
       messages.append(
         {
@@ -218,10 +248,13 @@ def run_one_turn(
       )
     
     if tool_rounds >= max_tool_rounds:
+      # 达到工具轮次上限时，已创建的提案仍必须返回给调用方。
+      if pending_approvals:
+        return pending_approval_fallback()
       raise AgentToolRoundLimitError("maximum tool rounds exceeded")
     tool_rounds += 1
 
-    #tools were called
+    # 模型调用了工具，依次解析、执行并回填结果。
     """
     将模型发送的调用信息加入messages->遍历工具列表(对每一个工具进行)
     ->参数解析(异常处理:参数解析失败)
@@ -274,7 +307,7 @@ def run_one_turn(
       )
 
       func = tool_functions.get(func_name)
-      #tool is not avaliable
+      # 工具未注册时返回稳定失败结果。
       if func is None:
         error_message = f"未注册的工具"
         emit(
@@ -289,7 +322,7 @@ def run_one_turn(
         messages.append(build_error_result(tool_call_id=tool_call.id,error_message=error_message))
         continue
 
-      #tool is avaliable
+      # 工具已注册，记录开始事件后执行。
       emit(
         AgentEvent(
           type="tool_call.started",
@@ -303,8 +336,9 @@ def run_one_turn(
       try:
         func_result = func(**func_arguments)
         duration_ms = (time.perf_counter()-start_at)*1000
-      except Exception as exc:
-        error_message = f"{type(exc).__name__}:{exc}"
+      except Exception:
+        # 未预期异常只返回稳定错误码，禁止向模型和客户端泄漏底层细节。
+        error_message = "TOOL_EXECUTION_FAILED"
         duration_ms = (time.perf_counter()-start_at)*1000
         emit(AgentEvent(
           type="tool_call.failed", 
@@ -332,7 +366,7 @@ def run_one_turn(
       if pending is not None:
         pending_approvals.append(pending)
       
-      #执行工具没有抛出异常，工具正常执行，添加事件，将消息append进入messages
+      # 工具正常完成后记录事件，并把结构化结果加入消息历史。
       emit(
         AgentEvent(
           type="tool_call.completed",

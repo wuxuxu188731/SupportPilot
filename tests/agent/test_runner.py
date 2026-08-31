@@ -137,6 +137,62 @@ def test_run_one_turn_stops_after_max_tool_rounds():
   assert call_count == 3
 
 
+def test_tool_round_limit_returns_existing_pending_approval():
+  # 故障窗口：达到工具轮次上限时，如果本轮已经创建提案，必须返回
+  # 结构化待审批摘要和降级答复，不能抛异常丢失已提交的业务事实。
+  call_count = 0
+
+  def create(**kwargs):
+    nonlocal call_count
+    call_count += 1
+    tool_call = SimpleNamespace(
+      id=f"call-{call_count}",
+      type="function",
+      function=SimpleNamespace(name="propose_refund", arguments="{}"),
+    )
+    message = SimpleNamespace(
+      content="",
+      reasoning_content="继续调用提案工具",
+      tool_calls=[tool_call],
+    )
+    return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+  fake_client = SimpleNamespace(
+    chat=SimpleNamespace(
+      completions=SimpleNamespace(create=create)
+    )
+  )
+  proposal_result = {
+    "ok": True,
+    "data": {
+      "run_id": "run-1",
+      "proposal_id": "proposal-1",
+      "approval_id": "approval-1",
+      "action_type": "refund",
+      "status": "awaiting_approval",
+      "amount_cents": 1000,
+      "currency": "CNY",
+      "resume_required": False,
+      "error_code": None,
+    },
+  }
+  messages = [{"role": "user", "content": "申请退款"}]
+
+  result = run_one_turn(
+    messages=messages,
+    client=fake_client,
+    tool_definitions=[],
+    tool_functions={"propose_refund": lambda: proposal_result},
+    max_tool_rounds=1,
+  )
+
+  assert call_count == 2
+  assert result.answer_incomplete is True
+  assert result.pending_approvals[0].run_id == "run-1"
+  assert messages[-1]["role"] == "assistant"
+  assert "提案已创建" in messages[-1]["content"]
+
+
 @pytest.mark.parametrize("max_tool_rounds", [0, -1])
 def test_run_one_turn_requires_positive_tool_round_limit(max_tool_rounds):
   with pytest.raises(ValueError, match="max_tool_rounds must be positive"):
@@ -965,7 +1021,7 @@ def test_6(monkeypatch):
   )
 
   events = result.events
-  #request -> start ->faild
+  # 保护行为：事件顺序必须是请求、开始、失败。
   assert events[0].type=="tool_call.requested" and events[1].type=="tool_call.started" and events[2].type=="tool_call.failed"
   assert messages==[
     {
@@ -990,7 +1046,7 @@ def test_6(monkeypatch):
     {
       "role":"tool",
       "tool_call_id":"tool_call_id_1",
-      "content":'{"OK": false, "error": "ValueError:执行时异常"}'
+      "content":'{"OK": false, "error": "TOOL_EXECUTION_FAILED"}'
     },
     {
       "role":"assistant",
@@ -1115,7 +1171,7 @@ def test_7(monkeypatch):
     {
       "role":"tool",
       "tool_call_id":"tool_call_id_1",
-      "content":'{"OK": false, "error": "ValueError:执行时异常"}'
+      "content":'{"OK": false, "error": "TOOL_EXECUTION_FAILED"}'
     },
     {
       "role":"tool",

@@ -161,18 +161,12 @@ def build_scope(tmp_path) -> GatewayScope:
 def build_gateway(tmp_path):
     """装配 ActionToolGateway 及其依赖。"""
     scope = build_scope(tmp_path)
-    organization_service = OrganizationService(
-        organization_store=SQLiteOrganizationStore(scope.database_path),
-        user_store=SQLiteUserStore(scope.database_path),
-    )
-    runner = AdvancingRunner(
-        store=scope.store,
-        organization_id=scope.org_a.organization_id,
-    )
-    service = ActionWorkflowService(
-        store=scope.store,
-        organization_service=organization_service,
-        runner=runner,
+    service = build_service(
+        scope,
+        runner=AdvancingRunner(
+            store=scope.store,
+            organization_id=scope.org_a.organization_id,
+        ),
     )
     gateway = ActionToolGateway(
         service=service,
@@ -188,6 +182,19 @@ def build_gateway(tmp_path):
         turn_id="turn-gateway-1",
     )
     return scope, gateway, invocation
+
+
+def build_service(scope: GatewayScope, *, runner):
+    """为指定测试范围装配动作应用服务。"""
+    organization_service = OrganizationService(
+        organization_store=SQLiteOrganizationStore(scope.database_path),
+        user_store=SQLiteUserStore(scope.database_path),
+    )
+    return ActionWorkflowService(
+        store=scope.store,
+        organization_service=organization_service,
+        runner=runner,
+    )
 
 
 def count_rows(database_path: Path, table: str) -> int:
@@ -218,6 +225,8 @@ def test_propose_refund_creates_proposal_with_context(tmp_path):
     assert data["status"] == "awaiting_approval"
     assert data["amount_cents"] == 6000
     assert data["currency"] == "CNY"
+    assert data["resume_required"] is False
+    assert data["error_code"] is None
     assert data["run_id"]
     assert data["proposal_id"]
     assert data["approval_id"]
@@ -313,6 +322,41 @@ def test_propose_compensation_uses_fixed_coupon_days(tmp_path):
     assert json.loads(row[0]) == {"coupon_valid_days": 30}
 
 
+def test_proposal_start_failure_returns_recovery_metadata(tmp_path):
+    # 故障窗口：提案事实已创建但运行器不可用时，工具必须保留标识，
+    # 同时明确返回 queued、resume_required 与稳定错误码。
+    scope = build_scope(tmp_path)
+    gateway = ActionToolGateway(
+        service=build_service(scope, runner=None),
+        order_store=SQLiteOrderStore(scope.database_path),
+    )
+    invocation = AgentInvocationContext(
+        tenant=TenantContext(
+            user_id=scope.alice.user_id,
+            organization_id=scope.org_a.organization_id,
+            role=MembershipRole.ADMIN,
+        ),
+        conversation_id="conv-start-failure",
+        turn_id="turn-start-failure",
+    )
+
+    result = gateway.bind(context=invocation)["propose_refund"](
+        order_no=scope.order_a.order_no,
+        amount_cents=1000,
+        currency="CNY",
+        refund_scope="partial",
+        reason_code="quality_issue",
+        reason_text="质量问题",
+    )
+
+    assert result["ok"] is True
+    assert result["data"]["status"] == "queued"
+    assert result["data"]["resume_required"] is True
+    assert result["data"]["error_code"] == "CHECKPOINT_UNAVAILABLE"
+    assert result["data"]["run_id"]
+    assert result["data"]["approval_id"]
+
+
 def test_propose_active_proposal_exists_returns_stable_code(tmp_path):
     # 边界情况：同订单同动作类型已有非终态提案时返回
     # ACTION_ACTIVE_PROPOSAL_EXISTS，不创建第二份待审批项。
@@ -365,10 +409,60 @@ def test_get_action_status_reads_run_and_hides_unknown(tmp_path):
     assert found["data"]["order_no"] == scope.order_a.order_no
     assert found["data"]["approval_status"] == "pending"
     assert found["data"]["decision"] is None
+    assert found["data"]["decision_comment"] is None
+    assert found["data"]["run_error_code"] is None
+    assert found["data"]["run_error_retryable"] is False
+    assert found["data"]["current_version"] == {
+        "version_no": 1,
+        "amount_cents": 6000,
+        "currency": "CNY",
+        "reason_code": "quality_issue",
+        "reason_text": "商品存在质量问题",
+        "parameters": {"refund_scope": "partial"},
+    }
     assert found["data"]["execution_status"] is None
     assert "thread_id" not in found["data"]
     assert missing["ok"] is False
     assert missing["error"]["code"] == "RUN_NOT_FOUND"
+
+
+def test_get_action_status_exposes_run_level_failure(tmp_path):
+    # 故障说明：执行记录产生前的工作流失败必须通过状态工具返回 Run 级
+    # 稳定错误码和可重试标记，不能只依赖 execution_error_code。
+    scope, gateway, invocation = build_gateway(tmp_path)
+    functions = gateway.bind(context=invocation)
+    created = functions["propose_refund"](
+        order_no=scope.order_a.order_no,
+        amount_cents=6000,
+        currency="CNY",
+        refund_scope="partial",
+        reason_code="quality_issue",
+        reason_text="商品存在质量问题",
+    )
+    scope.store.transition_run(
+        organization_id=scope.org_a.organization_id,
+        run_id=created["data"]["run_id"],
+        expected_statuses=(ActionRunStatus.AWAITING_APPROVAL,),
+        new_status=ActionRunStatus.FAILED,
+        error_code="EXECUTION_DATA_INTEGRITY_ERROR",
+        error_retryable=False,
+        actor_type=AuditActorType.SYSTEM,
+        actor_user_id=None,
+        event_type="run_failed",
+        details_json="{}",
+    )
+
+    status = functions["get_action_status"](
+        run_id=created["data"]["run_id"],
+    )
+
+    assert status["ok"] is True
+    assert status["data"]["status"] == "failed"
+    assert status["data"]["run_error_code"] == (
+        "EXECUTION_DATA_INTEGRITY_ERROR"
+    )
+    assert status["data"]["run_error_retryable"] is False
+    assert status["data"]["execution_status"] is None
 
 
 def test_bind_requires_agent_invocation_context(tmp_path):
@@ -412,6 +506,43 @@ def test_execute_unknown_tool_and_invalid_arguments(tmp_path):
     assert invalid["ok"] is False
     assert invalid["error"]["code"] == "INVALID_ARGUMENTS"
     assert count_rows(scope.database_path, "action_proposals") == 0
+
+
+def test_unexpected_infrastructure_error_is_redacted(tmp_path):
+    # 安全边界：未预期数据库异常必须映射为稳定错误码，不能把文件路径、
+    # SQL 或原始异常内容返回给模型。
+    class FailingOrderStore:
+        """始终抛出包含敏感路径的测试订单存储。"""
+
+        def get_by_no(self, **kwargs):
+            raise RuntimeError("数据库位于 D:/secret/customer/app.db")
+
+    scope, _, invocation = build_gateway(tmp_path)
+    gateway = ActionToolGateway(
+        service=build_service(
+            scope,
+            runner=AdvancingRunner(
+                store=scope.store,
+                organization_id=scope.org_a.organization_id,
+            ),
+        ),
+        order_store=FailingOrderStore(),
+    )
+
+    result = gateway.bind(context=invocation)["propose_refund"](
+        order_no=scope.order_a.order_no,
+        amount_cents=1000,
+        currency="CNY",
+        refund_scope="partial",
+        reason_code="quality_issue",
+        reason_text="质量问题",
+    )
+
+    serialized = json.dumps(result, ensure_ascii=False)
+    assert result["ok"] is False
+    assert result["error"]["code"] == "ACTION_TOOL_UNAVAILABLE"
+    assert "D:/secret" not in serialized
+    assert "RuntimeError" not in serialized
 
 
 def test_gateway_exposes_only_propose_and_status_tools(tmp_path):

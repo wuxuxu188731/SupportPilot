@@ -16,10 +16,12 @@ class PendingApproval(BaseModel):
   status : str  # Run 当前状态，等待审批时为 awaiting_approval
   amount_cents : int  # 提案金额（分）
   currency : str  # 币种
+  resume_required : bool = False  # 工作流首次启动失败时是否需要管理员显式恢复
+  error_code : str | None = None  # 首次启动失败的稳定错误码，正常等待审批时为空
 
 
 class LLMResponse(BaseModel):
-  """llm_tool_call is function name which llm called"""
+  """单轮 Agent 调用响应，包含自然语言、事件、引用与待审批摘要。"""
   llm_answer : str | None = None
   llm_reasoning_content : str | None = None
   events : list[AgentEvent] = Field(default_factory=list) 

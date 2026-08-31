@@ -231,6 +231,8 @@ def test_propose_flow_reaches_store_and_pending_approvals(tmp_path):
     assert pending.status == "awaiting_approval"
     assert pending.amount_cents == 6000
     assert pending.currency == "CNY"
+    assert pending.resume_required is False
+    assert pending.error_code is None
     # 会话与回合标识确实写入 action_runs。
     with sqlite3.connect(scope["database_path"]) as connection:
         row = connection.execute(
@@ -313,6 +315,7 @@ def test_approval_then_new_chat_queries_status_without_replay(tmp_path):
         approval_id=approval_id,
         decided_by_user_id=scope["context"].user_id,
         decision=ApprovalDecisionType.APPROVED,
+        comment="核实质量问题后批准",
     )
     assert count_rows(scope["database_path"], "refund_records") == 1
 
@@ -340,12 +343,66 @@ def test_approval_then_new_chat_queries_status_without_replay(tmp_path):
     status_data = json.loads(status_tool["content"])["data"]
     assert status_data["status"] == "succeeded"
     assert status_data["decision"] == "approved"
+    assert status_data["decision_comment"] == "核实质量问题后批准"
+    assert status_data["current_version"]["amount_cents"] == 6000
+    assert status_data["current_version"]["reason_code"] == "quality_issue"
     assert status_data["execution_status"] == "succeeded"
     assert status_data["result"]["business_record_id"]
     assert second.pending_approvals == []
     # 状态查询不产生新的执行或业务记录。
     assert count_rows(scope["database_path"], "refund_records") == 1
     assert count_rows(scope["database_path"], "tool_executions") == 1
+
+
+def test_model_failure_after_proposal_returns_durable_fallback(tmp_path):
+    # 故障窗口：提案已经持久化后，最终模型答复失败不得让聊天请求整体失败；
+    # 应返回确定性降级答复、待审批标识，并把本轮消息持久化。
+    def fail_after_proposal(**kwargs):
+        raise RuntimeError("模型提供方响应包含 D:/secret/provider.log")
+
+    scope = build_chat(
+        tmp_path,
+        [
+            tool_call_response(
+                "call-order",
+                "get_order",
+                {"order_no": "ORD-AGENT-001"},
+            ),
+            tool_call_response(
+                "call-refund",
+                "propose_refund",
+                {
+                    "order_no": "ORD-AGENT-001",
+                    "amount_cents": 1000,
+                    "currency": "CNY",
+                    "refund_scope": "partial",
+                    "reason_code": "quality_issue",
+                    "reason_text": "质量问题",
+                },
+            ),
+            fail_after_proposal,
+        ],
+    )
+
+    result = scope["chat"].chat(
+        context=scope["context"],
+        conversation_id=scope["conversation"].conversation_id,
+        question="订单有质量问题，申请退款 10 元。",
+    )
+
+    assert result.answer_incomplete is True
+    assert "提案已创建" in result.llm_answer
+    assert "D:/secret" not in result.llm_answer
+    assert len(result.pending_approvals) == 1
+    assert result.pending_approvals[0].status == "awaiting_approval"
+    assert count_rows(scope["database_path"], "action_proposals") == 1
+    history = scope["sessions"].load_messages(
+        organization_id=scope["context"].organization_id,
+        user_id=scope["context"].user_id,
+        conversation_id=scope["conversation"].conversation_id,
+    )
+    assert history[-1]["role"] == "assistant"
+    assert history[-1]["content"] == result.llm_answer
 
 
 def test_attack_tool_call_is_rejected_without_side_effects(tmp_path):
