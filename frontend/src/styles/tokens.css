@@ -1,0 +1,94 @@
+/*
+ * 设计令牌：全站统一的颜色、间距、圆角与字体层级。
+ *
+ * 颜色语义（现代、克制、可信赖的企业工作台）：
+ * --sp-color-primary  主操作色：企业蓝，用于按钮/链接/选中态
+ * --sp-color-success  成功/生效状态
+ * --sp-color-warning  警告/待处理状态
+ * --sp-color-error    错误/危险状态
+ * --sp-color-text-*   正文层级文本
+ * --sp-color-border   分隔线与描边
+ * --sp-color-bg-*     页面/卡片/悬浮背景
+ */
+
+:root {
+  /* —— 主色板 —— */
+  --sp-color-primary: #2456c7;
+  --sp-color-primary-hover: #3a6ad6;
+  --sp-color-primary-pressed: #1c439d;
+  --sp-color-primary-weak: #e8effc;
+  --sp-color-success: #1f9d55;
+  --sp-color-warning: #b7791f;
+  --sp-color-error: #c0392b;
+
+  /* —— 文本层级 —— */
+  --sp-color-text-1: #1a2233;
+  --sp-color-text-2: #4a5468;
+  --sp-color-text-3: #8a94a6;
+
+  /* —— 描边与背景 —— */
+  --sp-color-border: #dde3ec;
+  --sp-color-border-strong: #c6cede;
+  --sp-color-bg-page: #f4f6fa;
+  --sp-color-bg-card: #ffffff;
+  --sp-color-bg-hover: #f0f4fb;
+
+  /* —— 圆角 —— */
+  --sp-radius-sm: 6px;
+  --sp-radius-md: 10px;
+  --sp-radius-lg: 14px;
+
+  /* —— 间距刻度（4 的倍数） —— */
+  --sp-space-1: 4px;
+  --sp-space-2: 8px;
+  --sp-space-3: 12px;
+  --sp-space-4: 16px;
+  --sp-space-5: 20px;
+  --sp-space-6: 24px;
+  --sp-space-8: 32px;
+  --sp-space-10: 40px;
+
+  /* —— 字体 —— */
+  --sp-font-family: 'Inter', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei',
+    'Helvetica Neue', Arial, sans-serif;
+  --sp-font-size-xs: 12px;
+  --sp-font-size-sm: 13px;
+  --sp-font-size-base: 14px;
+  --sp-font-size-lg: 16px;
+  --sp-font-size-xl: 20px;
+  --sp-font-size-xxl: 26px;
+
+  /* —— 阴影 —— */
+  --sp-shadow-card: 0 1px 2px rgba(26, 34, 51, 0.06), 0 4px 16px rgba(26, 34, 51, 0.06);
+  --sp-shadow-pop: 0 6px 24px rgba(26, 34, 51, 0.14);
+
+  color: var(--sp-color-text-1);
+  font-family: var(--sp-font-family);
+  font-size: var(--sp-font-size-base);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* 基础重置与页面底色 */
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  min-height: 100%;
+  background: var(--sp-color-bg-page);
+}
+
+#app {
+  min-height: 100vh;
+}
+
+/* 统一键盘焦点可见性：基本可访问性要求 */
+:focus-visible {
+  outline: 2px solid var(--sp-color-primary);
+  outline-offset: 2px;
+}
