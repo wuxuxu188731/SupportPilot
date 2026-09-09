@@ -2,7 +2,8 @@
  * API 请求与响应类型（DTO）。
  *
  * 与后端 `app/schemas/*`、`docs/frontend/api-inventory.md` 一一对应：
- * 本阶段只使用认证与企业相关模型；聊天/知识库/审批模型留待后续阶段按需补充。
+ * 包含认证、企业、会话与聊天模块所需模型；
+ * 知识库/审批模型留待后续阶段按需补充。
  * 所有属性均带中文注释；字段可空时显式标注 null（与后端 JSON 一致）。
  */
 
@@ -87,4 +88,170 @@ export interface ApiErrorShape {
   fieldErrors: Record<string, string>
   /** 原始错误对象，仅用于调试，不用于界面展示 */
   raw: unknown
+}
+
+// —— 会话与聊天模块 /conversations ——
+
+/** 会话列表项（后端 ConversationListItem，GET /conversations/ 响应元素）。 */
+export interface ConversationListItem {
+  /** 会话唯一标识（服务端生成），路由参数 conversationId 使用该值 */
+  conversation_id: string
+  /** 会话标题：服务端由首条用户消息推导；空会话显示「新会话」 */
+  title: string
+  /** 会话创建时间：UTC 文本 "%Y-%m-%d %H:%M:%S"（无时区后缀） */
+  created_at: string
+  /** 会话最近活动时间：UTC 文本，列表按此倒序 */
+  updated_at: string
+}
+
+/** 历史消息中的单条安全消息（后端 ConversationHistoryMessage）。 */
+export interface ConversationHistoryMessage {
+  /** 消息在会话中的原始序号（seq），从 1 开始递增，按升序返回 */
+  sequence: number
+  /** 消息角色：仅 user（用户问题）与 assistant（Agent 最终回答）两种 */
+  role: 'user' | 'assistant'
+  /** 消息正文（服务端已过滤内部字段；不含推理/工具内容） */
+  content: string
+  /** 消息写入时间：UTC 文本 "%Y-%m-%d %H:%M:%S"（无时区后缀） */
+  created_at: string
+}
+
+/** 单个会话的安全历史响应（后端 ConversationHistoryResponse）。 */
+export interface ConversationHistoryResponse {
+  /** 会话唯一标识 */
+  conversation_id: string
+  /** 会话当前附加系统提示词；未设置时为 null */
+  system_prompt: string | null
+  /** 会话创建时间：UTC 文本 */
+  created_at: string
+  /** 会话最近活动时间：UTC 文本 */
+  updated_at: string
+  /** 安全历史消息数组：只含用户问题与 Agent 最终回答，可为空数组 */
+  messages: ConversationHistoryMessage[]
+}
+
+/** 创建会话请求体（后端 CreateConversationRequest，extra=forbid）。 */
+export interface CreateConversationRequest {
+  /** 可选的会话附加系统提示词；服务端 strip 后为空等同不设置 */
+  system_prompt?: string | null
+}
+
+/** 创建会话响应（后端 ConversationCreated）。 */
+export interface ConversationCreated {
+  /** 新会话唯一标识 */
+  conversation_id: string
+}
+
+/** 更新会话系统提示词请求体（后端 UpdateSystemPromptRequest，extra=forbid）。 */
+export interface UpdateSystemPromptRequest {
+  /** 会话附加偏好（不能覆盖服务器安全规则），strip 后必须非空 */
+  system_prompt: string
+}
+
+/** 更新会话系统提示词响应（后端 SystemPromptUpdated）。 */
+export interface SystemPromptUpdated {
+  /** 固定 true，表示更新请求已被服务端接受 */
+  updated: boolean
+}
+
+/** 聊天请求体（后端 ChatRequest，extra=forbid）：只发送用户问题。 */
+export interface ChatRequest {
+  /** 用户问题：服务端 strip 后非空；空白问题会被 422 拒绝 */
+  question: string
+}
+
+/** 单轮工具调用事件（后端 AgentEvent）：用于「处理过程」过程展示。 */
+export interface AgentEvent {
+  /** 事件类型：工具请求/开始/完成/失败 或 引用校验失败 */
+  type:
+    | 'tool_call.requested'
+    | 'tool_call.started'
+    | 'tool_call.completed'
+    | 'tool_call.failed'
+    | 'citation.invalid'
+  /** 事件时间：服务器本地时间 ISO（无时区后缀，与 UTC 字段语义不同） */
+  timestamp: string
+  /** 工具调用标识（内部关联用，不用于用户输入） */
+  tool_call_id: string
+  /** 工具名（如 search_knowledge / get_order / propose_refund） */
+  tool_call_name: string
+  /** 工具参数：可能含业务/内部数据，默认不直接渲染原始 JSON */
+  tool_call_arguments: Record<string, unknown>
+  /** 工具执行结果（completed 时才有）：可能含内部数据，默认不直接渲染 */
+  result: unknown | null
+  /** 错误信息（failed 时才有）：仅展示服务端安全错误文本 */
+  error: string | null
+  /** 工具执行耗时（毫秒，浮点），用于过程展示 */
+  duration_ms: number | null
+}
+
+/** 知识库结构化引用（后端 Citation）：回答中 [C1] 等标记对应这里的条目。 */
+export interface Citation {
+  /** 引用编号（C1..Cn）：回答正文里的 [C1] 角标与该值对应 */
+  citation_id: string
+  /** 来源文档标识 */
+  document_id: string
+  /** 来源文档版本标识 */
+  version_id: string
+  /** 命中的知识块标识 */
+  chunk_id: string
+  /** 文档标题 */
+  title: string
+  /** 命中知识块在文档中的标题路径（如「3.2 退货流程」）；无则为 null */
+  heading_path: string | null
+  /** 可信片段正文（来自知识库，服务端已校验） */
+  content: string
+}
+
+/** 检索摘要（后端 RetrievalSummary）：本轮知识检索的紧凑状态信息。 */
+export interface RetrievalSummary {
+  /** 检索策略标识（如 baseline / adaptive / not_needed） */
+  strategy: string
+  /** 检索轮数 */
+  round_count: number
+  /** 证据状态：SUFFICIENT / INSUFFICIENT（大写）等 */
+  evidence_status: string
+  /** 检索总耗时（毫秒） */
+  latency_ms: number
+}
+
+/** 待审批提案摘要（后端 PendingApproval）。
+ *  唯一可信来源是聊天响应的该结构化数组，禁止从自然语言解析 Approval ID。 */
+export interface PendingApproval {
+  /** 动作 Run 标识：可用于后续查询 Run 状态 */
+  run_id: string
+  /** 提案标识 */
+  proposal_id: string
+  /** 审批标识：管理员在审批中心处理时使用 */
+  approval_id: string
+  /** 动作类型：refund（退款）或 compensation（优惠券补偿） */
+  action_type: 'refund' | 'compensation'
+  /** Run 当前状态：等待审批时为 awaiting_approval */
+  status: string
+  /** 提案金额（整数分，非小数金额字段） */
+  amount_cents: number
+  /** 币种（样例数据为 CNY，不硬编码唯一币种） */
+  currency: string
+  /** 工作流首次启动失败时是否需要管理员显式恢复 */
+  resume_required: boolean
+  /** 首次启动失败的稳定错误码；正常等待审批时为 null */
+  error_code: string | null
+}
+
+/** 单轮聊天成功响应（后端 LLMResponse）：Agent 工具多轮执行后的完整结果。 */
+export interface LLMResponse {
+  /** 最终自然语言回答；可为 null（如模型暂时无法生成完整回复） */
+  llm_answer: string | null
+  /** 模型推理内容（思考过程）：默认不在用户界面展示，仅保留类型 */
+  llm_reasoning_content: string | null
+  /** 本轮工具调用事件列表（默认折叠展示，不渲染原始参数/结果） */
+  events: AgentEvent[]
+  /** 知识库结构化引用列表（回答正文中的 [C1] 标记与之对应） */
+  citations: Citation[]
+  /** 检索摘要；本轮未触发检索时为 null */
+  retrieval_summary: RetrievalSummary | null
+  /** 证据不足/引用异常时服务端确定性置 true，界面需给出谨慎提示 */
+  answer_incomplete: boolean
+  /** 本轮提出的退款/补偿待审批提案（禁止从自然语言解析） */
+  pending_approvals: PendingApproval[]
 }

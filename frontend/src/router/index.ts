@@ -51,6 +51,18 @@ const routes = [
     meta: { requiresAuth: true, requiresOrganization: true, title: '工作台' },
   },
   {
+    path: '/app/chat',
+    name: 'chat',
+    component: () => import('@/views/ChatView.vue'),
+    meta: { requiresAuth: true, requiresOrganization: true, title: '客服对话' },
+  },
+  {
+    path: '/app/chat/:conversationId',
+    name: 'chat-detail',
+    component: () => import('@/views/ChatView.vue'),
+    meta: { requiresAuth: true, requiresOrganization: true, title: '客服对话' },
+  },
+  {
     // 未匹配路径统一回根路径，由守卫决定去向
     path: '/:pathMatch(.*)*',
     redirect: { name: 'root' },

@@ -4,12 +4,14 @@
  * 只展示真实存在的上下文（用户、企业、角色）与模块开放说明，
  * 不展示任何虚构的业务统计数据。
  */
-import { NAlert, NCard } from 'naive-ui'
+import { useRouter } from 'vue-router'
+import { NAlert, NButton, NCard } from 'naive-ui'
 
 import MainLayout from '@/layouts/MainLayout.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useOrganizationStore } from '@/stores/organization'
 
+const router = useRouter()
 const authStore = useAuthStore()
 const organizationStore = useOrganizationStore()
 </script>
@@ -28,11 +30,15 @@ const organizationStore = useOrganizationStore()
           账号创建于 {{ authStore.currentUser?.created_at }}（UTC），用户 ID：
           {{ authStore.currentUser?.user_id }}
         </p>
+        <n-button type="primary" data-test="go-chat" @click="router.push({ name: 'chat' })">
+          进入客服对话
+        </n-button>
       </n-card>
 
       <n-alert type="info" :show-icon="true" class="module-alert">
-        客服对话、知识库、审批中心与成员管理模块将在后续阶段逐步接入；此处仅展示
-        当前登录与企业上下文，不包含任何模拟数据。
+        客服对话已开放（会话列表、多轮问答、知识引用与待审批提案展示）；知识库、
+        审批中心与成员管理模块将在后续阶段逐步接入。此处仅展示当前登录与企业
+        上下文，不包含任何模拟数据。
       </n-alert>
     </section>
   </MainLayout>
@@ -64,6 +70,13 @@ const organizationStore = useOrganizationStore()
 .welcome-sub.muted {
   color: var(--sp-color-text-3);
   font-size: var(--sp-font-size-sm);
+}
+
+.welcome-card :deep(.n-card__content) {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sp-space-3);
 }
 
 .module-alert {

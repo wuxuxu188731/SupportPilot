@@ -35,6 +35,10 @@ export default defineConfig(({ mode }) => {
       environment: 'jsdom',
       setupFiles: ['./src/test/setup.ts'],
       include: ['src/**/*.spec.ts'],
+      // 慢环境（受限开发机/低核数）下放宽默认 5s 超时；
+      // 路由守卫与组件测试涉及异步导航与动画，需要更多余量
+      testTimeout: 20_000,
+      hookTimeout: 20_000,
     },
   }
 })

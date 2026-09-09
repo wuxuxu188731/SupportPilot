@@ -1,15 +1,15 @@
 <script setup lang="ts">
 /*
- * 主界面布局：顶栏（品牌、企业切换、用户、退出）+ 左侧导航（预留模块入口）
- * + 内容区。
+ * 主界面布局：顶栏（品牌、企业切换、用户、退出）+ 左侧导航 + 内容区。
  *
  * 说明：
- *  - 对话、知识库、审批、成员管理为后续阶段模块，目前以「待实现」占位且
- *    禁用，不使用假数据；
+ *  - 客服对话模块已开放并接入路由；知识库、审批、成员管理为后续阶段
+ *    模块，目前以「待实现」占位且禁用，不使用假数据；
+ *  - 菜单高亮跟随当前路由（工作台 /app、客服对话 /app/chat 前缀）；
  *  - 窄屏（<960px）自动隐藏左侧导航，仅保留顶栏核心操作，避免横向溢出。
  */
 import { computed } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { NButton, NMenu, useDialog, useMessage } from 'naive-ui'
 import type { MenuOption } from 'naive-ui'
 
@@ -18,6 +18,7 @@ import OrganizationSwitcher from '@/components/organization/OrganizationSwitcher
 import { useAuthStore } from '@/stores/auth'
 import { useOrganizationStore } from '@/stores/organization'
 
+const route = useRoute()
 const router = useRouter()
 const message = useMessage()
 const dialog = useDialog()
@@ -27,12 +28,15 @@ const organizationStore = useOrganizationStore()
 /** 当前用户显示名。 */
 const displayName = computed(() => authStore.currentUser?.username ?? '')
 
-/** 后续阶段功能导航占位：全部禁用并标注「待实现」，不得伪造可用入口。 */
+/** 侧栏功能导航：客服对话已开放，其余模块仍标注「待实现」并禁用。 */
 const menuOptions: MenuOption[] = [
   {
-    label: '客服对话（待实现）',
+    label: '工作台',
+    key: 'home',
+  },
+  {
+    label: '客服对话',
     key: 'chat',
-    disabled: true,
   },
   {
     label: '知识库（待实现）',
@@ -50,6 +54,22 @@ const menuOptions: MenuOption[] = [
     disabled: true,
   },
 ]
+
+/** 当前路由对应的高亮菜单 key（与路由 name 映射）。 */
+const activeMenuKey = computed(() => {
+  if (route.name === 'app') return 'home'
+  if (route.name === 'chat' || route.name === 'chat-detail') return 'chat'
+  return ''
+})
+
+/** 菜单点击：仅已开放的模块会触发导航，待实现项在选项中已禁用。 */
+function handleMenuSelect(key: string): void {
+  if (key === 'home') {
+    void router.push({ name: 'app' })
+  } else if (key === 'chat') {
+    void router.push({ name: 'chat' })
+  }
+}
 
 /** 退出登录：先弹确认框，确认后清理本地认证与企业状态并返回登录页。 */
 function handleLogout(): void {
@@ -99,8 +119,12 @@ function handleLogout(): void {
     <div class="app-body">
       <aside class="app-sider">
         <div class="sider-caption">功能模块</div>
-        <n-menu :options="menuOptions" :value="''" />
-        <p class="sider-note">对话、知识库、审批与成员管理将在后续阶段逐步开放。</p>
+        <n-menu
+          :options="menuOptions"
+          :value="activeMenuKey"
+          @update:value="handleMenuSelect"
+        />
+        <p class="sider-note">知识库、审批与成员管理将在后续阶段逐步开放。</p>
       </aside>
 
       <main class="app-content">
