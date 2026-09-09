@@ -3,8 +3,8 @@
  * 主界面布局：顶栏（品牌、企业切换、用户、退出）+ 左侧导航 + 内容区。
  *
  * 说明：
- *  - 客服对话模块已开放并接入路由；知识库、审批、成员管理为后续阶段
- *    模块，目前以「待实现」占位且禁用，不使用假数据；
+ *  - 客服对话与审批中心模块已开放并接入路由；知识库、成员管理为后续
+ *    阶段模块，目前以「待实现」占位且禁用，不使用假数据；
  *  - 菜单高亮跟随当前路由（工作台 /app、客服对话 /app/chat 前缀）；
  *  - 窄屏（<960px）自动隐藏左侧导航，仅保留顶栏核心操作，避免横向溢出。
  */
@@ -28,7 +28,7 @@ const organizationStore = useOrganizationStore()
 /** 当前用户显示名。 */
 const displayName = computed(() => authStore.currentUser?.username ?? '')
 
-/** 侧栏功能导航：客服对话已开放，其余模块仍标注「待实现」并禁用。 */
+/** 侧栏功能导航：客服对话与审批中心已开放，其余模块仍标注「待实现」并禁用。 */
 const menuOptions: MenuOption[] = [
   {
     label: '工作台',
@@ -39,13 +39,12 @@ const menuOptions: MenuOption[] = [
     key: 'chat',
   },
   {
-    label: '知识库（待实现）',
-    key: 'knowledge',
-    disabled: true,
+    label: '审批中心',
+    key: 'approvals',
   },
   {
-    label: '审批中心（待实现）',
-    key: 'approvals',
+    label: '知识库（待实现）',
+    key: 'knowledge',
     disabled: true,
   },
   {
@@ -59,6 +58,7 @@ const menuOptions: MenuOption[] = [
 const activeMenuKey = computed(() => {
   if (route.name === 'app') return 'home'
   if (route.name === 'chat' || route.name === 'chat-detail') return 'chat'
+  if (route.name === 'approvals' || route.name === 'approval-detail') return 'approvals'
   return ''
 })
 
@@ -68,6 +68,8 @@ function handleMenuSelect(key: string): void {
     void router.push({ name: 'app' })
   } else if (key === 'chat') {
     void router.push({ name: 'chat' })
+  } else if (key === 'approvals') {
+    void router.push({ name: 'approvals' })
   }
 }
 
@@ -124,7 +126,7 @@ function handleLogout(): void {
           :value="activeMenuKey"
           @update:value="handleMenuSelect"
         />
-        <p class="sider-note">知识库、审批与成员管理将在后续阶段逐步开放。</p>
+        <p class="sider-note">知识库与成员管理将在后续阶段逐步开放。</p>
       </aside>
 
       <main class="app-content">

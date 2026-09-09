@@ -96,6 +96,20 @@ describe('未登录用户的导航约束', () => {
     expect(router.currentRoute.value.query.redirect).toBe('/app/chat/conv-1')
   })
 
+  it('未登录访问 /app/approvals 与审批详情：同样跳转登录页并记录目标', async () => {
+    // 保护行为：审批中心与审批详情路由必须沿用与 /app 相同的认证守卫
+    const router = createAppRouter(createMemoryHistory())
+    registerGuards(router)
+
+    await router.push('/app/approvals')
+    expect(router.currentRoute.value.name).toBe('login')
+    expect(router.currentRoute.value.query.redirect).toBe('/app/approvals')
+
+    await router.push('/app/approvals/a-1')
+    expect(router.currentRoute.value.name).toBe('login')
+    expect(router.currentRoute.value.query.redirect).toBe('/app/approvals/a-1')
+  })
+
   it('未登录访问 /login 与 /register：直接放行', async () => {
     // 边界情况：公开页面不得被守卫拦截
     const router = createAppRouter(createMemoryHistory())
@@ -148,6 +162,25 @@ describe('主界面的企业上下文约束', () => {
 
     expect(router.currentRoute.value.name).toBe('organizations')
     expect(router.currentRoute.value.query.redirect).toBe('/app/chat/conv-1')
+  })
+
+  it('已登录但没有选择企业：不能直接访问审批详情 URL', async () => {
+    // 边界情况：审批中心与审批详情必须要求企业上下文（直接访问详情URL场景）
+    const router = await setupLoggedInRouter({ withOrganization: false })
+
+    await router.push('/app/approvals/a-1')
+
+    expect(router.currentRoute.value.name).toBe('organizations')
+    expect(router.currentRoute.value.query.redirect).toBe('/app/approvals/a-1')
+  })
+
+  it('已登录且本地企业仍有效：直接进入审批中心（刷新后恢复）', async () => {
+    // 保护行为：刷新页面后本地企业选择有效时，审批中心深链可放行
+    const router = await setupLoggedInRouter({ withOrganization: true })
+
+    await router.push('/app/approvals')
+
+    expect(router.currentRoute.value.name).toBe('approvals')
   })
 
   it('已登录且本地企业仍有效：直接进入 /app（刷新后恢复）', async () => {

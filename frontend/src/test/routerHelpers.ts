@@ -15,6 +15,8 @@ export async function preloadRouteComponents(): Promise<void> {
     import('@/views/RegisterView.vue'),
     import('@/views/OrganizationsView.vue'),
     import('@/views/AppHomeView.vue'),
+    import('@/views/ApprovalListView.vue'),
+    import('@/views/ApprovalDetailView.vue'),
   ])
 }
 

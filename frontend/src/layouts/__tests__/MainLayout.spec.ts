@@ -62,14 +62,15 @@ beforeEach(() => {
 })
 
 describe('MainLayout 功能菜单', () => {
-  it('「客服对话」已开放可用，其余模块标注待实现并禁用', async () => {
-    // 保护行为：菜单中客服对话不再是禁用占位，其它模块仍保持待实现
+  it('「客服对话」与「审批中心」已开放可用，其余模块标注待实现并禁用', async () => {
+    // 保护行为：菜单中客服对话与审批中心不再是禁用占位，其它模块仍保持待实现
     const { wrapper } = await mountLayout('/app')
 
     expect(wrapper.text()).toContain('客服对话')
     expect(wrapper.text()).not.toContain('客服对话（待实现）')
+    expect(wrapper.text()).toContain('审批中心')
+    expect(wrapper.text()).not.toContain('审批中心（待实现）')
     expect(wrapper.text()).toContain('知识库（待实现）')
-    expect(wrapper.text()).toContain('审批中心（待实现）')
     expect(wrapper.text()).toContain('成员管理（待实现）')
   })
 
@@ -84,6 +85,17 @@ describe('MainLayout 功能菜单', () => {
     expect(selected!.text()).toContain('客服对话')
   })
 
+  it('在 /app/approvals 页面时菜单高亮「审批中心」', async () => {
+    // 保护行为：审批中心菜单必须跟随审批列表/详情路由高亮
+    const { wrapper } = await mountLayout('/app/approvals')
+
+    const selected = wrapper
+      .findAll('.n-menu-item-content')
+      .find((element) => [...element.classes()].some((name) => name.includes('--selected')))
+    expect(selected).toBeDefined()
+    expect(selected!.text()).toContain('审批中心')
+  })
+
   it('点击「客服对话」菜单跳转到聊天空状态页面', async () => {
     // 保护行为：主界面导航入口必须真正可达客服对话页面
     const { wrapper, router } = await mountLayout('/app')
@@ -96,5 +108,19 @@ describe('MainLayout 功能菜单', () => {
     await flushPromises()
 
     expect(router.currentRoute.value.name).toBe('chat')
+  })
+
+  it('点击「审批中心」菜单跳转到审批中心页面', async () => {
+    // 保护行为：审批中心导航入口必须真正可达（覆盖需求 1）
+    const { wrapper, router } = await mountLayout('/app')
+
+    const item = wrapper
+      .findAll('.n-menu-item-content')
+      .find((element) => element.text().includes('审批中心'))
+    expect(item).toBeDefined()
+    await item!.trigger('click')
+    await flushPromises()
+
+    expect(router.currentRoute.value.name).toBe('approvals')
   })
 })

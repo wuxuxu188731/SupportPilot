@@ -63,6 +63,18 @@ const routes = [
     meta: { requiresAuth: true, requiresOrganization: true, title: '客服对话' },
   },
   {
+    path: '/app/approvals',
+    name: 'approvals',
+    component: () => import('@/views/ApprovalListView.vue'),
+    meta: { requiresAuth: true, requiresOrganization: true, title: '审批中心' },
+  },
+  {
+    path: '/app/approvals/:approvalId',
+    name: 'approval-detail',
+    component: () => import('@/views/ApprovalDetailView.vue'),
+    meta: { requiresAuth: true, requiresOrganization: true, title: '审批详情' },
+  },
+  {
     // 未匹配路径统一回根路径，由守卫决定去向
     path: '/:pathMatch(.*)*',
     redirect: { name: 'root' },

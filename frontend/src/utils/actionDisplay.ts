@@ -30,6 +30,12 @@ export const ACTION_TYPE_TEXT: Record<ActionTypeValue, string> = {
   compensation: '补偿',
 }
 
+/** 工作流类型 → 中文标签（Run 视图展示用，与动作类型取值一致）。 */
+export const WORKFLOW_TYPE_TEXT: Record<ActionTypeValue, string> = {
+  refund: '退款',
+  compensation: '补偿',
+}
+
 /** 审批状态 → 中文标签。 */
 export const APPROVAL_STATUS_TEXT: Record<ApprovalStatusValue, string> = {
   pending: '待审批',
