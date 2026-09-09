@@ -4,7 +4,8 @@
 > Agent Tool（`propose_refund` / `search_knowledge` 等）、数据库 Store、
 > 内部 Python 方法一律不计入。
 >
-> - 依据版本：仓库 HEAD `42b83d9`（第三阶段，客服对话闭环）
+> - 依据版本：仓库 `42b83d9`（第三阶段，客服对话闭环；自该提交起 HTTP
+>   接口面未再变化，后续提交仅涉及测试与文档）
 > - 核对方式：静态阅读 `main.py` / `app/api/*` / `app/schemas/*` /
 >   `app/api/dependencies.py` / `tests/api/*`，并在导入阶段用临时环境变量
 >   在内存中生成 OpenAPI（`app.openapi()`，未启动服务器、未修改任何配置、
