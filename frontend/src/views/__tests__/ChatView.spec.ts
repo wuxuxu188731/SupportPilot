@@ -33,12 +33,18 @@ vi.mock('@/api/chat', () => ({
   updateSystemPrompt: vi.fn(),
   sendChatMessage: vi.fn(),
 }))
+vi.mock('@/api/action', () => ({
+  listApprovals: vi.fn(),
+  getApprovalDetail: vi.fn(),
+  decideApproval: vi.fn(),
+  getRunStatus: vi.fn(),
+  resumeRun: vi.fn(),
+}))
 
 import * as authApi from '@/api/auth'
 import * as chatApi from '@/api/chat'
 import * as organizationApi from '@/api/organization'
 import type { ConversationHistoryResponse, LLMResponse } from '@/api/types'
-
 const USER = { user_id: 'u-1', username: 'alice', created_at: '2026-09-01 00:00:00' }
 const ORG_LIST = [{ organization_id: 'org-1', name: '示例企业', role: 'admin' as const }]
 const CONVERSATIONS = [
@@ -205,5 +211,48 @@ describe('ChatView 会话列表交互', () => {
 
     expect(router.currentRoute.value.name).toBe('chat-detail')
     expect(router.currentRoute.value.params.conversationId).toBe('conv-1')
+  })
+})
+
+describe('ChatView 待审批跳转', () => {
+  it('点击待审批卡片「查看审批」跳转审批详情路由', async () => {
+    // 保护行为：pending_approvals 的 open-detail 必须跳转真实审批详情，
+    // 只使用结构化 approval_id，不从自然语言解析（覆盖要求 34）
+    vi.mocked(chatApi.listConversations).mockResolvedValue(CONVERSATIONS)
+    vi.mocked(chatApi.getConversationHistory).mockResolvedValue(historyResponse())
+    vi.mocked(chatApi.sendChatMessage).mockResolvedValue({
+      ...chatResponse(),
+      pending_approvals: [
+        {
+          run_id: 'run-1',
+          proposal_id: 'proposal-1',
+          approval_id: 'approval-123',
+          action_type: 'refund',
+          status: 'awaiting_approval',
+          amount_cents: 6000,
+          currency: 'CNY',
+          resume_required: false,
+          error_code: null,
+        },
+      ],
+    })
+    seedLogin()
+
+    const { wrapper, router } = await mountChatView('/app/chat/conv-1')
+    await flushNavigation()
+    await flushPromises()
+
+    await wrapper.find('[data-test="chat-input"] textarea').setValue('需要退款审批')
+    await wrapper.find('[data-test="chat-send"]').trigger('click')
+    await flushNavigation()
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('待审批提案')
+    await wrapper.find('[data-test="open-approval"]').trigger('click')
+    await flushNavigation()
+    await flushPromises()
+
+    expect(router.currentRoute.value.name).toBe('approval-detail')
+    expect(router.currentRoute.value.params.approvalId).toBe('approval-123')
   })
 })

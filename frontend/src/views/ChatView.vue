@@ -108,9 +108,9 @@ async function onSaveSystemPrompt(prompt: string): Promise<void> {
   }
 }
 
-/** 待审批卡片「查看审批」：审批中心下一阶段开放，这里仅提示。 */
+/** 待审批卡片「查看审批」：跳转审批详情（结构化 approval_id，不解析自然语言）。 */
 function onOpenApproval(approvalId: string): void {
-  void message.info(`审批中心将在下一阶段开放（审批 ID：${approvalId}）`)
+  void router.push({ name: 'approval-detail', params: { approvalId } })
 }
 
 /** 关闭一次性提示。 */

@@ -35,7 +35,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  /** 待审批卡片「查看审批」：预留下一阶段跳转（当前仅提示） */
+  /** 待审批卡片「查看审批」：上抛给 ChatView 进行路由跳转 */
   'open-approval': [approvalId: string]
 }>()
 

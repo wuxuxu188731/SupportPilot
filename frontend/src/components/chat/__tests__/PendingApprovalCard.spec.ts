@@ -85,13 +85,14 @@ describe('PendingApprovalCard 待审批卡片', () => {
     expect(wrapper.text()).toContain('需要管理员恢复')
   })
 
-  it('审批中心未开放说明与预留查看入口', async () => {
-    // 保护行为：当前必须如实标注「审批中心将在下一阶段开放」，
-    // 「查看审批」点击只发出预留事件，不跳向不存在的页面
+  it('查看审批入口发出来 open-detail 事件（跳转由父级处理）', async () => {
+    // 保护行为：「查看审批」必须是真实入口（不再提示下一阶段开放），
+    // 且只发出结构化 approval_id，不解析自然语言
     const wrapper = mount(PendingApprovalCard, { props: { approval: approval() } })
     await flushPromises()
 
-    expect(wrapper.text()).toContain('审批中心将在下一阶段开放')
+    expect(wrapper.text()).not.toContain('下一阶段开放')
+    expect(wrapper.text()).toContain('查看审批')
 
     await wrapper.find('[data-test="open-approval"]').trigger('click')
     expect(wrapper.emitted('open-detail')?.[0]).toEqual(['approval-123'])

@@ -4,9 +4,9 @@
  *
  * 事实与范围说明：
  *  - approval_id / run_id 只从结构化 pending_approvals 读取，不解析自然语言；
- *  - 审批中心将在下一阶段开放：本阶段只提供复制标识能力与说明文案，
- *    并提供 open-detail 事件作为下一阶段「跳转审批详情」的预留接口；
- *    当前不会跳向不存在的页面。
+ *  - 「查看审批」点击发出 open-detail 事件，由父级（ChatView）跳转
+ *    审批详情路由 /app/approvals/{approval_id}；
+ *  - 若审批已被处理，详情页会展示最新状态；不可访问则按 404 规则回列表。
  */
 import { ref } from 'vue'
 import { NButton, NTag, NText } from 'naive-ui'
@@ -20,7 +20,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  /** 预留：点击「查看审批」时触发（下一阶段替换为路由跳转审批详情） */
+  /** 点击「查看审批」：跳转审批详情（由 ChatView 处理路由） */
   'open-detail': [approvalId: string]
 }>()
 
@@ -82,7 +82,7 @@ async function copyRunId(): Promise<void> {
   }
 }
 
-/** 预留跳转：点击「查看审批」时发出事件（审批中心下一阶段开放）。 */
+/** 跳转审批详情：点击「查看审批」时发出事件（ChatView 负责路由跳转）。 */
 function openDetail(): void {
   emit('open-detail', props.approval.approval_id)
 }
@@ -130,9 +130,8 @@ function openDetail(): void {
 
     <div class="approval-foot">
       <n-text depth="3" class="approval-note">
-        审批中心将在下一阶段开放；届时可直接从卡片跳转处理该提案。
+        进入审批中心可查看详情并处理该提案，管理员可批准、修改后批准或拒绝。
       </n-text>
-      <!-- 预留入口：当前仅展示提示，下一阶段替换为路由跳转（见 open-detail 事件注释） -->
       <n-button size="tiny" secondary type="primary" data-test="open-approval" @click="openDetail">
         查看审批
       </n-button>
