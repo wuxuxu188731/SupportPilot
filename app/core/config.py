@@ -1,8 +1,11 @@
 from openai import OpenAI
+from dotenv import load_dotenv
 
 import os
 import math
 from dataclasses import dataclass
+
+load_dotenv()
 
 MODEL_NAME = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
 
