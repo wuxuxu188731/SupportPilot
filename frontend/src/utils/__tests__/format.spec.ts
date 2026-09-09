@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest'
 import { formatAmountCents } from '@/utils/money'
 import {
   formatConversationTime,
+  formatDateTime,
   formatMessageTime,
   parseUtcText,
 } from '@/utils/time'
@@ -63,6 +64,21 @@ describe('formatMessageTime：消息时间', () => {
     const now = new Date('2026-09-06T04:00:00.000Z').getTime()
     expect(formatMessageTime('2026-09-01 02:30:00', now)).toBe('09-01 10:30')
     expect(formatMessageTime('2025-08-01 02:30:00', now)).toBe('2025-08-01 10:30')
+  })
+})
+
+describe('formatDateTime：知识库完整日期时间', () => {
+  it('带时区偏移的 ISO 文本转为本地 "YYYY-MM-DD HH:mm"', () => {
+    // 保护行为：知识库时间（isoformat 含 +00:00）必须按 UTC 解析后本地展示
+    const text = formatDateTime('2026-09-06T12:34:56.789012+00:00')
+    // 测试环境时区固定为 UTC+8（CI 配置），避免本地时区差异导致断言不稳定
+    expect(text).toBe('2026-09-06 20:34')
+  })
+
+  it('空值显示「—」，不显示 null/undefined', () => {
+    // 边界情况：可空时间字段（如任务 started_at）必须显示占位符
+    expect(formatDateTime(null)).toBe('—')
+    expect(formatDateTime(undefined)).toBe('—')
   })
 })
 

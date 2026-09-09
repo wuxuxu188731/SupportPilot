@@ -56,3 +56,15 @@ export function formatMessageTime(utcText: string, nowMs = Date.now()): string {
     date.getFullYear() === now.getFullYear() ? monthDay : `${date.getFullYear()}-${monthDay}`
   return `${prefix} ${clock}`
 }
+
+/**
+ * 知识库/企业等「完整日期时间」展示："YYYY-MM-DD HH:mm"（本地时区）。
+ * 支持带时区后缀的 isoformat 文本与无时区文本；空值显示「—」；
+ * 解析失败原样返回（不崩溃）。
+ */
+export function formatDateTime(utcText: string | null | undefined): string {
+  if (utcText === null || utcText === undefined) return '—'
+  const date = parseUtcText(utcText)
+  if (Number.isNaN(date.getTime())) return utcText
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ${pad2(date.getHours())}:${pad2(date.getMinutes())}`
+}
