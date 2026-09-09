@@ -75,6 +75,18 @@ const routes = [
     meta: { requiresAuth: true, requiresOrganization: true, title: '审批详情' },
   },
   {
+    path: '/app/knowledge',
+    name: 'knowledge',
+    component: () => import('@/views/KnowledgeListView.vue'),
+    meta: { requiresAuth: true, requiresOrganization: true, title: '知识库' },
+  },
+  {
+    path: '/app/knowledge/:documentId',
+    name: 'knowledge-detail',
+    component: () => import('@/views/KnowledgeDetailView.vue'),
+    meta: { requiresAuth: true, requiresOrganization: true, title: '知识库文档详情' },
+  },
+  {
     // 未匹配路径统一回根路径，由守卫决定去向
     path: '/:pathMatch(.*)*',
     redirect: { name: 'root' },

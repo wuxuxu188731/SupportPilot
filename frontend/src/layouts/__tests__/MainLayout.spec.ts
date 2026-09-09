@@ -62,15 +62,16 @@ beforeEach(() => {
 })
 
 describe('MainLayout 功能菜单', () => {
-  it('「客服对话」与「审批中心」已开放可用，其余模块标注待实现并禁用', async () => {
-    // 保护行为：菜单中客服对话与审批中心不再是禁用占位，其它模块仍保持待实现
+  it('「客服对话」「审批中心」「知识库」已开放可用，成员管理仍标注待实现并禁用', async () => {
+    // 保护行为：菜单中已开放模块不再是禁用占位，成员管理仍保持待实现
     const { wrapper } = await mountLayout('/app')
 
     expect(wrapper.text()).toContain('客服对话')
     expect(wrapper.text()).not.toContain('客服对话（待实现）')
     expect(wrapper.text()).toContain('审批中心')
     expect(wrapper.text()).not.toContain('审批中心（待实现）')
-    expect(wrapper.text()).toContain('知识库（待实现）')
+    expect(wrapper.text()).toContain('知识库')
+    expect(wrapper.text()).not.toContain('知识库（待实现）')
     expect(wrapper.text()).toContain('成员管理（待实现）')
   })
 
@@ -94,6 +95,23 @@ describe('MainLayout 功能菜单', () => {
       .find((element) => [...element.classes()].some((name) => name.includes('--selected')))
     expect(selected).toBeDefined()
     expect(selected!.text()).toContain('审批中心')
+  })
+
+  it('在 /app/knowledge 与详情页面时菜单高亮「知识库」', async () => {
+    // 保护行为：知识库菜单必须跟随知识库列表/详情路由高亮
+    const list = await mountLayout('/app/knowledge')
+    const listSelected = list.wrapper
+      .findAll('.n-menu-item-content')
+      .find((element) => [...element.classes()].some((name) => name.includes('--selected')))
+    expect(listSelected).toBeDefined()
+    expect(listSelected!.text()).toContain('知识库')
+
+    const detail = await mountLayout('/app/knowledge/doc-1')
+    const detailSelected = detail.wrapper
+      .findAll('.n-menu-item-content')
+      .find((element) => [...element.classes()].some((name) => name.includes('--selected')))
+    expect(detailSelected).toBeDefined()
+    expect(detailSelected!.text()).toContain('知识库')
   })
 
   it('点击「客服对话」菜单跳转到聊天空状态页面', async () => {
@@ -122,5 +140,19 @@ describe('MainLayout 功能菜单', () => {
     await flushPromises()
 
     expect(router.currentRoute.value.name).toBe('approvals')
+  })
+
+  it('点击「知识库」菜单跳转到知识库列表页面', async () => {
+    // 保护行为：知识库导航入口必须真正可达
+    const { wrapper, router } = await mountLayout('/app')
+
+    const item = wrapper
+      .findAll('.n-menu-item-content')
+      .find((element) => element.text().includes('知识库'))
+    expect(item).toBeDefined()
+    await item!.trigger('click')
+    await flushPromises()
+
+    expect(router.currentRoute.value.name).toBe('knowledge')
   })
 })

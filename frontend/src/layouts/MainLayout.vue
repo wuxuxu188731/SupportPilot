@@ -28,7 +28,7 @@ const organizationStore = useOrganizationStore()
 /** 当前用户显示名。 */
 const displayName = computed(() => authStore.currentUser?.username ?? '')
 
-/** 侧栏功能导航：客服对话与审批中心已开放，其余模块仍标注「待实现」并禁用。 */
+/** 侧栏功能导航：客服对话、审批中心与知识库已开放，成员管理仍标注「待实现」并禁用。 */
 const menuOptions: MenuOption[] = [
   {
     label: '工作台',
@@ -43,9 +43,8 @@ const menuOptions: MenuOption[] = [
     key: 'approvals',
   },
   {
-    label: '知识库（待实现）',
+    label: '知识库',
     key: 'knowledge',
-    disabled: true,
   },
   {
     label: '成员管理（待实现）',
@@ -59,6 +58,7 @@ const activeMenuKey = computed(() => {
   if (route.name === 'app') return 'home'
   if (route.name === 'chat' || route.name === 'chat-detail') return 'chat'
   if (route.name === 'approvals' || route.name === 'approval-detail') return 'approvals'
+  if (route.name === 'knowledge' || route.name === 'knowledge-detail') return 'knowledge'
   return ''
 })
 
@@ -70,6 +70,8 @@ function handleMenuSelect(key: string): void {
     void router.push({ name: 'chat' })
   } else if (key === 'approvals') {
     void router.push({ name: 'approvals' })
+  } else if (key === 'knowledge') {
+    void router.push({ name: 'knowledge' })
   }
 }
 
@@ -126,7 +128,7 @@ function handleLogout(): void {
           :value="activeMenuKey"
           @update:value="handleMenuSelect"
         />
-        <p class="sider-note">知识库与成员管理将在后续阶段逐步开放。</p>
+        <p class="sider-note">成员管理将在后续阶段逐步开放。</p>
       </aside>
 
       <main class="app-content">

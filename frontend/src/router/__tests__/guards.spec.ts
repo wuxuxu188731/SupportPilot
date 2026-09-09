@@ -110,6 +110,20 @@ describe('未登录用户的导航约束', () => {
     expect(router.currentRoute.value.query.redirect).toBe('/app/approvals/a-1')
   })
 
+  it('未登录访问 /app/knowledge 与文档详情：同样跳转登录页并记录目标', async () => {
+    // 保护行为：知识库与文档详情路由必须沿用与 /app 相同的认证守卫
+    const router = createAppRouter(createMemoryHistory())
+    registerGuards(router)
+
+    await router.push('/app/knowledge')
+    expect(router.currentRoute.value.name).toBe('login')
+    expect(router.currentRoute.value.query.redirect).toBe('/app/knowledge')
+
+    await router.push('/app/knowledge/doc-1')
+    expect(router.currentRoute.value.name).toBe('login')
+    expect(router.currentRoute.value.query.redirect).toBe('/app/knowledge/doc-1')
+  })
+
   it('未登录访问 /login 与 /register：直接放行', async () => {
     // 边界情况：公开页面不得被守卫拦截
     const router = createAppRouter(createMemoryHistory())
@@ -172,6 +186,25 @@ describe('主界面的企业上下文约束', () => {
 
     expect(router.currentRoute.value.name).toBe('organizations')
     expect(router.currentRoute.value.query.redirect).toBe('/app/approvals/a-1')
+  })
+
+  it('已登录但没有选择企业：不能直接访问知识库详情 URL', async () => {
+    // 边界情况：知识库与文档详情必须要求企业上下文（直接访问详情URL场景）
+    const router = await setupLoggedInRouter({ withOrganization: false })
+
+    await router.push('/app/knowledge/doc-1')
+
+    expect(router.currentRoute.value.name).toBe('organizations')
+    expect(router.currentRoute.value.query.redirect).toBe('/app/knowledge/doc-1')
+  })
+
+  it('已登录且本地企业仍有效：直接进入知识库列表（深链放行）', async () => {
+    // 保护行为：刷新页面后本地企业选择有效时，知识库深链可放行
+    const router = await setupLoggedInRouter({ withOrganization: true })
+
+    await router.push('/app/knowledge/doc-1')
+
+    expect(router.currentRoute.value.name).toBe('knowledge-detail')
   })
 
   it('已登录且本地企业仍有效：直接进入审批中心（刷新后恢复）', async () => {

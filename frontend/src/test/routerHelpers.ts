@@ -17,6 +17,8 @@ export async function preloadRouteComponents(): Promise<void> {
     import('@/views/AppHomeView.vue'),
     import('@/views/ApprovalListView.vue'),
     import('@/views/ApprovalDetailView.vue'),
+    import('@/views/KnowledgeListView.vue'),
+    import('@/views/KnowledgeDetailView.vue'),
   ])
 }
 

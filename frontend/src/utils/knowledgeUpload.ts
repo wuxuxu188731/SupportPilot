@@ -56,8 +56,8 @@ export interface UploadFileLike {
   name: string
   /** 文件字节数（0 表示空文件） */
   size: number
-  /** 读取文件内容（返回其中全部字节） */
-  arrayBuffer: () => Promise<ArrayBuffer>
+  /** 读取文件内容（浏览器 File 提供 arrayBuffer；测试环境可缺失，走 FileReader 兜底） */
+  arrayBuffer?: () => Promise<ArrayBuffer>
 }
 
 /** 根据文件名推导来源类型：扩展名不区分大小写；不支持的类型返回 null。 */
@@ -125,12 +125,39 @@ export function isValidUtf8(bytes: Uint8Array): boolean {
   }
 }
 
+/** 通过 FileReader 读取文件字节（jsdom/旧浏览器无 arrayBuffer 时的兜底）。 */
+function readWithFileReader(file: UploadFileLike): Promise<Uint8Array | null> {
+  return new Promise((resolve) => {
+    try {
+      const reader = new FileReader()
+      reader.onload = () => {
+        const result = reader.result
+        resolve(result instanceof ArrayBuffer ? new Uint8Array(result) : null)
+      }
+      reader.onerror = () => resolve(null)
+      reader.readAsArrayBuffer(file as unknown as Blob)
+    } catch {
+      resolve(null)
+    }
+  })
+}
+
+/** 读取文件内容为字节数组；读取失败返回 null。 */
+async function readFileBytes(file: UploadFileLike): Promise<Uint8Array | null> {
+  if (typeof file.arrayBuffer === 'function') {
+    try {
+      return new Uint8Array(await file.arrayBuffer())
+    } catch {
+      return null
+    }
+  }
+  return readWithFileReader(file)
+}
+
 /** 读取文件内容并校验 UTF-8（返回问题对象或 null）。 */
 export async function validateKnowledgeFileUtf8(file: UploadFileLike): Promise<KnowledgeUploadIssue | null> {
-  let bytes: Uint8Array
-  try {
-    bytes = new Uint8Array(await file.arrayBuffer())
-  } catch {
+  const bytes = await readFileBytes(file)
+  if (bytes === null) {
     return { code: 'invalid-utf8', field: 'file', message: '无法读取文件内容，请重新选择' }
   }
   if (!isValidUtf8(bytes)) {
