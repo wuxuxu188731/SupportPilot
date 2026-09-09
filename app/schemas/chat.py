@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel,Field,ConfigDict
 
 from app.agent.events import AgentEvent
@@ -48,3 +50,36 @@ class UpdateSystemPromptRequest(BaseModel):
 
 class SystemPromptUpdated(BaseModel):
   updated : bool
+
+
+class ConversationListItem(BaseModel):
+  """会话列表项（GET /conversations/ 响应元素）。
+
+  title 不在数据库落库，而是由会话第一条用户消息实时推导，
+  因此本模型不包含内部消息或任何原始 payload 字段。
+  """
+  conversation_id : str  # 会话唯一标识（服务端生成）
+  title : str  # 会话标题：由第一条用户消息推导；空会话显示“新会话”
+  created_at : str  # 会话创建时间（UTC 文本）
+  updated_at : str  # 会话最近活动时间（UTC 文本）
+
+
+class ConversationHistoryMessage(BaseModel):
+  """历史消息中的单条安全消息（仅限用户问题与 Agent 最终回答）。
+
+  该模型只承载适合最终用户查看的内容，绝不包含推理过程、
+  工具调用、工具结果或任何内部 payload 字段。
+  """
+  sequence : int  # 消息在会话中的原始序号（seq），用于稳定排序展示
+  role : Literal["user","assistant"]  # 消息角色：用户问题或助手最终回答
+  content : str  # 消息正文（原文保留，仅保证非空；不含任何内部字段）
+  created_at : str  # 消息写入时间（UTC 文本）
+
+
+class ConversationHistoryResponse(BaseModel):
+  """指定会话的安全历史消息响应（GET /conversations/{id}/messages/）。"""
+  conversation_id : str  # 会话唯一标识
+  system_prompt : str | None  # 会话当前的附加系统提示词；未设置为 null
+  created_at : str  # 会话创建时间（UTC 文本）
+  updated_at : str  # 会话最近活动时间（UTC 文本）
+  messages : list[ConversationHistoryMessage]  # 按 seq 升序的安全历史消息，可为空数组

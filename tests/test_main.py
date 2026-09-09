@@ -282,3 +282,93 @@ def test_two_members_share_tenant_but_not_private_conversations(
     assert alice_conversation.status_code == 201
     assert bob_conversation.status_code == 201
     assert cross_user.status_code == 404
+
+
+def test_list_and_history_endpoints_require_auth_and_tenant(
+    monkeypatch,
+    tmp_path,
+):
+    # 保护行为：新增的会话列表与历史消息读取接口必须遵守
+    # 「Bearer Token + X-Organization-ID」全局认证/租户规则；
+    # 无令牌 401、缺租户头 400、非成员企业 404。
+    client = TestClient(load_app(monkeypatch, tmp_path))
+    alice_token = register_and_login(client, "alice")
+    org_a = create_organization(client, alice_token, "Company A")
+
+    assert client.get("/conversations/").status_code == 401
+    assert client.get("/conversations/", headers=bearer(alice_token)).status_code == 400
+    assert client.get("/conversations/", headers=tenant_headers(alice_token, org_a)).status_code == 200
+    assert client.get("/conversations/", headers=tenant_headers(alice_token, "no-such-org")).status_code == 404
+
+    assert client.get("/conversations/some-id/messages/").status_code == 401
+    assert (
+        client.get(
+            "/conversations/some-id/messages/",
+            headers=bearer(alice_token),
+        ).status_code
+        == 400
+    )
+
+
+def test_list_pagination_validation_and_history_isolation(
+    monkeypatch,
+    tmp_path,
+):
+    # 边界与安全：limit/offset 越界返回 422；列表只含本人会话；
+    # 历史读取跨用户 404；空历史返回空数组且不泄露内部字段。
+    client = TestClient(load_app(monkeypatch, tmp_path))
+    alice_token = register_and_login(client, "alice")
+    bob_token = register_and_login(client, "bob")
+    org_a = create_organization(client, alice_token, "Company A")
+    org_b = create_organization(client, bob_token, "Company B")
+
+    alice_conversation = client.post(
+        "/conversations/",
+        json={},
+        headers=tenant_headers(alice_token, org_a),
+    )
+    alice_id = alice_conversation.json()["conversation_id"]
+
+    # 分页参数校验由路由 Query 约束兜底
+    assert client.get("/conversations/", params={"limit": 0}, headers=tenant_headers(alice_token, org_a)).status_code == 422
+    assert client.get("/conversations/", params={"limit": 101}, headers=tenant_headers(alice_token, org_a)).status_code == 422
+    assert client.get("/conversations/", params={"offset": -1}, headers=tenant_headers(alice_token, org_a)).status_code == 422
+
+    # 会话列表只返回自己的会话：alice 在 org_a 有 1 条，bob 在 org_a 看不到
+    alice_list = client.get(
+        "/conversations/",
+        headers=tenant_headers(alice_token, org_a),
+    )
+    assert alice_list.status_code == 200
+    body = alice_list.json()
+    assert len(body) == 1
+    assert body[0]["conversation_id"] == alice_id
+    # 尚未发送消息的空会话标题为「新会话」，且不包含任何内部字段
+    assert body[0]["title"] == "新会话"
+    assert set(body[0].keys()) == {"conversation_id", "title", "created_at", "updated_at"}
+
+    # bob 不属于 org_a：即使给出 alice 的会话 id 也只能得到 404
+    bob_in_org_a = client.get(
+        f"/conversations/{alice_id}/messages/",
+        headers=tenant_headers(bob_token, org_a),
+    )
+    assert bob_in_org_a.status_code == 404
+    # alice 在其它企业也看不到该会话（跨企业 404）
+    alice_in_org_b = client.get(
+        f"/conversations/{alice_id}/messages/",
+        headers=tenant_headers(alice_token, org_b),
+    )
+    assert alice_in_org_b.status_code == 404
+    # 空会话历史：空数组 + 头部时间字段齐全
+    own_history = client.get(
+        f"/conversations/{alice_id}/messages/",
+        headers=tenant_headers(alice_token, org_a),
+    )
+    assert own_history.status_code == 200
+    assert own_history.json() == {
+        "conversation_id": alice_id,
+        "system_prompt": None,
+        "created_at": body[0]["created_at"],
+        "updated_at": body[0]["updated_at"],
+        "messages": [],
+    }

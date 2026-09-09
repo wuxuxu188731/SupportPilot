@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
 from collections.abc import Callable
 
 from app.application.organization_service import TenantContext
@@ -7,6 +7,8 @@ from app.application.organization_service import TenantContext
 from app.schemas.chat import (
   ChatRequest,
   ConversationCreated,
+  ConversationHistoryResponse,
+  ConversationListItem,
   CreateConversationRequest,
   LLMResponse,
   SystemPromptUpdated,
@@ -37,6 +39,41 @@ def creat_conversation_router(
         system_prompt=system_prompt
       )
       return ConversationCreated(conversation_id=conversation.conversation_id)
+
+    @router.get("/conversations/", response_model=list[ConversationListItem], tags=["查询会话列表"])
+    def list_conversations(
+      context : TenantContext = Depends(get_current_tenant),
+      limit: int = Query(default=50, ge=1, le=100),
+      offset: int = Query(default=0, ge=0),
+    )->list[ConversationListItem]:
+      # 分页参数由 FastAPI Query 校验（limit 1–100，offset ≥0），
+      # 只返回当前企业与当前用户自己的会话，标题由服务端实时推导。
+      return chat_service.list_conversations(
+        context=context,
+        limit=limit,
+        offset=offset,
+      )
+
+    @router.get(
+      "/conversations/{conversation_id}/messages/",
+      response_model=ConversationHistoryResponse,
+      tags=["查询会话历史消息"]
+    )
+    def get_conversation_messages(
+      conversation_id : str,
+      context : TenantContext = Depends(get_current_tenant)
+    )->ConversationHistoryResponse:
+      conversation_id = conversation_id.strip()
+      if not conversation_id:
+        raise HTTPException(status_code=422, detail="conversation_id must not be blank")
+      try:
+        return chat_service.get_history(
+          context=context,
+          conversation_id=conversation_id
+        )
+      except ConversationNotFoundError as exc:
+        # 会话不存在、跨用户或跨企业统一按 404 返回，不泄露归属信息
+        raise HTTPException(status_code=404, detail="conversation not found error") from exc
 
     @router.post("/conversations/{conversation_id}/chat/", response_model=LLMResponse, tags=["向模型聊天"])
     def chat(
