@@ -3,6 +3,18 @@ import sys
 
 from fastapi.testclient import TestClient
 
+
+def _app_paths(app) -> set[str]:
+    """通过公开 OpenAPI 数据取全部已注册路径。
+
+    FastAPI 0.141+ 对 include_router 采用惰性展开（app.routes 里是内部
+    _IncludedRouter 占位对象，不再扁平暴露 APIRoute），因此这里不迭代
+    app.routes 内部结构，而是读取 openapi()['paths'] 这一公开文档数据；
+    生成 OpenAPI 不需要外部网络（知识库集合初始化被推迟到首次使用时）。
+    """
+    return set(app.openapi()["paths"])
+
+
 def test_main_wires_sqlite_service_without_global_messages(
   monkeypatch,
   tmp_path
@@ -21,7 +33,7 @@ def test_main_wires_sqlite_service_without_global_messages(
   sys.modules.pop("main",None)
   main = importlib.import_module("main")
 
-  paths = {route.path for route in main.app.routes}
+  paths = _app_paths(main.app)
   assert isinstance(
       main.support_tool_gateway,
       CustomerSupportToolGateway,
@@ -78,9 +90,8 @@ def load_app(monkeypatch, tmp_path):
 
 
 def test_knowledge_routes_registered_without_network(monkeypatch, tmp_path):
-    """The knowledge router's 7 management routes are registered, and importing
-    main with an unresolvable QDRANT_URL does NOT connect: collection init is
-    deferred, so no DNS/connection attempt happens at import time."""
+    """知识库路由注册与导入不触网：7 条管理路径已注册，且导入带不可解析
+    QDRANT_URL 的 main 不会发起连接：集合初始化被推迟，导入期无 DNS/连接。"""
     database_path = tmp_path / "knowledge-app.db"
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-only-key")
     monkeypatch.setenv(
@@ -94,24 +105,32 @@ def test_knowledge_routes_registered_without_network(monkeypatch, tmp_path):
     sys.modules.pop("main", None)
     main = importlib.import_module("main")
 
-    paths = {route.path for route in main.app.routes}
+    spec = main.app.openapi()
+    paths = spec["paths"]
     assert "/knowledge/documents/" in paths
     assert "/knowledge/documents/{document_id}/" in paths
     assert "/knowledge/documents/{document_id}/versions/" in paths
     assert "/knowledge/documents/{document_id}/disable/" in paths
     assert "/knowledge/documents/{document_id}/enable/" in paths
     assert "/knowledge/ingestion-jobs/{job_id}/" in paths
-    # 7 management routes: POST+GET share /knowledge/documents/ (one path,
-    # two routes), so count the route objects, not the deduplicated paths.
-    knowledge_routes = [
-        route.path for route in main.app.routes if route.path.startswith("/knowledge/")
+    # 6 条管理路径共 7 个操作：/knowledge/documents/ 同时有 POST 与 GET
+    http_methods = {"get", "post", "put", "patch", "delete"}
+    knowledge_paths = [path for path in paths if path.startswith("/knowledge/")]
+    assert len(knowledge_paths) == 6
+    assert (
+        sum(
+            len([method for method in paths[path] if method in http_methods])
+            for path in knowledge_paths
+        )
+        == 7
+    )
+    assert sorted(method for method in paths["/knowledge/documents/"] if method in http_methods) == [
+        "get",
+        "post",
     ]
-    assert len(knowledge_routes) == 7
-    assert knowledge_routes.count("/knowledge/documents/") == 2
 
-    # Importing main must not have touched the qdrant URL (it would raise, since
-    # qdrant.invalid does not resolve). The fact that we got this far proves the
-    # factory deferred every network call.
+    # 导入 main 不得触碰 qdrant 地址（若触碰会抛错，因为 qdrant.invalid
+    # 不可解析）；走到这里即证明工厂推迟了全部网络调用。
     assert database_path.exists()
 
 
