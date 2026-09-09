@@ -36,9 +36,9 @@ const organizationStore = useOrganizationStore()
       </n-card>
 
       <n-alert type="info" :show-icon="true" class="module-alert">
-        客服对话已开放（会话列表、多轮问答、知识引用与待审批提案展示）；知识库、
-        审批中心与成员管理模块将在后续阶段逐步接入。此处仅展示当前登录与企业
-        上下文，不包含任何模拟数据。
+        客服对话与审批中心已开放（会话列表、多轮问答、知识引用、待审批提案、
+        审批处理与 Run 状态）；知识库与成员管理模块将在后续阶段逐步接入。
+        此处仅展示当前登录与企业上下文，不包含任何模拟数据。
       </n-alert>
     </section>
   </MainLayout>
