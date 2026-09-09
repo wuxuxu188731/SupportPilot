@@ -82,6 +82,20 @@ describe('未登录用户的导航约束', () => {
     expect(router.currentRoute.value.query.redirect).toBe('/organizations')
   })
 
+  it('未登录访问 /app/chat 与会话详情：同样跳转登录页并记录目标', async () => {
+    // 保护行为：客服对话路由必须沿用与 /app 相同的认证守卫
+    const router = createAppRouter(createMemoryHistory())
+    registerGuards(router)
+
+    await router.push('/app/chat')
+    expect(router.currentRoute.value.name).toBe('login')
+    expect(router.currentRoute.value.query.redirect).toBe('/app/chat')
+
+    await router.push('/app/chat/conv-1')
+    expect(router.currentRoute.value.name).toBe('login')
+    expect(router.currentRoute.value.query.redirect).toBe('/app/chat/conv-1')
+  })
+
   it('未登录访问 /login 与 /register：直接放行', async () => {
     // 边界情况：公开页面不得被守卫拦截
     const router = createAppRouter(createMemoryHistory())
@@ -124,6 +138,16 @@ describe('主界面的企业上下文约束', () => {
 
     expect(router.currentRoute.value.name).toBe('organizations')
     expect(router.currentRoute.value.query.redirect).toBe('/app')
+  })
+
+  it('已登录但没有选择企业：不能进入 /app/chat/:conversationId', async () => {
+    // 边界情况：客服对话页与会话详情同样要求企业上下文（防止旧企业会话残留）
+    const router = await setupLoggedInRouter({ withOrganization: false })
+
+    await router.push('/app/chat/conv-1')
+
+    expect(router.currentRoute.value.name).toBe('organizations')
+    expect(router.currentRoute.value.query.redirect).toBe('/app/chat/conv-1')
   })
 
   it('已登录且本地企业仍有效：直接进入 /app（刷新后恢复）', async () => {

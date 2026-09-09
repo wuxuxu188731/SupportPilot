@@ -4,12 +4,12 @@
 > Agent Tool（`propose_refund` / `search_knowledge` 等）、数据库 Store、
 > 内部 Python 方法一律不计入。
 >
-> - 依据版本：仓库 HEAD `d8f8fa3`（2026-09-06）
+> - 依据版本：仓库 HEAD `42b83d9`（第三阶段，客服对话闭环）
 > - 核对方式：静态阅读 `main.py` / `app/api/*` / `app/schemas/*` /
 >   `app/api/dependencies.py` / `tests/api/*`，并在导入阶段用临时环境变量
 >   在内存中生成 OpenAPI（`app.openapi()`，未启动服务器、未修改任何配置、
 >   DB 指向临时目录）交叉核对；两种口径结果一致。
-> - 统计结果：**19 个路径、21 个 HTTP 操作**（不含 FastAPI 自带的
+> - 统计结果：**20 个路径、23 个 HTTP 操作**（不含 FastAPI 自带的
 >   `/docs`、`/openapi.json` 等）。
 
 ---
@@ -27,7 +27,7 @@
 | --- | --- | --- | --- |
 | 认证 authentication | `/auth` | 3 | 注册、登录、查询当前用户（登录态恢复） |
 | 组织 organizations | `/organizations` | 3 | 创建企业、列出我的企业、添加成员 |
-| 会话与聊天 conversations | `/conversations` | 3 | 新建会话、单轮聊天、更新会话系统提示词 |
+| 会话与聊天 conversations | `/conversations` | 5 | 会话列表/新建、单轮聊天、历史读取、更新会话系统提示词 |
 | 知识库 knowledge | `/knowledge` | 7 | 文档上传/新版本、列表/详情、停用/启用、入库任务查询 |
 | 退款/补偿审批与 Run | `/approvals`、`/action-runs` | 5 | 审批列表/详情/决定、Run 状态/恢复 |
 
@@ -39,7 +39,7 @@
 | 查看/更新自己的登录态（/auth/me） | ❌ | ✅ | ✅ |
 | 创建企业、列出自己的企业 | ❌ | ✅ | ✅ |
 | 添加企业成员 | ❌ | ❌ | ✅（且必须是该企业成员） |
-| 会话创建/聊天/改提示词（限自己所属企业+自己创建的会话） | ❌ | ✅ | ✅ |
+| 会话列表/创建/聊天/历史读取/改提示词（限自己所属企业+自己创建的会话） | ❌ | ✅ | ✅ |
 | 知识库读接口（列表/详情/任务） | ❌ | ✅ | ✅ |
 | 知识库写接口（上传/新版本/停用/启用） | ❌ | ❌ | ✅ |
 | 审批列表/详情、Run 状态（本企业范围） | ❌ | ✅ | ✅ |
@@ -117,7 +117,8 @@
 ### 2.5 接口命名 / 结构上的注意点（影响前端的既有事实）
 
 - 会话相关路径**带末尾斜杠**（`/conversations/`、`/conversations/{id}/chat/`、
-  `/conversations/{id}/system-prompt/`），`/auth/login` 等则不带。FastAPI 默认
+  `/conversations/{id}/messages/`、`/conversations/{id}/system-prompt/`），
+  `/auth/login` 等则不带。FastAPI 默认
   `redirect_slashes=True`，路径写错斜杠会返回 307 跳转；前端应**精确按本文档
   路径调用**，避免多一次跳转（无 CORS 时跨域 307 更麻烦）。
 - 各 store 的时间格式不一致（见 5.2），前端需要统一解析。
@@ -146,20 +147,22 @@ A=仅 admin；✅/❌ 同理。P=公开。
 | 5 | 组织 | GET | `/organizations/` | 列出我加入的企业及我在各企业的角色 | ✅ | ❌ | 登录用户 | 200 | 企业选择/切换页（顶栏企业下拉） |
 | 6 | 组织 | POST | `/organizations/{organization_id}/members/` | 添加成员（按用户名，指定角色） | ✅ | ❌ | A（且为本企业成员） | 201 | 成员管理页 |
 | 7 | 会话 | POST | `/conversations/` | 新建会话（可选自定义 system prompt） | ✅ | ✅ | G | 201 | 客服对话页“新会话” |
-| 8 | 会话 | POST | `/conversations/{conversation_id}/chat/` | 发送问题并取整轮 Agent 回答（同步） | ✅ | ✅ | G（会话归属人） | 200 | 客服对话页发送框 |
-| 9 | 会话 | PUT | `/conversations/{conversation_id}/system-prompt/` | 更新会话系统提示词 | ✅ | ✅ | G（会话归属人） | 200 | 会话设置 |
-| 10 | 知识库 | POST | `/knowledge/documents/` | 上传 Markdown/TXT 文档并同步入库 | ✅ | ✅ | A | 201 | 文档上传 |
-| 11 | 知识库 | GET | `/knowledge/documents/` | 文档列表（当前企业） | ✅ | ✅ | G | 200 | 知识库列表页 |
-| 12 | 知识库 | GET | `/knowledge/documents/{document_id}/` | 文档详情：版本历史 + 最近入库任务 | ✅ | ✅ | G | 200 | 知识库详情页 |
-| 13 | 知识库 | POST | `/knowledge/documents/{document_id}/versions/` | 上传新版本 | ✅ | ✅ | A | 201 | 详情页“上传新版本” |
-| 14 | 知识库 | POST | `/knowledge/documents/{document_id}/disable/` | 停用文档 | ✅ | ✅ | A | 200 | 列表/详情停用按钮 |
-| 15 | 知识库 | POST | `/knowledge/documents/{document_id}/enable/` | 重新启用文档 | ✅ | ✅ | A | 200 | 列表/详情启用按钮 |
-| 16 | 知识库 | GET | `/knowledge/ingestion-jobs/{job_id}/` | 查询入库任务状态/错误 | ✅ | ✅ | G | 200 | 上传失败后的任务详情/重试提示 |
-| 17 | 审批 | GET | `/approvals/` | 审批列表（可筛选状态、分页） | ✅ | ✅ | G | 200 | 审批列表页（待办/全部 Tab） |
-| 18 | 审批 | GET | `/approvals/{approval_id}/` | 审批详情（版本、Run、决定） | ✅ | ✅ | G | 200 | 审批详情页 |
-| 19 | 审批 | POST | `/approvals/{approval_id}/decisions/` | 批准/修改后批准/拒绝 | ✅ | ✅ | A | 201/202/200 | 审批详情页决定表单 |
-| 20 | Run | GET | `/action-runs/{run_id}/` | Action Run 状态查询 | ✅ | ✅ | G | 200 | Run 状态面板/失败恢复页 |
-| 21 | Run | POST | `/action-runs/{run_id}/resume/` | 显式恢复 Run | ✅ | ✅ | A | 200 | Run 状态面板“恢复”按钮 |
+| 8 | 会话 | GET | `/conversations/` | 我的会话列表（当前企业，分页） | ✅ | ✅ | G（会话归属人） | 200 | 客服对话页会话侧栏（加载更多） |
+| 9 | 会话 | POST | `/conversations/{conversation_id}/chat/` | 发送问题并取整轮 Agent 回答（同步） | ✅ | ✅ | G（会话归属人） | 200 | 客服对话页发送框 |
+| 10 | 会话 | GET | `/conversations/{conversation_id}/messages/` | 会话历史读取（只含安全问答文本） | ✅ | ✅ | G（会话归属人） | 200 | 进入会话时加载历史；刷新恢复 |
+| 11 | 会话 | PUT | `/conversations/{conversation_id}/system-prompt/` | 更新会话系统提示词 | ✅ | ✅ | G（会话归属人） | 200 | 会话设置 |
+| 12 | 知识库 | POST | `/knowledge/documents/` | 上传 Markdown/TXT 文档并同步入库 | ✅ | ✅ | A | 201 | 文档上传 |
+| 13 | 知识库 | GET | `/knowledge/documents/` | 文档列表（当前企业） | ✅ | ✅ | G | 200 | 知识库列表页 |
+| 14 | 知识库 | GET | `/knowledge/documents/{document_id}/` | 文档详情：版本历史 + 最近入库任务 | ✅ | ✅ | G | 200 | 知识库详情页 |
+| 15 | 知识库 | POST | `/knowledge/documents/{document_id}/versions/` | 上传新版本 | ✅ | ✅ | A | 201 | 详情页“上传新版本” |
+| 16 | 知识库 | POST | `/knowledge/documents/{document_id}/disable/` | 停用文档 | ✅ | ✅ | A | 200 | 列表/详情停用按钮 |
+| 17 | 知识库 | POST | `/knowledge/documents/{document_id}/enable/` | 重新启用文档 | ✅ | ✅ | A | 200 | 列表/详情启用按钮 |
+| 18 | 知识库 | GET | `/knowledge/ingestion-jobs/{job_id}/` | 查询入库任务状态/错误 | ✅ | ✅ | G | 200 | 上传失败后的任务详情/重试提示 |
+| 19 | 审批 | GET | `/approvals/` | 审批列表（可筛选状态、分页） | ✅ | ✅ | G | 200 | 审批列表页（待办/全部 Tab） |
+| 20 | 审批 | GET | `/approvals/{approval_id}/` | 审批详情（版本、Run、决定） | ✅ | ✅ | G | 200 | 审批详情页 |
+| 21 | 审批 | POST | `/approvals/{approval_id}/decisions/` | 批准/修改后批准/拒绝 | ✅ | ✅ | A | 201/202/200 | 审批详情页决定表单 |
+| 22 | Run | GET | `/action-runs/{run_id}/` | Action Run 状态查询 | ✅ | ✅ | G | 200 | Run 状态面板/失败恢复页 |
+| 23 | Run | POST | `/action-runs/{run_id}/resume/` | 显式恢复 Run | ✅ | ✅ | A | 200 | Run 状态面板“恢复”按钮 |
 
 ---
 
@@ -294,18 +297,18 @@ A=仅 admin；✅/❌ 同理。P=公开。
 - 建议页面：成员管理页。**缺口提醒**：没有成员列表/移除/改角色接口，见 5.4；
   且“添加”需要输入对方已注册的精确用户名，UI 上要说明规则。
 
-### 4.3 会话与聊天 `/conversations`（3 个）
+### 4.3 会话与聊天 `/conversations`（5 个）
 
 > 会话归属规则：会话属于「用户 + 企业」二元组——`ChatService`/`SessionStore`
 > 所有读取都带 `organization_id + user_id`。跨用户、跨企业访问一律
 > `404 {"detail": "conversation not found error"}`（会话对当前登录用户私有，
 > 企业内成员之间不可见彼此的会话）。
+> 会话标题**不落库**：`GET /conversations/` 响应的 `title` 由首条用户消息
+> 实时推导（无消息显示「新会话」），因此不存在会话重命名接口的语义基础。
 
 #### 4.3.1 POST `/conversations/` — 新建会话（201）
 
-- 用途：为「当前企业 + 当前用户」创建新会话，返回服务端会话 id
-  （历史消息由服务端持久化，但当前没有回读接口，见 5.4——前端必须保存
-  conversation_id）。
+- 用途：为「当前企业 + 当前用户」创建新会话，返回服务端会话 id。
 - 鉴权：Bearer + X-Organization-ID（成员）。
 - Content-Type：`application/json`；`CreateConversationRequest`（extra=forbid）：
   `system_prompt?: string | null`（可选；strip 后为空等同不设置）。
@@ -319,7 +322,37 @@ A=仅 admin；✅/❌ 同理。P=公开。
 - 建议页面：客服对话页“新建会话”。**同一个会话只能由创建它的用户使用**，
   若做“企业共享会话/工单流转”属后端缺口（见 5.4）。
 
-#### 4.3.2 POST `/conversations/{conversation_id}/chat/` — 单轮聊天（200，同步）
+#### 4.3.2 GET `/conversations/` — 我的会话列表（200，分页）
+
+- 用途：列出「当前企业 + 当前用户」自己的会话（会话对用户私有，不返回
+  同企业其他人的会话；也不返回其它企业的会话）。
+- 鉴权：Bearer + X-Organization-ID。
+- Query 参数：
+
+| 名称 | 类型 | 必填 | 约束 |
+| --- | --- | --- | --- |
+| `limit` | int | 否 | 1–100，默认 50 |
+| `offset` | int | 否 | ≥0，默认 0 |
+
+- 排序：`updated_at DESC`；同一秒（文本相同）以 `conversation_id` 倒序为
+  稳定次级排序，分页顺序可复现。
+- 成功：`200`，`ConversationListItem[]`（字段见附录 A.5）：
+  `{conversation_id, title, created_at, updated_at}`。`title` 由首条用户
+  消息推导（去首尾空白 → 连续空白折叠为单空格 → 截断到 30 字符）；尚无
+  消息的空会话显示「新会话」。
+- 错误：`401`；`400`（缺头）；`404`（非成员企业）；`422` 校验数组
+  （limit/offset 越界、类型错误）。
+- 源码：`app/api/router.py`（`list_conversations`）、
+  `app/application/chat_service.py`（标题推导 `derive_conversation_title`）、
+  `app/sessions/sqlite_store.py`（`list_conversations`）。
+- 测试：`tests/api/test_router.py`（分页透传与 422）、
+  `tests/application/test_chat_service.py`（标题推导）、
+  `tests/sessions/test_sqlite_store.py`（归属/排序/分页/首条消息正文）、
+  `tests/test_main.py`（真实 app 认证与隔离）。
+- 建议页面：客服对话页会话侧栏。**该接口不返回总数**：分页/“加载更多”
+  由前端按“最近一页是否拉满”推断（与审批/知识库列表口径一致，见 2.5）。
+
+#### 4.3.3 POST `/conversations/{conversation_id}/chat/` — 单轮聊天（200，同步）
 
 - 用途：发送一条客服问题，Agent 执行多轮工具调用（查订单/物流/建工单/
   检索知识库/提退款补偿提案）后一次性返回完整结果。**普通同步 HTTP 请求，
@@ -330,7 +363,8 @@ A=仅 admin；✅/❌ 同理。P=公开。
   `question: string`（strip 后非空，长度 ≥1；空白 → 422）。
 - 成功：`200`，`LLMResponse`（字段见附录 A.6）：
   - `llm_answer: string|null`——最终自然语言回答；
-  - `llm_reasoning_content: string|null`——模型推理内容（可折叠展示/调试用）；
+  - `llm_reasoning_content: string|null`——模型推理内容（默认不展示给用户，
+    仅供调试/内部使用）；
   - `events: AgentEvent[]`——每轮工具调用事件（过程可视化、步骤日志）；
   - `citations: Citation[]`——知识库结构化引用（C1..Cn，见 5.3）；
   - `retrieval_summary: {strategy, round_count, evidence_status, latency_ms}`
@@ -342,7 +376,9 @@ A=仅 admin；✅/❌ 同理。P=公开。
   error"}`；`422 {"detail": "question must not be blank"}` 等字符串 detail。
 - 耗时特征（对前端很重要）：一次请求 = LLM 多轮 × 工具调用，可能包含知识
   检索（单次预算 ≤30s）；**没有流式进度**，请求可能持续数十秒甚至更久，
-  需要合理超时与等待 UI（见 5.5 的缺口建议）。
+  需要合理超时与等待 UI（见 5.5 的缺口建议）。前端应使用独立长超时且
+  **不要自动重试**（客户端超时不代表服务端未执行，见 5.5 与 4.3.4 的刷新
+  历史提示）。
 - 源码：`app/api/router.py`（`chat`）、`app/application/chat_service.py`、
   `app/agent/support_runner.py`、`app/agent/runner.py`、`app/schemas/chat.py`。
 - 测试：`tests/api/test_router.py`（`test_chat_passes_user_and_conversation_
@@ -353,7 +389,37 @@ A=仅 admin；✅/❌ 同理。P=公开。
   `pending_approvals` 渲染成卡片（金额/原因/审批链接），对 `citations`
   渲染为角标引用。
 
-#### 4.3.3 PUT `/conversations/{conversation_id}/system-prompt/` — 更新系统提示词（200）
+#### 4.3.4 GET `/conversations/{conversation_id}/messages/` — 会话历史读取（200）
+
+- 用途：读取指定会话的**安全历史**：只包含用户问题与 Agent 最终自然语言
+  回答，供页面刷新后恢复对话。**服务端不保存**上一轮的 `citations`、
+  `events`、`pending_approvals` 等结构化展示信息；history 响应**绝不包含**
+  这些字段，也绝不包含 `reasoning_content` / `tool_calls` / 工具原始参数与
+  结果 / system / tool 消息 / 幂等键等内部内容（`payload_json` 不会原样暴露）。
+- 鉴权：Bearer + X-Organization-ID。
+- Path 参数：`conversation_id`（strip 后为空 → 422）。
+- 成功：`200`，`ConversationHistoryResponse`（字段见附录 A.5）：
+  `{conversation_id, system_prompt, created_at, updated_at, messages[]}`；
+  `messages[]` 元素 `{sequence, role, content, created_at}`，按原始
+  `seq ASC` 返回；`role ∈ {user, assistant}`（assistant 一律是无
+  `tool_calls` 且非空内容的最终回答）；空会话返回空数组。
+- 错误：`404 {"detail": "conversation not found error"}`（会话不存在、
+  跨用户、跨企业统一 404，不泄露归属）；`401/400` 同前；`422`（空 id）。
+- 安全过滤实现：`ChatService._to_visible_message`（应用层过滤）+ Store
+  按归属读取；**用于模型上下文的原始消息存储与 `load_messages` 不变**。
+- 源码：`app/api/router.py`（`get_conversation_messages`）、
+  `app/application/chat_service.py`（`get_history`）、
+  `app/sessions/sqlite_store.py`（`get_conversation_record` /
+  `load_message_records`）、`app/schemas/chat.py`。
+- 测试：`tests/api/test_router.py`（含 OpenAPI schema 与真实响应一致）、
+  `tests/application/test_chat_service.py`（过滤与顺序）、
+  `tests/sessions/test_sqlite_store.py`（记录读取/归属）、
+  `tests/test_main.py`（真实 app 隔离）。
+- 建议页面：进入会话时加载历史；发送超时/失败后先刷新本接口确认服务端
+  实际状态再决定是否重发；刷新页面后以本接口为准恢复（禁止 localStorage
+  伪造完整历史）。
+
+#### 4.3.5 PUT `/conversations/{conversation_id}/system-prompt/` — 更新系统提示词（200）
 
 - 用途：覆盖会话级附加提示词（服务端会拼在基础系统提示之后，且注明
   “不能覆盖服务器规则”）。
@@ -367,8 +433,9 @@ A=仅 admin；✅/❌ 同理。P=公开。
 - 源码：`app/api/router.py`、`app/application/chat_service.py`。
 - 测试：`tests/api/test_router.py`（`test_update_system_prompt_is_conversation_
   scoped`）。
-- 建议页面：会话设置面板。**没有读取接口**回读当前 system_prompt，前端需在
-  本地保存最近一次设置值；新会话的提示词可在创建时传入。
+- 建议页面：会话设置面板。当前 system_prompt 可通过 4.3.4 历史接口的
+  `system_prompt` 字段回读（最近一次 PUT 成功后的值以本地最近保存值为准，
+  二者一致）；新会话的提示词可在创建时传入。
 
 ### 4.4 知识库 `/knowledge`（7 个）
 
@@ -693,7 +760,7 @@ A=仅 admin；✅/❌ 同理。P=公开。
 
 | 来源模块 | 实际格式 | 示例 | 时区语义 |
 | --- | --- | --- | --- |
-| users / sessions（注册时间、会话创建） | `%Y-%m-%d %H:%M:%S`（无时区后缀） | `2026-09-06 12:34:56` | UTC（代码 `datetime.now(timezone.utc)`） |
+| users / sessions（注册时间、会话创建/更新时间、历史消息时间） | `%Y-%m-%d %H:%M:%S`（无时区后缀） | `2026-09-06 12:34:56` | UTC（代码 `datetime.now(timezone.utc)`） |
 | organizations / knowledge / tickets | `isoformat()`（含 `+00:00`） | `2026-09-06T12:34:56.789012+00:00` | UTC |
 | actions（Run/提案/审批/决定/执行） | `%Y-%m-%dT%H:%M:%SZ` | `2026-09-06T12:34:56Z` | UTC |
 | `AgentEvent.timestamp` | Pydantic datetime ISO | `2026-09-06T20:34:56.123456`（**无时区后缀**） | **服务器本地时间**（`datetime.now()`，语义不一致，见 2.5） |
@@ -724,39 +791,38 @@ A=仅 admin；✅/❌ 同理。P=公开。
 - **决定与恢复结果**：`DecisionResponse.resume_required`、
   `ResumeResponse.resume_ok`、`RunStatusResponse.run.status /
   run.last_error_retryable / result`——用布尔/枚举驱动 UI 分支，不猜文案。
-- 聊天接口**不返回**本轮之外的历史消息与「会话列表」，前端不要把展示中的
-  消息当服务端历史（刷新后无法恢复，见 5.4）。
+- 聊天接口**只返回本轮结果**；会话列表（4.3.2）与安全历史（4.3.4）是
+  刷新后恢复对话的**唯一可信来源**——聊天响应里的 citations/events/
+  pending_approvals 是“本页新收到”的展示数据，**历史接口不会保存它们**，
+  刷新后只恢复安全的问答文本（前端不得伪造历史引用或审批卡片）。
 
 ### 5.4 当前后端缺少、但前端可能需要（或会受影响的）接口
 
 > 均为“现状缺失”，不在本阶段修改后端；列出来供后续排期决策。
 
-1. **会话列表 / 历史消息回读**：会话与消息（含提问与助手回答）实际持久化在
-   `messages` 表（`SessionStore.load_messages` 存在且 ChatService 每次聊天都
-   加载历史），但**没有对应 HTTP 接口**。前端刷新页面后无法恢复会话列表与
-   聊天记录，只能靠本地存储 conversation_id；换设备即丢。
-2. **会话删除/重命名**、**读取会话 system_prompt**：无 API（只能 PUT 覆盖，
-   且不能读回当前值）。
-3. **成员管理**：只有「添加成员」（4.2.3）；**没有成员列表、移除成员、
+1. **会话删除 / 重命名 / 归档**：目前会话只能创建、读取与聊天，无删除或
+   重命名接口（标题由首条消息自动推导，见 4.3）；会话列表接口本身已实现
+   （4.3.2 GET /conversations/）。
+2. **成员管理**：只有「添加成员」（4.2.3）；**没有成员列表、移除成员、
    改角色、查看企业成员数**接口。
-4. **企业设置**：无修改企业名、退出企业、转让/删除企业接口。
-5. **退出登录/吊销 Token**：无服务端登出；Token 只有自然过期。前端“退出登录”
+3. **企业设置**：无修改企业名、退出企业、转让/删除企业接口。
+4. **退出登录/吊销 Token**：无服务端登出；Token 只有自然过期。前端“退出登录”
    只能是清本地 Token（可接受，因为 JWT 无状态）；若要求“踢下线”需后端
    加吊销机制。
-6. **个人信息**：只有 /auth/me 的只读展示；无改密码、改用户名接口。
-7. **“我的提案/我发起的审批”过滤**：审批列表只按企业+status+分页，不按
+5. **个人信息**：只有 /auth/me 的只读展示；无改密码、改用户名接口。
+6. **“我的提案/我发起的审批”过滤**：审批列表只按企业+status+分页，不按
    `requested_by_user_id` 过滤；前端只能拿到全企业列表后本地过滤。
-8. **用户→用户名展示**：响应里的 `*_by_user_id` 都是 user_id，没有按 id
+7. **用户→用户名展示**：响应里的 `*_by_user_id` 都是 user_id，没有按 id
    查用户名的接口（/auth/me 只返回自己），审批/提案人只能显示 id。
-9. **Run 列表接口**：没有 `/action-runs` 列表；Run 只能从聊天
+8. **Run 列表接口**：没有 `/action-runs` 列表；Run 只能从聊天
    `pending_approvals`、审批详情（`run.run_id`）进入查询。审批详情与决定
    响应都带 run_id，够用但入口有限。
-10. **知识库**：无文档删除（只能 disable）、无正文预览（detail 不含
-    raw_text）、无列表分页/搜索、无文档下载；“立即重新入库”只能靠重传同
-    内容文件。
-11. **待办角标/汇总**：无“待我审批数量”汇总接口（可本地用
+9. **知识库**：无文档删除（只能 disable）、无正文预览（detail 不含
+   raw_text）、无列表分页/搜索、无文档下载；“立即重新入库”只能靠重传同
+   内容文件。
+10. **待办角标/汇总**：无“待我审批数量”汇总接口（可本地用
     `GET /approvals/?status=pending&limit=1` 近似，但拿不到总数）。
-12. **角色/成员异动通知**：无推送；只能靠用户手动刷新或进入页面时重新拉取。
+11. **角色/成员异动通知**：无推送；只能靠用户手动刷新或进入页面时重新拉取。
 
 ### 5.5 前后端联调与缺口（现状 → 建议，未修改代码）
 
@@ -770,7 +836,10 @@ A=仅 admin；✅/❌ 同理。P=公开。
   流式/事件接口（runner.py 已预留 SSE/WebSocket 监听扩展点注释）以改善
   体验；同时建议后端给 ChatRequest 增加请求级超时/幂等键，避免用户重试
   造成重复消息（当前服务端在锁内执行、消息按轮 append，客户端取消后服务端
-  是否仍写入存在不确定性——待确认项）。
+  是否仍写入存在不确定性——待确认项）。前端当前已按此约束落地：聊天请求
+  使用独立长超时（`VITE_CHAT_TIMEOUT_MS`，默认 180 秒）、**不自动重试**；
+  超时/断网后提示「结果状态可能不确定」，引导用户调用 4.3.4 刷新历史确认
+  后再决定是否重发。
 - **需要轮询的状态**：
   - Run 恢复/执行：`POST resume` 返回 200 后建议再拉一次 `GET /action-runs/
     {id}/` 或审批详情刷新终态；503/可重试失败场景，UI 保留按钮由用户手动
@@ -824,12 +893,32 @@ A=仅 admin；✅/❌ 同理。P=公开。
 - `OrganizationAccessResponse`：`organization_id, name, role`（我在该企业角色）
 - `MembershipResponse`：`organization_id, user_id, role`
 
-### A.5 ConversationCreated / SystemPromptUpdated / CreateConversationRequest / UpdateSystemPromptRequest
+### A.5 会话模块请求/响应模型
 
 - `ConversationCreated`：`conversation_id`
 - `SystemPromptUpdated`：`updated: true`
 - `CreateConversationRequest`：`system_prompt: string|null`（可选）
 - `UpdateSystemPromptRequest`：`system_prompt: string`（strip 后非空）
+- `ConversationListItem`（GET /conversations/ 列表元素）：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| conversation_id | string | 会话唯一标识 |
+| title | string | 由首条用户消息推导（空白折叠、截断 30 字符）；空会话为「新会话」 |
+| created_at | string | 创建时间（UTC 文本 `%Y-%m-%d %H:%M:%S`） |
+| updated_at | string | 最近活动时间（UTC 文本，倒序排序依据） |
+
+- `ConversationHistoryResponse`（GET /conversations/{id}/messages/）：
+  `conversation_id, system_prompt: string|null, created_at, updated_at,
+  messages: ConversationHistoryMessage[]`
+- `ConversationHistoryMessage`：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| sequence | int | 消息在会话中的原始序号（seq），按升序返回 |
+| role | enum | `user` / `assistant`（仅这两种；assistant 为无工具调用的最终回答） |
+| content | string | 消息正文（原文保留，保证非空；不含内部字段） |
+| created_at | string | 消息写入时间（UTC 文本） |
 
 ### A.6 LLMResponse（聊天成功响应）
 
@@ -990,4 +1079,4 @@ versions: VersionView[], decision|null, self_approved: bool, created_at`
    服务地址（决定登录态时长与本地联调前提，前端按 `expires_in` 与 /auth/me
    自适应即可）。
 5. `AgentEvent.timestamp` 使用服务器本地时间是否为预期（建议统一 UTC，待确认）。
-6. 成员管理、会话列表等缺口接口是否会补（见 5.4），影响页面规划范围。
+6. 成员管理、会话删除/重命名等缺口接口是否会补（见 5.4），影响页面规划范围。

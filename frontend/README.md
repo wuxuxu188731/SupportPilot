@@ -3,9 +3,17 @@
 SupportPilot 电商售后客服工作台的 Web 前端。技术栈：**Vue 3 + TypeScript +
 Vite + Vue Router + Pinia + Axios + Naive UI + Vitest**。
 
-当前阶段已实现：注册 / 登录 / 登录状态恢复 / 退出登录 / 企业列表 / 创建企业 /
-企业选择与切换 / 主界面骨架（认证与企业上下文闭环）。
-客服对话、知识库、审批、成员管理为后续阶段模块，界面中明确标注「待实现」。
+当前阶段已实现：
+
+- 注册 / 登录 / 登录状态恢复 / 退出登录（认证闭环）；
+- 企业列表 / 创建企业 / 企业选择与切换 / 当前角色展示（企业上下文闭环）；
+- **客服对话闭环**：会话列表（新建/切换/加载更多）、服务端历史恢复、
+  发送消息（独立长超时、不自动重试、输入法安全、防重复提交）、
+  Agent 最终回答与结构化展示（知识引用、检索摘要、处理过程时间线、
+  待审批提案卡片）、会话系统提示词设置、企业切换时聊天状态清理与
+  旧企业迟到响应隔离。
+
+知识库、审批中心、成员管理为后续阶段模块，界面中明确标注「待实现」。
 
 ## 环境要求
 
@@ -58,6 +66,7 @@ python -m uvicorn main:app --host 127.0.0.1 --port 8000
 | --- | --- | --- |
 | `VITE_API_BASE_URL` | `/api` | Axios 请求基础地址；开发用 `/api`（代理转发），部署时改为真实网关地址 |
 | `VITE_PROXY_TARGET` | `http://127.0.0.1:8000` | Vite 开发代理目标后端 |
+| `VITE_CHAT_TIMEOUT_MS` | `180000` | 聊天请求独立长超时（毫秒）；聊天不自动重试，超时后界面提示「结果状态可能不确定，请刷新历史后再决定是否重发」 |
 
 `.env.local` 中不得存放真实密钥；仓库只提交 `.env.example` 占位文件。
 
@@ -92,17 +101,23 @@ frontend/
 │   │   ├── errors.ts          # 三种后端错误结构 → 统一 ApiError
 │   │   ├── types.ts           # 请求/响应 DTO（全部属性带中文注释）
 │   │   ├── auth.ts            # /auth 接口封装
-│   │   └── organization.ts    # /organizations 接口封装
+│   │   ├── organization.ts    # /organizations 接口封装
+│   │   └── chat.ts            # /conversations 接口封装（含聊天长超时配置）
 │   ├── stores/                # Pinia Store
 │   │   ├── auth.ts            # 令牌/用户/登录态恢复/退出
 │   │   ├── organization.ts    # 企业列表/当前企业/角色/切换/创建
+│   │   ├── chat.ts            # 会话列表/历史/发送/系统提示词/租户清理
 │   │   ├── tenantReset.ts     # 切换企业时清理租户缓存（统一入口）
 │   │   └── persistence.ts     # localStorage 读写（令牌/企业选择）
-│   ├── router/index.ts        # 路由与守卫（登录态/企业上下文/redirect）
-│   ├── layouts/MainLayout.vue # 主界面布局（顶栏/侧栏占位/内容区）
-│   ├── views/                 # 页面：Login/Register/Organizations/AppHome
-│   ├── components/            # 可复用组件（AuthShell/PasswordInput/RoleTag/
-│   │                          #   OrganizationSwitcher/OrganizationCreateDialog）
+│   ├── router/index.ts        # 路由与守卫（含 /app/chat 系列路由）
+│   ├── layouts/MainLayout.vue # 主界面布局（顶栏/侧栏导航/内容区）
+│   ├── views/                 # Login/Register/Organizations/AppHome/ChatView
+│   ├── components/
+│   │   ├── auth/              # 认证页外壳等
+│   │   ├── common/            # 通用组件
+│   │   ├── organization/      # 企业切换器/创建对话框
+│   │   └── chat/              # 会话列表/消息列表/输入框/答案/引用/事件/审批卡
+│   ├── utils/                 # 时间与金额格式化纯函数
 │   └── test/                  # 测试环境（jsdom 补齐、路由助手）
 ```
 
@@ -124,14 +139,29 @@ frontend/
 
 - 测试运行在 jsdom 环境，mock 全部 API 层，**不依赖 DeepSeek/DashScope/
   Qdrant 或任何外部网络**。
-- 覆盖：三种后端错误结构解析、登录/恢复/401 清理/退出、租户 Header 注入
-  规则、企业列表与本地选择恢复/失效清除、路由守卫（未登录、无企业不可进
-  主界面、已登录访问公开页改道）、表单提交防重复等。
+- 覆盖（149 个用例）：认证与企业闭环（登录/恢复/401/退出、租户 Header、
+  企业列表/切换、路由守卫），以及聊天闭环（会话列表/历史/创建/发送、
+  长超时与不自动重试、Enter/Shift+Enter/输入法、重复提交防护、404 会话
+  失效、企业切换清理与迟到响应隔离、citations/answer_incomplete/
+  pending_approvals/events 展示、默认不展示推理内容、历史消息不伪造
+  结构化信息、金额与时间格式化）。
 
-## 真实联调验证（第二阶段）
+## 聊天模块的事实与边界（重要）
 
-后端正常启动后，本阶段在 API 层完成 16 项真实联调断言并全部通过：
-注册 → 登录 → `/auth/me` 恢复 → 创建企业 → 企业列表（角色 admin）→
-携带 `X-Organization-ID` 访问租户接口（200）/ 缺头（400）→ 创建第二个企业并
-切换 → 错误密码与无效令牌均返回 401。
-浏览器 UI 的人工目检（桌面/移动布局）需在有浏览器的环境执行。
+- **历史恢复与结构化信息**：服务端历史接口只保存用户问题与 Agent 最终
+  回答文本；本页新收到的响应可展示 citations/events/pending_approvals，
+  刷新后不会恢复——前端不伪造历史引用或审批卡片。
+- **聊天超时语义**：聊天请求使用独立长超时（`VITE_CHAT_TIMEOUT_MS`，
+  默认 180 秒）且**不自动重试**；超时或断网后提示「结果状态可能不确定，
+  请先刷新历史再决定是否重新发送」，避免重复用户消息或重复提案。
+- **系统提示词**：会话级附加偏好，不能覆盖服务器规则；空白输入不能提交。
+- **待审批提案**：`pending_approvals` 是唯一可信来源（不解析自然语言）；
+  审批中心在下一阶段开放，本阶段只提供复制 approval_id/run_id 与提示。
+
+## 真实联调验证（第二/三阶段）
+
+后端正常启动后，第二阶段在 API 层完成 16 项真实联调断言并全部通过；
+第三阶段新增 GET /conversations/ 与 GET /conversations/{id}/messages/ 后，
+认证/租户头/分页 422/跨用户 404/空历史等行为已在后端真实 app 测试中
+覆盖。浏览器 UI 的人工目检（桌面/移动布局、长对话滚动）需在有浏览器的
+环境执行。
