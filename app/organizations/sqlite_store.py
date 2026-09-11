@@ -153,3 +153,62 @@ class SQLiteOrganizationStore(OrganizationStore):
             organization_id=organization_id,
             user_id=user_id,
         )
+
+    def list_members(
+        self,
+        *,
+        organization_id: str,
+    ) -> list[Membership]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT organization_id, user_id, role, created_at
+                FROM memberships
+                WHERE organization_id = ?
+                ORDER BY created_at, user_id
+                """,
+                (organization_id,),
+            ).fetchall()
+        return [self._to_membership(row) for row in rows]
+
+    def update_membership_role(
+        self,
+        *,
+        organization_id: str,
+        user_id: str,
+        role: MembershipRole,
+    ) -> Membership:
+        with self._connection() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE memberships
+                SET role = ?
+                WHERE organization_id = ? AND user_id = ?
+                """,
+                (role.value, organization_id, user_id),
+            )
+            if cursor.rowcount == 0:
+                # 没有命中任何行：成员关系不存在（含跨企业场景），不泄露企业内情
+                raise MembershipNotFoundError("membership not found")
+        return self.get_membership(
+            organization_id=organization_id,
+            user_id=user_id,
+        )
+
+    def remove_membership(
+        self,
+        *,
+        organization_id: str,
+        user_id: str,
+    ) -> None:
+        with self._connection() as connection:
+            cursor = connection.execute(
+                """
+                DELETE FROM memberships
+                WHERE organization_id = ? AND user_id = ?
+                """,
+                (organization_id, user_id),
+            )
+            if cursor.rowcount == 0:
+                # 成员关系不存在时与更新保持一致的领域错误语义
+                raise MembershipNotFoundError("membership not found")

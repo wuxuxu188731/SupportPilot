@@ -55,6 +55,49 @@ def get_access_token_ttl_seconds()->int:
   return ttl_seconds
 
 
+# 前端开发服务器默认地址（frontend/vite.config.ts 的 host/port），
+# 作为未显式配置 CORS_ALLOW_ORIGINS 时的允许来源默认值。
+DEFAULT_CORS_ALLOW_ORIGINS = (
+  "http://127.0.0.1:5173",
+  "http://localhost:5173",
+)
+
+# 跨域允许的请求头：Authorization（Bearer Token）、Content-Type（JSON 与
+# multipart 上传）与 X-Organization-ID（多租户上下文）是前端实际会发送的
+# 自定义头，缺一不可。
+CORS_ALLOW_HEADERS = (
+  "Authorization",
+  "Content-Type",
+  "X-Organization-ID",
+)
+
+# 跨域允许的方法：覆盖本文档盘点的全部 HTTP 操作（含预检 OPTIONS）。
+CORS_ALLOW_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
+
+
+def get_cors_allow_origins()->list[str]:
+  """返回允许跨域访问的来源列表。
+
+  取值来自环境变量 CORS_ALLOW_ORIGINS（英文逗号分隔）；未配置时使用本机
+  前端开发服务器地址。允许配置为 "*" 表示放开所有来源——本项目鉴权使用
+  Authorization 请求头而非 Cookie，因此不需要 allow_credentials，
+  通配来源不会带来凭据泄露问题（见 4. 文档的 CORS 说明）。
+  """
+  raw_value = os.getenv("CORS_ALLOW_ORIGINS", "").strip()
+  if not raw_value:
+    return list(DEFAULT_CORS_ALLOW_ORIGINS)
+  origins = [item.strip() for item in raw_value.split(",") if item.strip()]
+  if not origins:
+    # 例如配置成 "," 这类只有分隔符的值：回退到默认来源，避免静默禁用跨域
+    return list(DEFAULT_CORS_ALLOW_ORIGINS)
+  return origins
+
+
+def is_cors_wildcard_origin(origins: list[str])->bool:
+  """判断来源列表是否为通配（"*"），供装配层决定是否开启凭据支持。"""
+  return "*" in origins
+
+
 @dataclass(frozen=True)
 class KnowledgeSettings:
     dashscope_api_key: str  # DashScope 服务鉴权密钥，仅从服务端环境变量读取

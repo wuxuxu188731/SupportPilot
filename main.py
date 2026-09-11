@@ -23,6 +23,7 @@ from app.core.config import (
   get_knowledge_settings,
   get_checkpoint_db_path
 )
+from app.core.cors import configure_cors
 from app.api.knowledge_router import create_knowledge_router
 from app.knowledge.factory import create_knowledge_services
 from app.organizations.sqlite_store import SQLiteOrganizationStore
@@ -40,6 +41,10 @@ from app.workflows.runtime import LangGraphActionWorkflowRunner
 
 
 app = FastAPI()
+# 装配 CORS：允许来源由 CORS_ALLOW_ORIGINS 配置（默认放行本机 Vite 开发
+# 服务器 5173）。前端开发时走 /api 代理属于同源请求，此配置用于直连后端
+# 或前后端分离部署的场景。
+configure_cors(app)
 client = create_llm_client()
 
 database_path = get_chat_db_path()

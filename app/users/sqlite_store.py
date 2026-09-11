@@ -87,3 +87,20 @@ class SQLiteUserStore():
       if row is None:
         raise UserNotFoundError("user not found")
       return self._to_row(row)
+
+  def get_by_ids(self, *, user_ids : list[str]) -> list[User]:
+    # 去重后批量查询：成员列表等展示场景一次取回，避免逐个 id 查询
+    unique_ids = list(dict.fromkeys(user_ids))
+    if not unique_ids:
+      return []
+    placeholders = ",".join("?" for _ in unique_ids)
+    with self._connection() as connection:
+      rows = connection.execute(
+        f"""
+        SELECT id, username, password_hash, created_at
+        FROM users
+        WHERE id IN ({placeholders})
+        """,
+        unique_ids,
+      ).fetchall()
+    return [self._to_row(row) for row in rows]
