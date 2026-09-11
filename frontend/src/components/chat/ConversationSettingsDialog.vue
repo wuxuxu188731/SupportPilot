@@ -39,20 +39,28 @@ watch(
   },
 )
 
-/** 保存：空白输入直接拦截，不发请求。 */
-function submit(): void {
+/*
+ * 保存：空白输入直接拦截，不发请求。
+ * 返回值语义：false 表示「拒绝并保持对话框打开」——Naive UI 的 n-dialog 只有
+ * 在 positive-click 回调返回 false（或 resolve 为 false）时才不关闭对话框；
+ * 若返回 undefined，对话框会立即关闭并卸载，刚赋值的错误文案将成为死代码。
+ */
+function submit(): boolean {
   const value = draft.value.trim()
   if (!value) {
     errorMessage.value = '系统提示词不能为空'
-    return
+    return false
   }
   errorMessage.value = ''
   emit('save', value)
+  return true
 }
 
-function close(): void {
-  if (props.updating) return // 更新中禁止关闭，防止半途丢状态
+/** 取消：更新中禁止关闭，防止半途丢状态（同样需返回 false 才拦得住自动关闭）。 */
+function close(): boolean {
+  if (props.updating) return false
   emit('update:show', false)
+  return true
 }
 </script>
 
