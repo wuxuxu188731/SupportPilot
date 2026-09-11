@@ -6,11 +6,15 @@
 >
 > - 依据版本：仓库 `42b83d9`（第三阶段，客服对话闭环；自该提交起 HTTP
 >   接口面未再变化，后续提交仅涉及测试与文档）
+> - **第四阶段增量（企业成员管理 + CORS）**：在 `42b83d9` 的 23 个操作基础上
+>   新增 3 个成员管理操作（4.2.4–4.2.6），并补齐后端 CORS 装配；
+>   当前为 **23 个路径、26 个 HTTP 操作**。新增部分已按同一口径核对源码与
+>   测试（`app/api/organization_router.py`、`tests/api/test_organization_router.py`）。
 > - 核对方式：静态阅读 `main.py` / `app/api/*` / `app/schemas/*` /
 >   `app/api/dependencies.py` / `tests/api/*`，并在导入阶段用临时环境变量
 >   在内存中生成 OpenAPI（`app.openapi()`，未启动服务器、未修改任何配置、
 >   DB 指向临时目录）交叉核对；两种口径结果一致。
-> - 统计结果：**20 个路径、23 个 HTTP 操作**（不含 FastAPI 自带的
+> - 统计结果：**23 个路径、26 个 HTTP 操作**（不含 FastAPI 自带的
 >   `/docs`、`/openapi.json` 等）。
 
 ---
@@ -27,7 +31,7 @@
 | 模块 | 前缀 | 操作数 | 说明 |
 | --- | --- | --- | --- |
 | 认证 authentication | `/auth` | 3 | 注册、登录、查询当前用户（登录态恢复） |
-| 组织 organizations | `/organizations` | 3 | 创建企业、列出我的企业、添加成员 |
+| 组织 organizations | `/organizations` | 6 | 创建企业、列出我的企业、添加成员、成员列表、修改成员角色、移除成员 |
 | 会话与聊天 conversations | `/conversations` | 5 | 会话列表/新建、单轮聊天、历史读取、更新会话系统提示词 |
 | 知识库 knowledge | `/knowledge` | 7 | 文档上传/新版本、列表/详情、停用/启用、入库任务查询 |
 | 退款/补偿审批与 Run | `/approvals`、`/action-runs` | 5 | 审批列表/详情/决定、Run 状态/恢复 |
@@ -40,6 +44,8 @@
 | 查看/更新自己的登录态（/auth/me） | ❌ | ✅ | ✅ |
 | 创建企业、列出自己的企业 | ❌ | ✅ | ✅ |
 | 添加企业成员 | ❌ | ❌ | ✅（且必须是该企业成员） |
+| 查看企业成员列表 | ❌ | ✅ | ✅ |
+| 修改成员角色 / 移除成员 | ❌ | ❌ | ✅（不能作用于自己） |
 | 会话列表/创建/聊天/历史读取/改提示词（限自己所属企业+自己创建的会话） | ❌ | ✅ | ✅ |
 | 知识库读接口（列表/详情/任务） | ❌ | ✅ | ✅ |
 | 知识库写接口（上传/新版本/停用/启用） | ❌ | ❌ | ✅ |
@@ -114,6 +120,9 @@
    错误语义为“事实已保存但工作流/入库未完成，可稍后重试或查询”。
 4. 租户接口的 404 是“不存在或不属于当前企业”的模糊语义，UI 统一提示
    “资源不存在或已被移除”，不要提示跨企业猜测。
+5. 成员管理的 403 是“我不是该企业 admin”（或角色已被降级）：提示权限不足
+   的同时应重新拉取 `GET /organizations/` 收敛界面入口；成员管理的 409 是
+   “管理员对自己执行改角色/移除”，提示“不能管理自己，请联系其他管理员”。
 
 ### 2.5 接口命名 / 结构上的注意点（影响前端的既有事实）
 
@@ -130,7 +139,22 @@
 - 路由工厂名 `creat_conversation_router` 为历史拼写（`app/api/router.py`），
   不影响 HTTP 面。
 - 会话/审批/知识库列表接口均**不返回总数**，分页/滚动加载由前端自行推断
-  （拉一页小于 limit 即视为到底）。
+  （拉一页小于 limit 即视为到底）。**成员列表接口同样不返回总数**，且无
+  分页与查询参数（一次返回企业全部成员，前端本地搜索/筛选）。
+
+### 2.6 CORS（第四阶段新增）
+
+- 后端已装配 `CORSMiddleware`（`app/core/cors.py`，`main.py` 创建应用后立即
+  调用），允许来源由环境变量 `CORS_ALLOW_ORIGINS` 控制（英文逗号分隔，
+  支持 `*`）；未配置时默认放行本机前端开发服务器
+  `http://127.0.0.1:5173` 与 `http://localhost:5173`。
+- 允许的请求头：`Authorization`、`Content-Type`、`X-Organization-ID`
+  （缺任何一个都会让租户接口的预检失败）；允许的方法：
+  `GET/POST/PUT/PATCH/DELETE/OPTIONS`；预检结果缓存 600 秒。
+- `allow_credentials=False`：鉴权用 `Authorization` 头而非 Cookie，因此
+  允许来源可以安全地配置为 `*`，前端也**不需要**开启 `withCredentials`。
+- 前端开发仍推荐走 Vite 的 `/api` 代理（同源、不触发预检）；本节配置用于
+  直连后端或前后端分离部署的场景，替代此前的「5.5 CORS 未配置」缺口。
 
 ---
 
@@ -164,6 +188,9 @@ A=仅 admin；✅/❌ 同理。P=公开。
 | 21 | 审批 | POST | `/approvals/{approval_id}/decisions/` | 批准/修改后批准/拒绝 | ✅ | ✅ | A | 201/202/200 | 审批详情页决定表单 |
 | 22 | Run | GET | `/action-runs/{run_id}/` | Action Run 状态查询 | ✅ | ✅ | G | 200 | Run 状态面板/失败恢复页 |
 | 23 | Run | POST | `/action-runs/{run_id}/resume/` | 显式恢复 Run | ✅ | ✅ | A | 200 | Run 状态面板“恢复”按钮 |
+| 24 | 组织 | GET | `/organizations/{organization_id}/members/` | 企业成员列表 | ✅ | ❌ | G（成员均可读） | 200 | 成员管理页列表 |
+| 25 | 组织 | PATCH | `/organizations/{organization_id}/members/{user_id}/` | 修改成员角色 | ✅ | ❌ | A（不能改自己） | 200 | 成员管理页角色下拉 |
+| 26 | 组织 | DELETE | `/organizations/{organization_id}/members/{user_id}/` | 移除成员 | ✅ | ❌ | A（不能移除自己） | 204 | 成员管理页“移除”按钮 |
 
 ---
 
@@ -295,8 +322,77 @@ A=仅 admin；✅/❌ 同理。P=公开。
 - 测试：`tests/api/test_organization_router.py`（`test_admin_can_add_member_and_
   duplicate_returns_409`、`test_unknown_member_username_returns_404`、
   `test_agent_cannot_add_member`）。
-- 建议页面：成员管理页。**缺口提醒**：没有成员列表/移除/改角色接口，见 5.4；
-  且“添加”需要输入对方已注册的精确用户名，UI 上要说明规则。
+- 建议页面：成员管理页。**缺口提醒（第四阶段已补齐）**：本接口要求输入对方
+  已注册的**精确用户名**，UI 上要说明该规则；成员列表/改角色/移除见 4.2.4–4.2.6。
+
+#### 4.2.4 GET `/organizations/{organization_id}/members/` — 成员列表（200，成员）
+
+- 用途：列出本企业全部成员及其角色，供成员管理页展示与后续操作定位目标成员。
+- 鉴权：Bearer；**不读 X-Organization-ID**，企业 id 在路径。
+- 成功：`200`，`OrganizationMemberResponse[]`：
+  `[{user_id, username, role, created_at}]`，按 `created_at, user_id` 升序。
+  `role ∈ {admin, agent}`；`created_at` 为加入企业时间（库内 `CURRENT_TIMESTAMP`
+  文本，UTC，形如 `2026-09-06 12:34:56`）；**不含密码哈希等任何凭据字段**。
+- 权限：企业内**任何角色**都可读（成员目录不是敏感信息，与审批列表口径一致）；
+  非成员一律 `404 {"detail": "organization not found"}`（防跨企业枚举）。
+- 其他错误：`401`。
+- 源码：`app/api/organization_router.py`（`list_members`）、
+  `app/application/organization_service.py`（`list_members`）、
+  `app/organizations/sqlite_store.py`（`list_members`）、
+  `app/users/sqlite_store.py`（`get_by_ids` 批量取用户名）。
+- 测试：`tests/api/test_organization_router.py`（`test_list_members_returns_
+  usernames_without_credentials`、`test_agent_can_read_member_list`、
+  `test_non_member_cannot_read_member_list`）。
+- 建议页面：成员管理页。**无分页、无搜索参数、不返回总数**：搜索与角色筛选
+  全部由前端本地处理；用户已被删除时后端用 user_id 兜底作为 username。
+
+#### 4.2.5 PATCH `/organizations/{organization_id}/members/{user_id}/` — 修改成员角色（200，仅 admin）
+
+- 用途：把指定成员的 `admin`/`agent` 角色改为另一个值。
+- 鉴权：Bearer；**仅 admin**（服务端实时重读 Membership）；企业 id 与目标
+  `user_id` 都在路径。
+- Content-Type：`application/json`；请求体 `UpdateMemberRoleRequest`
+  （extra=forbid）：`role: "admin" | "agent"`（**只允许该字段**）。
+- 成功：`200`，`MembershipResponse {organization_id, user_id, role}`。
+- 错误（detail 均为字符串）：
+  - `404 {"detail": "organization not found"}`：企业不存在或我不是其成员；
+  - `403 {"detail": "admin role required"}`：我是成员但角色是 agent；
+  - `404 {"detail": "organization member not found"}`：目标用户不是本企业成员
+    （含跨企业 id，不泄露其在别处是否存在）；
+  - `409 {"detail": "administrators cannot change their own role"}`：**不允许
+    管理员修改自己的角色**（保证企业始终至少保留一名管理员）；
+  - `422` 校验数组（role 非法枚举、多传字段等）。
+- 源码：`app/api/organization_router.py`（`update_member_role`）、
+  `app/application/organization_service.py`（`change_member_role`）、
+  `app/organizations/sqlite_store.py`（`update_membership_role`）。
+- 测试：`tests/api/test_organization_router.py`（`test_admin_can_change_member_
+  role`、`test_agent_cannot_change_role_or_remove_member`、`test_admin_cannot_
+  change_own_role_or_remove_self`、`test_unknown_member_id_returns_404`、
+  `test_member_endpoints_reject_unknown_role`）。
+- 建议页面：成员管理页的角色下拉（**选择动作必须先二次确认**，改角色属于
+  权限变更）；自己那一行不提供该入口并给出来由说明。
+
+#### 4.2.6 DELETE `/organizations/{organization_id}/members/{user_id}/` — 移除成员（204，仅 admin）
+
+- 用途：把成员移出企业，该用户立即失去本企业全部数据访问权限。
+- 鉴权：Bearer；**仅 admin**。
+- 成功：`204`，**无响应体**（前端不要解析 JSON）。
+- 错误（detail 均为字符串）：
+  - `404 {"detail": "organization not found"}`（企业不存在或我不是其成员）；
+  - `403 {"detail": "admin role required"}`；
+  - `404 {"detail": "organization member not found"}`（目标不是本企业成员）；
+  - `409 {"detail": "administrators cannot remove their own membership"}`：
+    **不允许管理员移除自己**。
+- 语义补充：移除**只回收企业访问权**，不级联删除该成员已产生的会话、审批、
+  提案等业务数据；被移除后其会话不再对本企业可见（会话本就按「企业+用户」
+  私有）。被移除者若在页面上继续操作，后续租户请求会得到 404（详见 5.5 的
+  「失去企业权限后的前端处理」）。重新加入需要再走 4.2.3 添加成员。
+- 源码：`app/api/organization_router.py`（`remove_member`）、
+  `app/application/organization_service.py`（`remove_member`）、
+  `app/organizations/sqlite_store.py`（`remove_membership`）。
+- 测试：同 4.2.5（`test_admin_can_remove_member` 等）。
+- 建议页面：成员管理页“移除”按钮（**必须二次确认**，确认文案要说明数据保留
+  与重新添加方式）。
 
 ### 4.3 会话与聊天 `/conversations`（5 个）
 
@@ -804,9 +900,13 @@ A=仅 admin；✅/❌ 同理。P=公开。
 1. **会话删除 / 重命名 / 归档**：目前会话只能创建、读取与聊天，无删除或
    重命名接口（标题由首条消息自动推导，见 4.3）；会话列表接口本身已实现
    （4.3.2 GET /conversations/）。
-2. **成员管理**：只有「添加成员」（4.2.3）；**没有成员列表、移除成员、
-   改角色、查看企业成员数**接口。
+2. **成员管理（第四阶段已补齐主要部分）**：已有「添加成员」（4.2.3）、
+   「成员列表」（4.2.4）、「修改成员角色」（4.2.5）、「移除成员」（4.2.6）。
+   **仍缺**：成员数汇总接口（列表长度即成员数，无需单独接口）、按用户名搜索
+   成员的查询参数（前端本地筛选）、邀请制（未注册用户无法预邀请）。
 3. **企业设置**：无修改企业名、退出企业、转让/删除企业接口。
+   **补充**：管理员「自我移除/自我降级」被后端显式禁止（409），如需
+   「退出企业」能力需后端新增语义（例如转让管理员后再退出）。
 4. **退出登录/吊销 Token**：无服务端登出；Token 只有自然过期。前端“退出登录”
    只能是清本地 Token（可接受，因为 JWT 无状态）；若要求“踢下线”需后端
    加吊销机制。
@@ -827,11 +927,15 @@ A=仅 admin；✅/❌ 同理。P=公开。
 
 ### 5.5 前后端联调与缺口（现状 → 建议，未修改代码）
 
-- **CORS：后端完全未配置**（全仓库无 `CORSMiddleware`）。本地开发两种
-  方案（二选一，需要你拍板，暂不改动）：
-  - 推荐：前端 dev server 配代理（如 Vite `/api` → `http://127.0.0.1:8000`，
-    同源请求彻底绕开 CORS）；或
-  - 后端加 CORS 白名单（若最终前端与后端分离部署，这一步迟早要做）。
+- **CORS：后端已配置（第四阶段）**。`app/core/cors.py` 的 `configure_cors()`
+  在 `main.py` 中创建应用后立即装配；允许来源读 `CORS_ALLOW_ORIGINS`
+  （默认本机 5173 的两个写法，支持 `*`），允许头为 `Authorization` /
+  `Content-Type` / `X-Organization-ID`，`allow_credentials=False`。
+  两种联调方式都可用：
+  - 开发推荐：前端 dev server 配代理（Vite `/api` → `http://127.0.0.1:8000`，
+    同源请求不触发预检，见 `frontend/vite.config.ts`）；
+  - 前后端分离部署：把前端站点来源写入 `CORS_ALLOW_ORIGINS` 即可直连后端。
+  测试见 `tests/test_cors.py`。
 - **聊天接口形态**：普通同步 POST（非流式、非 SSE、非 WebSocket），单轮可能
   耗时数十秒以上。前端可接受“等待转圈”，但建议后续后端提供
   流式/事件接口（runner.py 已预留 SSE/WebSocket 监听扩展点注释）以改善
@@ -853,10 +957,20 @@ A=仅 admin；✅/❌ 同理。P=公开。
 - **Token 过期处理**：任何请求 401（登录接口除外）→ 清本地登录态 → 跳登录
   页并提示“登录已过期”；无 refresh 机制。可用 `expires_in` 做本地倒计时
   提前提示。
-- **角色权限是“前端隐藏 + 后端强制”双保险**：写操作（成员添加、知识库写、
-  决定、恢复）后端全部强校验 admin（agent 得 403；非成员得 404），所以前端
-  按 `GET /organizations/` 返回的 role 隐藏按钮**只是体验优化，不是安全
-  边界**；后端已兜底，不担心绕过。
+- **角色权限是“前端隐藏 + 后端强制”双保险**：写操作（成员添加/改角色/移除、
+  知识库写、决定、恢复）后端全部强校验 admin（agent 得 403；非成员得 404），
+  所以前端按 `GET /organizations/` 返回的 role 隐藏按钮**只是体验优化，不是
+  安全边界**；后端已兜底，不担心绕过。
+- **失去企业权限后的前端处理（成员被移除/自我降级）**：前端启动与守卫会调用
+  `GET /organizations/` 校验本地保存的企业选择，已不在列表中就清除选择并要求
+  重新选择（见 `frontend/src/stores/organization.ts`）。**会话中途**被移除时，
+  后续租户请求会得到 `404 {"detail": "organization not found"}`：前端应把它
+  当作「资源不存在或已被移除」提示（见 2.4 约定 4），并重新拉取企业列表；
+  成员管理页的写操作被 403 拒绝时，store 会主动刷新企业列表收敛界面入口。
+- **管理员的自我管理限制**：`PATCH`/`DELETE` 成员接口对 admin **自己**返回
+  409，这是为了保证企业始终至少保留一名管理员（唯一管理员无法自我降级或
+  退出企业；多个管理员时相互操作的下限也由该规则兜住）。前端在成员管理页
+  对自己那一行不提供改角色/移除入口，并说明该规则。
 
 ---
 
@@ -888,11 +1002,15 @@ A=仅 admin；✅/❌ 同理。P=公开。
 | token_type | string | 固定 `"bearer"` |
 | expires_in | int | 有效秒数（部署 TTL，代码默认 1800，env 样例 604800） |
 
-### A.4 OrganizationResponse / OrganizationAccessResponse / MembershipResponse
+### A.4 OrganizationResponse / OrganizationAccessResponse / MembershipResponse / OrganizationMemberResponse
 
 - `OrganizationResponse`：`organization_id, name`
 - `OrganizationAccessResponse`：`organization_id, name, role`（我在该企业角色）
-- `MembershipResponse`：`organization_id, user_id, role`
+- `MembershipResponse`：`organization_id, user_id, role`（添加成员与改角色响应）
+- `OrganizationMemberResponse`（成员列表元素）：
+  `user_id, username, role, created_at`（加入企业时间，UTC 文本；无凭据字段）
+- `AddMemberRequest`：`username`（3–32）、`role`（admin/agent）
+- `UpdateMemberRoleRequest`：`role`（admin/agent，仅此字段）
 
 ### A.5 会话模块请求/响应模型
 
@@ -1080,4 +1198,9 @@ versions: VersionView[], decision|null, self_approved: bool, created_at`
    服务地址（决定登录态时长与本地联调前提，前端按 `expires_in` 与 /auth/me
    自适应即可）。
 5. `AgentEvent.timestamp` 使用服务器本地时间是否为预期（建议统一 UTC，待确认）。
-6. 成员管理、会话删除/重命名等缺口接口是否会补（见 5.4），影响页面规划范围。
+6. ~~成员管理~~（第四阶段已补齐：成员列表/改角色/移除，见 4.2.4–4.2.6）；
+   会话删除/重命名等缺口接口是否会补（见 5.4），仍影响后续页面规划范围。
+7. 成员管理是否需要在移除成员时做级联/保留策略的后端确认：当前实现只回收
+   企业访问权、保留其已产生的会话与审批记录，若业务要求不同需后端补充语义。
+8. 企业「退出/转让」能力（管理员自我移除被 409 禁止）是否需要后端新增接口，
+   决定成员管理页是否会出现「退出企业」入口。
