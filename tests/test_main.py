@@ -391,3 +391,174 @@ def test_list_pagination_validation_and_history_isolation(
         "updated_at": body[0]["updated_at"],
         "messages": [],
     }
+
+
+def test_member_management_end_to_end_with_real_auth(monkeypatch, tmp_path):
+    """成员管理走真实 app（真实 JWT 鉴权 + 真实 SQLite）的端到端行为。
+
+    保护行为：
+    - 成员列表带用户名且不含凭据字段，创建者自己也在列表里；
+    - 加成员 → 改角色 → 移除 的完整链路与角色落库效果；
+    - 写操作权限：agent 403，非成员/跨企业 404（不泄露企业是否存在）；
+    - 自我管理限制：admin 对自己改角色/移除都是 409。
+    """
+    client = TestClient(load_app(monkeypatch, tmp_path))
+    alice_token = register_and_login(client, "alice")
+    bob_token = register_and_login(client, "bob")
+    carol_token = register_and_login(client, "carol")
+
+    org_a = create_organization(client, alice_token, "Company A")
+    bob_user_id = client.get("/auth/me", headers=bearer(bob_token)).json()["user_id"]
+
+    # 初始成员列表：只有创建者（admin），且不含密码字段
+    initial = client.get(
+        f"/organizations/{org_a}/members/",
+        headers=bearer(alice_token),
+    )
+    assert initial.status_code == 200
+    assert len(initial.json()) == 1
+    assert initial.json()[0]["username"] == "alice"
+    assert initial.json()[0]["role"] == "admin"
+    assert "password_hash" not in initial.json()[0]
+
+    # 添加 bob 为 agent
+    added = client.post(
+        f"/organizations/{org_a}/members/",
+        json={"username": "bob", "role": "agent"},
+        headers=bearer(alice_token),
+    )
+    assert added.status_code == 201
+
+    # bob 现在能读成员列表（读接口不限角色），并且能看到自己与 alice
+    bob_view = client.get(
+        f"/organizations/{org_a}/members/",
+        headers=bearer(bob_token),
+    )
+    assert bob_view.status_code == 200
+    assert {item["username"] for item in bob_view.json()} == {"alice", "bob"}
+
+    # bob（agent）不能改角色、不能移除成员
+    assert client.patch(
+        f"/organizations/{org_a}/members/{bob_user_id}/",
+        json={"role": "admin"},
+        headers=bearer(bob_token),
+    ).status_code == 403
+    assert client.delete(
+        f"/organizations/{org_a}/members/{bob_user_id}/",
+        headers=bearer(bob_token),
+    ).status_code == 403
+
+    # alice（admin）把 bob 提升为 admin，再降回 agent
+    promoted = client.patch(
+        f"/organizations/{org_a}/members/{bob_user_id}/",
+        json={"role": "admin"},
+        headers=bearer(alice_token),
+    )
+    assert promoted.status_code == 200
+    assert promoted.json()["role"] == "admin"
+    demoted = client.patch(
+        f"/organizations/{org_a}/members/{bob_user_id}/",
+        json={"role": "agent"},
+        headers=bearer(alice_token),
+    )
+    assert demoted.status_code == 200
+    assert demoted.json()["role"] == "agent"
+
+    # admin 不能管理自己
+    alice_user_id = client.get("/auth/me", headers=bearer(alice_token)).json()["user_id"]
+    assert client.patch(
+        f"/organizations/{org_a}/members/{alice_user_id}/",
+        json={"role": "agent"},
+        headers=bearer(alice_token),
+    ).status_code == 409
+    assert client.delete(
+        f"/organizations/{org_a}/members/{alice_user_id}/",
+        headers=bearer(alice_token),
+    ).status_code == 409
+
+    # 跨企业（carol 不属于 org_a）读成员列表：404，不泄露企业存在
+    assert client.get(
+        f"/organizations/{org_a}/members/",
+        headers=bearer(carol_token),
+    ).status_code == 404
+    # 跨企业不可作为操作者
+    assert client.delete(
+        f"/organizations/{org_a}/members/{bob_user_id}/",
+        headers=bearer(carol_token),
+    ).status_code == 404
+
+    # 移除 bob：204 无响应体，之后 bob 失去该企业上下文
+    removed = client.delete(
+        f"/organizations/{org_a}/members/{bob_user_id}/",
+        headers=bearer(alice_token),
+    )
+    assert removed.status_code == 204
+    assert removed.content == b""
+    assert client.get("/organizations/", headers=bearer(bob_token)).json() == []
+    assert client.get(
+        f"/organizations/{org_a}/members/",
+        headers=bearer(bob_token),
+    ).status_code == 404
+
+    # 移除后成员列表回到只有创建者
+    final = client.get(
+        f"/organizations/{org_a}/members/",
+        headers=bearer(alice_token),
+    )
+    assert [item["username"] for item in final.json()] == ["alice"]
+
+
+def test_cors_headers_present_on_real_app_response(monkeypatch, tmp_path):
+    """真实 app 的 CORS 装配：白名单来源拿到 Allow-Origin，预检放行租户头。"""
+    client = TestClient(load_app(monkeypatch, tmp_path))
+    origin = "http://127.0.0.1:5173"
+
+    preflight = client.options(
+        "/organizations/",
+        headers={
+            "Origin": origin,
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "authorization,x-organization-id",
+        },
+    )
+    assert preflight.status_code == 200
+    assert preflight.headers["access-control-allow-origin"] == origin
+    allowed_headers = preflight.headers["access-control-allow-headers"].lower()
+    assert "x-organization-id" in allowed_headers
+    assert "authorization" in allowed_headers
+
+    # 真实业务响应也带 CORS 头（未被 401 等错误分支吞掉）
+    unauthorized = client.get("/organizations/", headers={"Origin": origin})
+    assert unauthorized.status_code == 401
+    assert unauthorized.headers["access-control-allow-origin"] == origin
+
+    # 未列入白名单的来源没有 Allow-Origin 头
+    unknown = client.get(
+        "/organizations/",
+        headers={"Origin": "https://evil.example.com"},
+    )
+    assert "access-control-allow-origin" not in unknown.headers
+
+
+def test_member_paths_registered_in_openapi(monkeypatch, tmp_path):
+    """成员管理三条路径已注册，且合计 26 个 HTTP 操作（第四阶段盘点口径）。"""
+    app = load_app(monkeypatch, tmp_path)
+    paths = app.openapi()["paths"]
+    http_methods = {"get", "post", "put", "patch", "delete"}
+
+    assert sorted(
+        method for method in paths["/organizations/{organization_id}/members/"]
+        if method in http_methods
+    ) == ["get", "post"]
+    assert sorted(
+        method
+        for method in paths[
+            "/organizations/{organization_id}/members/{user_id}/"
+        ]
+        if method in http_methods
+    ) == ["delete", "patch"]
+    total_operations = sum(
+        len([method for method in methods if method in http_methods])
+        for methods in paths.values()
+    )
+    assert total_operations == 26
