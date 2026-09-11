@@ -245,7 +245,7 @@ export interface RetrievalSummary {
   strategy: string
   /** 检索轮数 */
   round_count: number
-  /** 证据状态：SUFFICIENT / INSUFFICIENT（大写）等 */
+  /** 证据状态：后端检索摘要原样透出的小写枚举，如 sufficient / insufficient / failed / not_needed */
   evidence_status: string
   /** 检索总耗时（毫秒） */
   latency_ms: number
