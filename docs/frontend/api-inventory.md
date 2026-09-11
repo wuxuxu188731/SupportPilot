@@ -6,16 +6,21 @@
 >
 > - 依据版本：仓库 `42b83d9`（第三阶段，客服对话闭环；自该提交起 HTTP
 >   接口面未再变化，后续提交仅涉及测试与文档）
-> - **第四阶段增量（企业成员管理 + CORS）**：在 `42b83d9` 的 23 个操作基础上
->   新增 3 个成员管理操作（4.2.4–4.2.6），并补齐后端 CORS 装配；
->   当前为 **23 个路径、26 个 HTTP 操作**。新增部分已按同一口径核对源码与
+> - **第四阶段增量（企业成员管理 + CORS）**：在 `42b83d9` 的 **23 个操作**
+>   基础上新增 3 个成员管理操作（4.2.4–4.2.6），并补齐后端 CORS 装配；
+>   当前为 **21 个路径、26 个 HTTP 操作**。新增部分已按同一口径核对源码与
 >   测试（`app/api/organization_router.py`、`tests/api/test_organization_router.py`）。
 > - 核对方式：静态阅读 `main.py` / `app/api/*` / `app/schemas/*` /
 >   `app/api/dependencies.py` / `tests/api/*`，并在导入阶段用临时环境变量
 >   在内存中生成 OpenAPI（`app.openapi()`，未启动服务器、未修改任何配置、
 >   DB 指向临时目录）交叉核对；两种口径结果一致。
-> - 统计结果：**23 个路径、26 个 HTTP 操作**（不含 FastAPI 自带的
+> - 统计结果：**21 个路径、26 个 HTTP 操作**（不含 FastAPI 自带的
 >   `/docs`、`/openapi.json` 等）。
+> - **勘误（2026-09-11 手工测试 DEF-04）**：本节此前写「23 个路径」有误，
+>   实际为 **21 个路径**。`42b83d9` 的 **23** 是**操作数**（由 git 历史核对：
+>   当时会话 5 + 认证 3 + 知识库 7 + 审批 5 + 组织 3 = 23 个操作、20 个路径），
+>   被误写进路径统计。`app.openapi()` 实测：21 路径 / 26 操作，与本节
+>   4.x 各小节逐条列出的数量一致。
 
 ---
 
@@ -527,6 +532,8 @@ A=仅 admin；✅/❌ 同理。P=公开。
 - 成功：`200`，`SystemPromptUpdated {updated: true}`。
 - 错误：`404`（会话不存在/非本人）；`422 {"detail": "prompt must be not blank"}`
   等字符串 detail；`401/400` 同前。
+- Swagger 分组标签：`设置会话的系统提示词`（原先未声明 `tags`，会落入
+  `default` 分组，与其他会话接口的中文分组不一致；2026-09-11 DEF-05 已补齐）。
 - 源码：`app/api/router.py`、`app/application/chat_service.py`。
 - 测试：`tests/api/test_router.py`（`test_update_system_prompt_is_conversation_
   scoped`）。
