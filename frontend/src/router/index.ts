@@ -104,9 +104,17 @@ export function createAppRouter(history = createWebHistory()): Router {
   return createRouter({ history, routes })
 }
 
-/** 组装跳转参数：把原目标地址写入 query.redirect（仅站内路径）。 */
-function withRedirectQuery(fullPath: string): { name: string; query: { redirect: string } } {
-  return { name: 'login', query: { redirect: fullPath } }
+/**
+ * 组装跳转参数：把原目标地址写入 query.redirect（仅站内路径）。
+ * expired 为 true 时附带 reason=expired，与全局 401 回调使用同一提示口径。
+ */
+function withRedirectQuery(
+  fullPath: string,
+  expired = false,
+): { name: 'login'; query: { redirect: string; reason?: string } } {
+  return expired
+    ? { name: 'login', query: { redirect: fullPath, reason: 'expired' } }
+    : { name: 'login', query: { redirect: fullPath } }
 }
 
 /**
@@ -122,8 +130,10 @@ export function registerGuards(router: Router): void {
     await authStore.ensureInitialized()
 
     // 2. 受保护页面：未登录 → 登录页并记录原始目标
+    //    本地即可判定令牌过期时同样带上 reason=expired：服务端 401 路径已提示
+    //    「登录已过期」，本地路径若不提示，刷新页面会像被随机登出。
     if (to.meta.requiresAuth && !authStore.isLoggedIn) {
-      return withRedirectQuery(to.fullPath)
+      return withRedirectQuery(to.fullPath, authStore.sessionExpired)
     }
 
     // 3. 登录/注册页：已登录用户合理改道（有企业回主界面，无企业去选择页）

@@ -244,6 +244,51 @@ describe('主界面的企业上下文约束', () => {
     expect(router.currentRoute.value.name).toBe('login')
     expect(authApi.me).not.toHaveBeenCalled()
   })
+
+  it('本地令牌已过期：跳登录页时带 reason=expired，并保留原目标地址', async () => {
+    // 保护行为：本地即可判定过期而「被踢回」登录页的用户，必须收到与
+    // 服务端 401 路径一致的「登录已过期」提示——否则刷新页面看起来像被随机登出
+    window.localStorage.setItem(
+      AUTH_STORAGE_KEY,
+      JSON.stringify({
+        accessToken: 'stale',
+        tokenType: 'bearer',
+        expiresIn: 1,
+        savedAt: Date.now() - 10_000,
+      }),
+    )
+    const router = createAppRouter(createMemoryHistory())
+    registerGuards(router)
+
+    await router.push('/app/knowledge')
+
+    expect(router.currentRoute.value.name).toBe('login')
+    expect(router.currentRoute.value.query.reason).toBe('expired')
+    expect(router.currentRoute.value.query.redirect).toBe('/app/knowledge')
+  })
+
+  it('从未登录（无本地令牌）：跳登录页但不带 reason=expired', async () => {
+    // 边界情况：普通未登录不能被误报为「登录已过期」，避免误导首次访问的用户
+    const router = createAppRouter(createMemoryHistory())
+    registerGuards(router)
+
+    await router.push('/app/knowledge')
+
+    expect(router.currentRoute.value.name).toBe('login')
+    expect(router.currentRoute.value.query.reason).toBeUndefined()
+  })
+
+  it('主动退出登录后访问受保护页面：不提示「登录已过期」', async () => {
+    // 边界情况：显式退出是用户自己的动作，不能被提示成会话过期
+    const router = await setupLoggedInRouter({ withOrganization: true })
+    const { useAuthStore } = await import('@/stores/auth')
+    await useAuthStore().logout()
+
+    await router.push('/app/knowledge')
+
+    expect(router.currentRoute.value.name).toBe('login')
+    expect(router.currentRoute.value.query.reason).toBeUndefined()
+  })
 })
 
 describe('初始化等待', () => {

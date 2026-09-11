@@ -40,6 +40,12 @@ export const useAuthStore = defineStore('auth', () => {
   const isInitialized = ref(false)
   /** 初始化失败原因（网络等非 401 原因），用于界面提示 */
   const initError = ref<string | null>(null)
+  /**
+   * 上一次会话是否因「令牌过期/失效」结束（而非用户主动退出）。
+   * 供路由守卫在本地即可判定过期时，为登录页补上 reason=expired 提示：
+   * 否则刷新页面「被踢回」登录页的用户得不到任何解释，像被随机登出。
+   */
+  const sessionExpired = ref(false)
 
   // —— 派生状态 ——
 
@@ -62,6 +68,7 @@ export const useAuthStore = defineStore('auth', () => {
 
   /** 把令牌写入状态与本地存储（登录成功后调用）。 */
   function persistToken(token: { access_token: string; token_type: string; expires_in: number }): void {
+    sessionExpired.value = false // 新会话开始：清除上一轮的过期标记
     accessToken.value = token.access_token
     tokenType.value = token.token_type
     expiresIn.value = token.expires_in
@@ -136,7 +143,8 @@ export const useAuthStore = defineStore('auth', () => {
     if (!stored) return
     restoreTokenFromStorage()
     if (Date.now() >= expiresAt.value) {
-      // 本地已可判定过期：直接清理，不再消耗一次请求
+      // 本地已可判定过期：直接清理，不再消耗一次请求；标记原因供登录页提示
+      sessionExpired.value = true
       clearSession()
       return
     }
@@ -146,7 +154,8 @@ export const useAuthStore = defineStore('auth', () => {
       currentUser.value = await authApi.me()
     } catch (error) {
       if (error instanceof Error && 'status' in error && (error as { status: number }).status === 401) {
-        // 令牌被后端判定无效/过期：清理登录态
+        // 令牌被后端判定无效/过期：清理登录态；与服务端 401 路径保持同一提示口径
+        sessionExpired.value = true
         clearSession()
       } else {
         // 网络/服务端暂时不可用：保留令牌，登录态未确认（守卫会引导去登录页）
@@ -173,17 +182,20 @@ export const useAuthStore = defineStore('auth', () => {
     clearAuthStorage()
   }
 
-  /** 退出登录：清理认证态、企业态与全部租户缓存（本地行为）。 */
+  /** 退出登录：清理认证态、企业态与全部租户缓存（本地行为，语义上不是「过期」）。 */
   async function logout(): Promise<void> {
     const organizationStore = useOrganizationStore()
     await runTenantResetHandlers()
     organizationStore.reset()
+    sessionExpired.value = false
     clearSession()
   }
 
   /** 任意接口返回 401（登录接口除外）时的统一过期处理：同上清理本地状态。 */
   async function handleSessionExpired(): Promise<void> {
     await logout()
+    // logout 已按「主动退出」语义复位标记，这里按 401 语义重新置位
+    sessionExpired.value = true
   }
 
   return {
@@ -196,6 +208,7 @@ export const useAuthStore = defineStore('auth', () => {
     loading,
     isInitialized,
     initError,
+    sessionExpired,
     // 派生
     expiresAt,
     isLoggedIn,
