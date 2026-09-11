@@ -19,6 +19,7 @@ import {
   displayText,
   statusTagType,
 } from '@/utils/actionDisplay'
+import { formatDateTime } from '@/utils/time'
 
 const props = defineProps<{
   /** Run 完整状态（GET /action-runs/{run_id}/ 响应） */
@@ -94,15 +95,15 @@ const retryableState = () =>
         </div>
         <div class="meta-row">
           <dt>创建时间</dt>
-          <dd>{{ run.run.created_at || EMPTY }}</dd>
+          <dd data-test="run-created-at">{{ formatDateTime(run.run.created_at) }}</dd>
         </div>
         <div class="meta-row">
           <dt>更新时间</dt>
-          <dd>{{ run.run.updated_at || EMPTY }}</dd>
+          <dd data-test="run-updated-at">{{ formatDateTime(run.run.updated_at) }}</dd>
         </div>
         <div class="meta-row">
           <dt>完成时间</dt>
-          <dd>{{ run.run.completed_at || EMPTY }}</dd>
+          <dd data-test="run-completed-at">{{ formatDateTime(run.run.completed_at) }}</dd>
         </div>
         <div class="meta-row">
           <dt>最近错误</dt>

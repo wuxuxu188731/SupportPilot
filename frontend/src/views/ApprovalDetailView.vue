@@ -33,6 +33,7 @@ import {
   statusTagType,
 } from '@/utils/actionDisplay'
 import { formatAmountCents } from '@/utils/money'
+import { formatDateTime } from '@/utils/time'
 
 const route = useRoute()
 const router = useRouter()
@@ -307,7 +308,7 @@ onUnmounted(() => {
               </div>
               <div class="info-row">
                 <dt>创建时间</dt>
-                <dd data-test="detail-created-at">{{ info.created_at }}</dd>
+                <dd data-test="detail-created-at">{{ formatDateTime(info.created_at) }}</dd>
               </div>
               <div class="info-row">
                 <dt>请求人</dt>
@@ -356,7 +357,7 @@ onUnmounted(() => {
               </div>
               <div class="info-row">
                 <dt>创建时间</dt>
-                <dd>{{ info.requested_version.created_at }}</dd>
+                <dd>{{ formatDateTime(info.requested_version.created_at) }}</dd>
               </div>
             </dl>
             <p class="id-note">金额与原因来自客服提案；执行结果均为模拟业务记录，不代表真实到账或真实发券。</p>
@@ -399,7 +400,7 @@ onUnmounted(() => {
               </div>
               <div class="info-row">
                 <dt>决定时间</dt>
-                <dd>{{ info.decision.created_at }}</dd>
+                <dd data-test="decision-created-at">{{ formatDateTime(info.decision.created_at) }}</dd>
               </div>
               <div class="info-row">
                 <dt>自审</dt>

@@ -19,6 +19,7 @@ import {
   displayText,
 } from '@/utils/actionDisplay'
 import { formatAmountCents } from '@/utils/money'
+import { formatDateTime } from '@/utils/time'
 
 const props = defineProps<{
   /** 全部历史版本（按版本号升序） */
@@ -84,7 +85,7 @@ function isCurrent(version: VersionView): boolean {
         <span class="version-no">V{{ version.version_no }}</span>
         <n-tag v-if="isCurrent(version)" size="small" type="primary" round>当前生效</n-tag>
         <n-tag v-else size="small" round type="default">历史版本</n-tag>
-        <span class="item-time">{{ version.created_at }}</span>
+        <span class="item-time">{{ formatDateTime(version.created_at) }}</span>
       </div>
 
       <div class="item-body">

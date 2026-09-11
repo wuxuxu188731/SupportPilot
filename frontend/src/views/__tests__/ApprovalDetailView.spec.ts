@@ -153,6 +153,13 @@ function decisionSubmit(status: number, partial: Record<string, unknown> = {}): 
   }
 }
 
+/** 把 UTC 时刻按本地时区渲染为 "YYYY-MM-DD HH:mm"（与页面展示口径一致）。 */
+function localDateTime(utcIso: string): string {
+  const date = new Date(utcIso)
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
 function seedLogin(role: 'admin' | 'agent' = 'admin'): void {
   window.localStorage.setItem(
     AUTH_STORAGE_KEY,
@@ -315,6 +322,85 @@ describe('ApprovalDetailView 详情加载', () => {
     expect(text).toContain('¥60.00 → ¥8.00')
     // 当前版本标记为 V2 且高亮
     expect(text).toContain('当前生效：V2')
+  })
+})
+
+describe('ApprovalDetailView 时间展示（H-06）', () => {
+  it('详情、版本时间线、决定与 Run 时间统一按本地时区展示，不原样透出 UTC ISO 文本', async () => {
+    // 保护行为：同一系统内时间口径必须一致（列表页与成员页均已本地化），
+    // 详情页不得把后端 UTC ISO 串（含 T/Z）直接透出，否则用户读到的时间比本地早 8 小时
+    seedLogin()
+    vi.mocked(actionApi.getApprovalDetail).mockResolvedValue(
+      detailResponse({
+        approval_status: 'approved',
+        created_at: '2026-09-11T02:21:32Z',
+        requested_version: version({ created_at: '2026-09-11T02:21:32Z' }),
+        versions: [
+          version({ created_at: '2026-09-11T02:21:32Z' }),
+          version({ version_id: 'v-2', version_no: 2, created_at: '2026-09-11T02:23:00Z' }),
+        ],
+        current_version: version({ version_id: 'v-2', version_no: 2, created_at: '2026-09-11T02:23:00Z' }),
+        decision: {
+          decision_id: 'd-1',
+          decision: 'approved',
+          decided_version_id: 'v-2',
+          decided_by_user_id: 'u-1',
+          comment: '同意',
+          created_at: '2026-09-11T02:24:09Z',
+        },
+      }),
+    )
+    vi.mocked(actionApi.getRunStatus).mockResolvedValue(
+      runStatus({
+        run: runView({
+          status: 'succeeded',
+          created_at: '2026-09-11T02:21:32Z',
+          updated_at: '2026-09-11T02:24:10Z',
+          completed_at: '2026-09-11T02:24:11Z',
+        }),
+      }),
+    )
+    const { wrapper } = await mountDetailView()
+    const text = wrapper.text()
+
+    // 原始 UTC ISO 文本不得原样出现（含 T/Z 后缀）
+    expect(text).not.toContain('2026-09-11T02:21:32Z')
+    expect(text).not.toContain('2026-09-11T02:24:09Z')
+    expect(text).not.toContain('2026-09-11T02:23:00Z')
+
+    // 基本信息 / 请求版本 / 版本时间线 / 决定摘要 / Run 面板均按本地时区展示
+    expect(wrapper.find('[data-test="detail-created-at"]').text()).toBe(
+      localDateTime('2026-09-11T02:21:32Z'),
+    )
+    expect(wrapper.find('[data-test="version-item-1"]').text()).toContain(
+      localDateTime('2026-09-11T02:21:32Z'),
+    )
+    expect(wrapper.find('[data-test="version-item-2"]').text()).toContain(
+      localDateTime('2026-09-11T02:23:00Z'),
+    )
+    expect(wrapper.find('[data-test="decision-created-at"]').text()).toBe(
+      localDateTime('2026-09-11T02:24:09Z'),
+    )
+    expect(wrapper.find('[data-test="run-created-at"]').text()).toBe(
+      localDateTime('2026-09-11T02:21:32Z'),
+    )
+    expect(wrapper.find('[data-test="run-updated-at"]').text()).toBe(
+      localDateTime('2026-09-11T02:24:10Z'),
+    )
+    expect(wrapper.find('[data-test="run-completed-at"]').text()).toBe(
+      localDateTime('2026-09-11T02:24:11Z'),
+    )
+  })
+
+  it('Run 未完成时完成时间显示「—」，不显示原始空值', async () => {
+    // 边界情况：未完成 Run 的 completed_at 为空，必须显示占位符而不是空白或 "null"
+    seedLogin()
+    vi.mocked(actionApi.getRunStatus).mockResolvedValue(
+      runStatus({ run: runView({ completed_at: null }) }),
+    )
+    const { wrapper } = await mountDetailView()
+
+    expect(wrapper.find('[data-test="run-completed-at"]').text()).toBe('—')
   })
 })
 
