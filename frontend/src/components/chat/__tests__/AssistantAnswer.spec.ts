@@ -1,6 +1,6 @@
 /*
- * Agent 回答展示组件测试：纯文本展示、空回答降级、
- * answer_incomplete 警告、引用标记分段与正文不伪造 HTML。
+ * Agent 回答展示组件测试：Markdown 富文本渲染、空回答降级、
+ * answer_incomplete 警告、引用标记分段与正文不执行回答文本中的 HTML。
  */
 
 import { flushPromises, mount } from '@vue/test-utils'
@@ -9,8 +9,36 @@ import { describe, expect, it } from 'vitest'
 import AssistantAnswer from '@/components/chat/AssistantAnswer.vue'
 
 describe('AssistantAnswer 回答展示', () => {
-  it('展示回答正文并保留换行（纯文本，不渲染 HTML）', async () => {
-    // 保护行为：回答必须以安全纯文本渲染，正文中的尖括号不得被解释为标签
+  it('回答正文按 Markdown 渲染，而不是展示语法源码', async () => {
+    // 保护行为：Agent 回答是 Markdown 文本，必须渲染成富文本，
+    // 不能把 ### / ** / - 等语法符号直接暴露给用户
+    const wrapper = mount(AssistantAnswer, {
+      props: { content: '### 处理结果\n\n**已受理**\n\n- 预计 3 天到账' },
+    })
+    await flushPromises()
+
+    expect(wrapper.find('h3').text()).toBe('处理结果')
+    expect(wrapper.find('strong').text()).toBe('已受理')
+    expect(wrapper.findAll('li')).toHaveLength(1)
+    expect(wrapper.text()).not.toContain('###')
+    expect(wrapper.text()).not.toContain('**')
+  })
+
+  it('回答正文中的换行保留展示', async () => {
+    // 边界情况：Markdown 单换行在聊天场景下必须换行展示，不能合并成一行
+    const wrapper = mount(AssistantAnswer, {
+      props: { content: '第一行\n第二行' },
+    })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('第一行')
+    expect(wrapper.text()).toContain('第二行')
+    expect(wrapper.find('.answer-text').element.innerHTML).toContain('<br>')
+  })
+
+  it('正文中的尖括号文本不得被解释为标签（Markdown 渲染下的安全边界）', async () => {
+    // 安全边界：Markdown 渲染不能以牺牲安全为代价，
+    // <script> 只能作为转义后的纯文本出现在页面上
     const wrapper = mount(AssistantAnswer, {
       props: { content: '第一行\n第二行 <script>alert(1)</script>' },
     })
@@ -56,6 +84,7 @@ describe('AssistantAnswer 回答展示', () => {
     const ref = wrapper.find('.citation-ref')
     expect(ref.exists()).toBe(true)
     expect(ref.text()).toContain('C1')
+    expect(ref.attributes('data-citation-id')).toBe('C1')
   })
 
   it('未启用引用链接时正文原样展示，不生成引用标记', async () => {

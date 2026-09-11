@@ -140,6 +140,39 @@ describe('MessageList 历史消息安全性', () => {
     expect(wrapper.find('[data-test="pending-approval-card"]').exists()).toBe(false)
     expect(wrapper.find('.citation-ref').exists()).toBe(false)
   })
+
+  it('历史 Agent 消息按 Markdown 渲染', async () => {
+    // 保护行为：历史恢复的回答同样是 Markdown 文本，必须渲染富文本而非语法源码
+    const wrapper = mountList([
+      userMessage('问题'),
+      assistantHistoryMessage('### 退货政策\n\n- 7 天无理由\n- 需保持完好'),
+    ])
+    await flushPromises()
+
+    expect(wrapper.find('h3').text()).toBe('退货政策')
+    expect(wrapper.find('[data-test="agent-message"]').findAll('li')).toHaveLength(2)
+    expect(wrapper.text()).not.toContain('###')
+  })
+
+  it('历史 Agent 消息中的 HTML 以纯文本展示', async () => {
+    // 安全边界：Markdown 渲染不得执行历史消息里的标签
+    const wrapper = mountList([
+      userMessage('问题'),
+      assistantHistoryMessage('回答 <script>alert(1)</script>'),
+    ])
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('<script>alert(1)</script>')
+    expect(wrapper.find('.agent-bubble').element.innerHTML).not.toContain('<script>')
+  })
+
+  it('用户消息保持纯文本回显（不按 Markdown 渲染）', async () => {
+    // 边界情况：用户输入按原文回显，避免把用户问题里的符号当成排版语法
+    const wrapper = mountList([userMessage('请问 **这个** 怎么处理')])
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="user-message"]').element.innerHTML).toContain('**这个**')
+  })
 })
 
 describe('MessageList 实时结构化展示', () => {

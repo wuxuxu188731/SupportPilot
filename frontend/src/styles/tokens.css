@@ -51,6 +51,9 @@
   /* —— 字体 —— */
   --sp-font-family: 'Inter', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei',
     'Helvetica Neue', Arial, sans-serif;
+  /* 等宽字体：Markdown 行内代码与代码块使用 */
+  --sp-font-family-mono: 'JetBrains Mono', 'SFMono-Regular', Consolas, 'Liberation Mono',
+    Menlo, monospace;
   --sp-font-size-xs: 12px;
   --sp-font-size-sm: 13px;
   --sp-font-size-base: 14px;
