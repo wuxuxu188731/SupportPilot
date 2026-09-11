@@ -97,7 +97,11 @@ def creat_conversation_router(
       except ConversationNotFoundError as exc:
         raise HTTPException(status_code=404, detail="conversation not found error") from exc
 
-    @router.put("/conversations/{conversation_id}/system-prompt/")
+    # tags 与会话相关接口保持一致（原先缺省导致该操作落入 Swagger 的 default 分组）
+    @router.put(
+      "/conversations/{conversation_id}/system-prompt/",
+      tags=["设置会话的系统提示词"]
+    )
     def update_system_prompt(
       conversation_id : str,
       request : UpdateSystemPromptRequest,
