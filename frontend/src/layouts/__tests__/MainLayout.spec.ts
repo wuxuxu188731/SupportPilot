@@ -1,5 +1,5 @@
 /*
- * 主布局菜单测试：客服对话导航可用、菜单高亮跟随路由、其余模块仍待实现。
+ * 主布局菜单测试：各功能模块导航可用、菜单高亮跟随路由。
  */
 
 import { createPinia, setActivePinia } from 'pinia'
@@ -11,6 +11,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createAppRouter } from '@/router'
 import MainLayout from '@/layouts/MainLayout.vue'
+import { flushNavigation } from '@/test/routerHelpers'
 import { AUTH_STORAGE_KEY, ORGANIZATION_STORAGE_KEY } from '@/stores/persistence'
 
 vi.mock('@/api/auth', () => ({
@@ -21,6 +22,10 @@ vi.mock('@/api/auth', () => ({
 vi.mock('@/api/organization', () => ({
   listOrganizations: vi.fn(),
   createOrganization: vi.fn(),
+  listMembers: vi.fn(),
+  addMember: vi.fn(),
+  updateMemberRole: vi.fn(),
+  removeMember: vi.fn(),
 }))
 
 import * as authApi from '@/api/auth'
@@ -62,17 +67,15 @@ beforeEach(() => {
 })
 
 describe('MainLayout 功能菜单', () => {
-  it('「客服对话」「审批中心」「知识库」已开放可用，成员管理仍标注待实现并禁用', async () => {
-    // 保护行为：菜单中已开放模块不再是禁用占位，成员管理仍保持待实现
+  it('五个功能模块全部开放可用，不再有待实现占位', async () => {
+    // 保护行为：菜单中所有已开放模块都是可点击项，不存在「（待实现）」占位
     const { wrapper } = await mountLayout('/app')
 
-    expect(wrapper.text()).toContain('客服对话')
-    expect(wrapper.text()).not.toContain('客服对话（待实现）')
-    expect(wrapper.text()).toContain('审批中心')
-    expect(wrapper.text()).not.toContain('审批中心（待实现）')
-    expect(wrapper.text()).toContain('知识库')
-    expect(wrapper.text()).not.toContain('知识库（待实现）')
-    expect(wrapper.text()).toContain('成员管理（待实现）')
+    for (const label of ['工作台', '客服对话', '审批中心', '知识库', '成员管理']) {
+      expect(wrapper.text()).toContain(label)
+      expect(wrapper.text()).not.toContain(`${label}（待实现）`)
+    }
+    expect(wrapper.text()).not.toContain('待实现')
   })
 
   it('在 /app/chat 页面时菜单高亮「客服对话」', async () => {
@@ -154,5 +157,26 @@ describe('MainLayout 功能菜单', () => {
     await flushPromises()
 
     expect(router.currentRoute.value.name).toBe('knowledge')
+  })
+
+  it('点击「成员管理」菜单跳转到成员管理页面并高亮', async () => {
+    // 保护行为：成员管理已从占位改为真实入口，菜单高亮跟随 /app/members
+    const { wrapper, router } = await mountLayout('/app')
+
+    const item = wrapper
+      .findAll('.n-menu-item-content')
+      .find((element) => element.text().includes('成员管理'))
+    expect(item).toBeDefined()
+    await item!.trigger('click')
+    // 成员管理页为懒加载路由组件：等待其加载完成后再断言路由落定
+    await flushNavigation()
+
+    expect(router.currentRoute.value.name).toBe('members')
+
+    const selected = wrapper
+      .findAll('.n-menu-item-content')
+      .find((element) => [...element.classes()].some((name) => name.includes('--selected')))
+    expect(selected).toBeDefined()
+    expect(selected!.text()).toContain('成员管理')
   })
 })

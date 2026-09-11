@@ -3,8 +3,8 @@
  * 主界面布局：顶栏（品牌、企业切换、用户、退出）+ 左侧导航 + 内容区。
  *
  * 说明：
- *  - 客服对话与审批中心模块已开放并接入路由；知识库、成员管理为后续
- *    阶段模块，目前以「待实现」占位且禁用，不使用假数据；
+ *  - 工作台、客服对话、审批中心、知识库与成员管理模块均已开放并接入路由，
+ *    不使用假数据；
  *  - 菜单高亮跟随当前路由（工作台 /app、客服对话 /app/chat 前缀）；
  *  - 窄屏（<960px）自动隐藏左侧导航，仅保留顶栏核心操作，避免横向溢出。
  */
@@ -28,7 +28,7 @@ const organizationStore = useOrganizationStore()
 /** 当前用户显示名。 */
 const displayName = computed(() => authStore.currentUser?.username ?? '')
 
-/** 侧栏功能导航：客服对话、审批中心与知识库已开放，成员管理仍标注「待实现」并禁用。 */
+/** 侧栏功能导航：工作台、客服对话、审批中心、知识库与成员管理均已开放。 */
 const menuOptions: MenuOption[] = [
   {
     label: '工作台',
@@ -47,9 +47,8 @@ const menuOptions: MenuOption[] = [
     key: 'knowledge',
   },
   {
-    label: '成员管理（待实现）',
+    label: '成员管理',
     key: 'members',
-    disabled: true,
   },
 ]
 
@@ -59,10 +58,11 @@ const activeMenuKey = computed(() => {
   if (route.name === 'chat' || route.name === 'chat-detail') return 'chat'
   if (route.name === 'approvals' || route.name === 'approval-detail') return 'approvals'
   if (route.name === 'knowledge' || route.name === 'knowledge-detail') return 'knowledge'
+  if (route.name === 'members') return 'members'
   return ''
 })
 
-/** 菜单点击：仅已开放的模块会触发导航，待实现项在选项中已禁用。 */
+/** 菜单点击：在各功能模块之间导航。 */
 function handleMenuSelect(key: string): void {
   if (key === 'home') {
     void router.push({ name: 'app' })
@@ -72,6 +72,8 @@ function handleMenuSelect(key: string): void {
     void router.push({ name: 'approvals' })
   } else if (key === 'knowledge') {
     void router.push({ name: 'knowledge' })
+  } else if (key === 'members') {
+    void router.push({ name: 'members' })
   }
 }
 
@@ -128,7 +130,7 @@ function handleLogout(): void {
           :value="activeMenuKey"
           @update:value="handleMenuSelect"
         />
-        <p class="sider-note">成员管理将在后续阶段逐步开放。</p>
+        <p class="sider-note">成员管理写操作仅企业管理员可用，后端会实时校验角色。</p>
       </aside>
 
       <main class="app-content">

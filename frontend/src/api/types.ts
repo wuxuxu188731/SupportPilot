@@ -71,6 +71,42 @@ export interface OrganizationAccess {
   role: MembershipRole
 }
 
+/** 添加成员请求体（后端 AddMemberRequest）。 */
+export interface AddMemberRequest {
+  /** 目标用户名：必须是已注册用户的精确用户名（服务端 strip+小写后精确查找） */
+  username: string
+  /** 赋予该成员的角色 */
+  role: MembershipRole
+}
+
+/** 修改成员角色请求体（后端 UpdateMemberRoleRequest）：成员由路径 user_id 指定。 */
+export interface UpdateMemberRoleRequest {
+  /** 修改后的角色 */
+  role: MembershipRole
+}
+
+/** 企业成员（后端 OrganizationMemberResponse）：不含密码哈希等凭据字段。 */
+export interface OrganizationMember {
+  /** 成员用户标识，同时作为改角色/移除接口的路径参数 */
+  user_id: string
+  /** 成员用户名 */
+  username: string
+  /** 该成员在本企业的角色 */
+  role: MembershipRole
+  /** 加入企业的时间（UTC 文本，库内 CURRENT_TIMESTAMP 格式） */
+  created_at: string
+}
+
+/** 成员关系（后端 MembershipResponse）：添加成员与修改角色的响应。 */
+export interface MembershipResponse {
+  /** 成员关系所属企业标识 */
+  organization_id: string
+  /** 成员用户标识 */
+  user_id: string
+  /** 该成员在本企业的角色 */
+  role: MembershipRole
+}
+
 /** 成员角色枚举：admin=管理员（可审批/可管理企业），agent=客服。 */
 export type MembershipRole = 'admin' | 'agent'
 

@@ -19,6 +19,7 @@ export async function preloadRouteComponents(): Promise<void> {
     import('@/views/ApprovalDetailView.vue'),
     import('@/views/KnowledgeListView.vue'),
     import('@/views/KnowledgeDetailView.vue'),
+    import('@/views/MembersView.vue'),
   ])
 }
 

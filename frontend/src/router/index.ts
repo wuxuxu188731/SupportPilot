@@ -87,6 +87,12 @@ const routes = [
     meta: { requiresAuth: true, requiresOrganization: true, title: '知识库文档详情' },
   },
   {
+    path: '/app/members',
+    name: 'members',
+    component: () => import('@/views/MembersView.vue'),
+    meta: { requiresAuth: true, requiresOrganization: true, title: '成员管理' },
+  },
+  {
     // 未匹配路径统一回根路径，由守卫决定去向
     path: '/:pathMatch(.*)*',
     redirect: { name: 'root' },
