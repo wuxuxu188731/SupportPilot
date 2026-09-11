@@ -161,8 +161,9 @@ frontend/
 
 - 后端**没有 refresh token，也没有服务端 logout 接口**。因此「退出登录」
   只清理前端本地状态（令牌/用户/企业选择），令牌只能等待自然过期
-  （有效期由后端 `ACCESS_TOKEN_TTL_SECONDS` 决定，登录响应 `expires_in` 会
-  返回秒数）；前端按此设计，不存在服务端强制下线能力。
+  （有效期由后端 `ACCESS_TOKEN_TTL_SECONDS` 决定，默认 **1 周（604800 秒）**，
+  登录响应 `expires_in` 会返回秒数，前端据此推算过期时间并做预过期校验）；
+  前端按此设计，不存在服务端强制下线能力。
 - 访问令牌保存在 **localStorage**。这是常见的便捷做法，但其安全性依赖
   站点本身（localStorage 可被同源 XSS 读取），**不是完全安全的存储方案**；
   生产环境应配合 CSP、HttpOnly Cookie 方案或短期令牌与刷新机制演进。

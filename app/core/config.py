@@ -40,8 +40,13 @@ def get_auth_secret_key()->str:
     raise RuntimeError("AUTH_SECRET_KEY must contain at least 32 characters")
   return secret_key
 
+# 登录令牌默认有效期：1 周（604800 秒）。
+# 未配置 ACCESS_TOKEN_TTL_SECONDS 时使用该默认值；可用环境变量覆盖
+# （例如安全要求更高的部署环境可调小，本地联调可调大）。
+DEFAULT_ACCESS_TOKEN_TTL_SECONDS = 604800
+
 def get_access_token_ttl_seconds()->int:
-  raw_value = os.getenv("ACCESS_TOKEN_TTL_SECONDS", "1800")
+  raw_value = os.getenv("ACCESS_TOKEN_TTL_SECONDS", str(DEFAULT_ACCESS_TOKEN_TTL_SECONDS))
   try:
     ttl_seconds = int(raw_value)
   except ValueError as exc:

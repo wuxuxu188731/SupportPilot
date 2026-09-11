@@ -1,8 +1,12 @@
+from pathlib import Path
+
 import pytest
 
 from app.core.config import (
+  DEFAULT_ACCESS_TOKEN_TTL_SECONDS,
   get_access_token_ttl_seconds,
-  get_auth_secret_key
+  get_auth_secret_key,
+  get_knowledge_settings,
 )
 
 
@@ -20,7 +24,7 @@ def test_auth_secret_is_required_and_long(monkeypatch):
 #验证get_access_token_ttl_seconds函数里面从环境变量里面拿到的ttl_seconds必须是正整数
 def test_token_ttl_must_be_positive_integer(monkeypatch):
   monkeypatch.delenv(name="ACCESS_TOKEN_TTL_SECONDS",raising=False)
-  monkeypatch.setenv(name="ACCESS_TOKEN_TTL_SECONDS",value=-100)
+  monkeypatch.setenv(name="ACCESS_TOKEN_TTL_SECONDS",value="-100")
   with pytest.raises(RuntimeError):
     get_access_token_ttl_seconds()
 
@@ -30,11 +34,25 @@ def test_token_ttl_must_be_positive_integer(monkeypatch):
     get_access_token_ttl_seconds()
 
   monkeypatch.delenv(name="ACCESS_TOKEN_TTL_SECONDS",raising=False)
-  monkeypatch.setenv(name="ACCESS_TOKEN_TTL_SECONDS",value=1800)
+  monkeypatch.setenv(name="ACCESS_TOKEN_TTL_SECONDS",value="1800")
   assert get_access_token_ttl_seconds()==1800
 
 
-from app.core.config import get_knowledge_settings
+# 保护行为：未配置 ACCESS_TOKEN_TTL_SECONDS 时，登录令牌默认有效期为 1 周
+# （604800 秒），避免开发者本地因默认值过短而频繁掉线。
+def test_token_ttl_defaults_to_one_week(monkeypatch):
+  monkeypatch.delenv(name="ACCESS_TOKEN_TTL_SECONDS",raising=False)
+  assert get_access_token_ttl_seconds()==604800
+
+
+# 边界情况：仓库 .env.example 给出的示例值必须与代码默认值一致，
+# 否则按示例配置部署会与本地默认行为产生静默差异。
+def test_env_example_ttl_matches_code_default():
+  example_text = (
+    Path(__file__).resolve().parents[2].joinpath(".env.example").read_text(encoding="utf-8")
+  )
+  expected_line = f"ACCESS_TOKEN_TTL_SECONDS={DEFAULT_ACCESS_TOKEN_TTL_SECONDS}"
+  assert expected_line in example_text
 
 
 def test_knowledge_settings_require_dashscope_key(monkeypatch):

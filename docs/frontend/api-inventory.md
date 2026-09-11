@@ -68,8 +68,8 @@
   `access_token`）。
 - Token 是 HS256 JWT，载荷 `{sub: user_id, type: "access", iss: "supportpilot",
   iat, exp}`；过期时间由服务端 `ACCESS_TOKEN_TTL_SECONDS` 决定（代码默认
-  **1800 秒**，仓库 `.env.example` 为 **604800 秒**，以实际部署为准；登录响应
-  里的 `expires_in` 会如实返回秒数）。
+  **604800 秒 = 1 周**，与仓库 `.env.example` 示例值一致，以实际部署为准；
+  登录响应里的 `expires_in` 会如实返回秒数）。
 - 无 Token：`401 {"detail": "authentication required"}`
   + `WWW-Authenticate: Bearer`；
 - Token 无效或过期：`401 {"detail": "invalid or expired access token"}`
@@ -1007,7 +1007,7 @@ A=仅 admin；✅/❌ 同理。P=公开。
 | --- | --- | --- |
 | access_token | string | Bearer Token（JWT） |
 | token_type | string | 固定 `"bearer"` |
-| expires_in | int | 有效秒数（部署 TTL，代码默认 1800，env 样例 604800） |
+| expires_in | int | 有效秒数（部署 TTL，代码默认 604800 = 1 周，可用 `ACCESS_TOKEN_TTL_SECONDS` 覆盖） |
 
 ### A.4 OrganizationResponse / OrganizationAccessResponse / MembershipResponse / OrganizationMemberResponse
 
