@@ -55,8 +55,16 @@ python scripts/run_stage_c_retrieval_eval.py --database .artifacts/stage-c-retri
 
 Embedding、模型或 Qdrant 基础设施失败会写入可续跑 checkpoint 并以非零状态退出，不能按“无结果”解读。DashScope/DeepSeek 余额不足时充值后使用同一命令续跑；Qdrant 返回 503/Bad Gateway 时先排除 VPN/代理干扰，再使用同一命令续跑。
 
+前端：
+
+- 已完成注册登录、企业创建与切换、客服对话（含引用、检索摘要、Agent 事件与待审批卡片）、
+  审批中心、知识库管理与企业成员管理。
+- 审批中心覆盖列表筛选与分页、审批详情与版本时间线、批准 / 修改后批准 / 拒绝三种决定，
+  以及 Run 状态查看与恢复；`agent` 角色只读，决定入口仅对 `admin` 展示。
+- 企业切换或退出登录时统一清理租户相关状态，并丢弃旧企业迟到响应。
+
 当前不包含：
 
 - 真实支付退款、真实优惠券发放或外部 CRM 写入。
-- 审批前端、消息通知、Worker、定时重试和多实例分布式执行租约。
+- 消息通知、Worker、定时重试和多实例分布式执行租约。
 - 真实电商、物流和 CRM 集成。
