@@ -21,6 +21,7 @@ from app.knowledge.base import (
     IngestionStatus,
     InvalidDocumentError,
     KnowledgeDocument,
+    ParsingUnavailableError,
 )
 from app.knowledge.ingestion import IngestionReceipt
 from app.organizations.base import MembershipRole
@@ -38,14 +39,19 @@ USER_B = "user-b"
 class FakeIngestionService:
     """Records every ingestion call; returns a fixed receipt.
 
-    Emulates the real loader's content checks (size/UTF-8/empty) so the tests
-    exercise the router's 422 mapping for empty or non-UTF-8 bodies, exactly as
-    the production loader would raise ``InvalidDocumentError``.
+    Emulates the real loader's content checks so the tests exercise the
+    router's 422 mapping for empty or non-UTF-8 bodies, exactly as the
+    production loader would raise ``InvalidDocumentError``.
+
+    DOCX/PDF 走外部解析，真实 loader 对它们**不做** UTF-8 解码，所以这里
+    必须按来源类型分支——否则会误以为二进制文档「编码非法」。
     """
 
     def __init__(self) -> None:
         self.new_document_calls: list[dict] = []
         self.new_version_calls: list[dict] = []
+        # 非 None 时 ingest 直接抛出该异常，用于验证基础设施故障的 HTTP 映射。
+        self.raise_on_ingest: Exception | None = None
         self.receipt = IngestionReceipt(
             document_id="doc-upload",
             version_id="version-upload",
@@ -54,7 +60,11 @@ class FakeIngestionService:
             deduplicated=False,
         )
 
-    def _load(self, content: bytes) -> None:
+    def _load(self, content: bytes, source_type: DocumentSourceType) -> None:
+        if source_type in (DocumentSourceType.WORD, DocumentSourceType.PDF):
+            if not content.strip():
+                raise InvalidDocumentError(reason="document is empty")
+            return
         try:
             text = content.decode("utf-8")
         except (UnicodeDecodeError, UnicodeError):
@@ -63,12 +73,16 @@ class FakeIngestionService:
             raise InvalidDocumentError(reason="document is empty")
 
     def ingest_new_document(self, **kwargs) -> IngestionReceipt:
-        self._load(kwargs["content"])
+        self._load(kwargs["content"], kwargs["source_type"])
+        if self.raise_on_ingest is not None:
+            raise self.raise_on_ingest
         self.new_document_calls.append(kwargs)
         return self.receipt
 
     def ingest_new_version(self, **kwargs) -> IngestionReceipt:
-        self._load(kwargs["content"])
+        self._load(kwargs["content"], kwargs["source_type"])
+        if self.raise_on_ingest is not None:
+            raise self.raise_on_ingest
         self.new_version_calls.append(kwargs)
         return self.receipt
 
@@ -483,12 +497,25 @@ def test_disable_requires_admin(client_and_service):
 
 
 def test_extensions_and_empty_body_mapped_to_invalid_document(client_and_service):
+    # 保护行为：未知/缺失扩展名、空文件、非 UTF-8 文本一律 422。
+    # 注意 docx/pdf 已在本轮放开（见下方专门用例），不再属于「非法扩展名」。
     client, service = client_and_service(role=MembershipRole.ADMIN)
 
-    pdf = client.post(
+    pptx = client.post(
         "/knowledge/documents/",
         data={"title": "t"},
-        files={"file": ("doc.pdf", b"%PDF", "application/pdf")},
+        files={
+            "file": (
+                "deck.pptx",
+                b"PK\x03\x04",
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            )
+        },
+    )
+    legacy_doc = client.post(
+        "/knowledge/documents/",
+        data={"title": "t"},
+        files={"file": ("legacy.doc", b"\xd0\xcf\x11\xe0", "application/msword")},
     )
     no_ext = client.post(
         "/knowledge/documents/",
@@ -506,9 +533,66 @@ def test_extensions_and_empty_body_mapped_to_invalid_document(client_and_service
         files={"file": ("e.md", b"\xff\xfe", "text/markdown")},
     )
 
-    for response in (pdf, no_ext, empty, bad_utf8):
+    for response in (pptx, legacy_doc, no_ext, empty, bad_utf8):
         assert response.status_code == 422
         assert response.json()["detail"]["code"] == "INVALID_DOCUMENT"
+
+
+def test_docx_and_pdf_uploads_are_accepted(client_and_service):
+    # 保护行为：.docx / .pdf 必须被放行并映射到正确的来源类型，
+    # 且**不得**被当成非 UTF-8 文本拒绝——这两种格式是二进制，
+    # 真实 loader 对它们不做本地解码。
+    client, service = client_and_service(role=MembershipRole.ADMIN)
+
+    docx = client.post(
+        "/knowledge/documents/",
+        data={"title": "Word 文档"},
+        files={"file": ("policy.docx", b"PK\x03\x04\xff\xfe\x00binary", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+    )
+    pdf = client.post(
+        "/knowledge/documents/",
+        data={"title": "PDF 文档"},
+        files={"file": ("policy.pdf", b"%PDF-1.7\n%\xff\xfe\x00binary", "application/pdf")},
+    )
+
+    assert docx.status_code == 201, docx.text
+    assert pdf.status_code == 201, pdf.text
+    assert [call["source_type"] for call in service.new_document_calls] == [
+        DocumentSourceType.WORD,
+        DocumentSourceType.PDF,
+    ]
+
+
+def test_docx_and_pdf_version_uploads_are_accepted(client_and_service):
+    # 保护行为：已有文档上传新版本时（upload_document_version 路径）
+    # .pdf 也必须被放行——这条分支与「新文档」是两段独立代码。
+    client, service = client_and_service(role=MembershipRole.ADMIN)
+
+    response = client.post(
+        "/knowledge/documents/doc-a/versions/",
+        data={"title": "PDF 文档"},
+        files={"file": ("policy.pdf", b"%PDF-1.7\n%\xff\xfe\x00binary", "application/pdf")},
+    )
+
+    assert response.status_code == 201, response.text
+    assert service.new_version_calls[0]["source_type"] is DocumentSourceType.PDF
+
+
+def test_parsing_unavailable_maps_to_503_not_422(client_and_service):
+    # 保护行为：解析服务不可用是服务端故障（5xx），**不能**映射成 422
+    # INVALID_DOCUMENT —— 那等于拿「文档非法」指责用户传了坏文件。
+    client, service = client_and_service(role=MembershipRole.ADMIN)
+    service.raise_on_ingest = ParsingUnavailableError(reason="llamaparse timeout")
+
+    response = client.post(
+        "/knowledge/documents/",
+        data={"title": "PDF 文档"},
+        files={"file": ("policy.pdf", b"%PDF-1.7", "application/pdf")},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "PARSING_UNAVAILABLE"
+    assert response.json()["detail"]["message"] == "document parsing service unavailable"
     assert service.new_document_calls == []
 
 

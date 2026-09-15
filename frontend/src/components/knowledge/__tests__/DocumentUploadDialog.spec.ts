@@ -116,15 +116,37 @@ describe('DocumentUploadDialog 文件选择与校验', () => {
     expect(wrapper.find('[data-test="file-summary"]').text()).toContain('纯文本')
   })
 
-  it('docx 文件被前端拒绝且不发起上传请求', async () => {
-    // 保护行为：不支持扩展名必须被客户端拦截（覆盖测试 15）
+  it('docx / pdf 文件被接受并推导出正确类型', async () => {
+    // 保护行为：Word 与 PDF 已放开上传，不能再被客户端拦截。
+    // 注意用的是二进制字节：这两种格式不是合法 UTF-8，编码校验必须跳过。
     const { wrapper } = mountDialog()
 
     await pickFile(wrapper, new File(['内容'], 'a.docx'))
+    expect(wrapper.find('[data-test="file-summary"]').text()).toContain('Word')
+
+    await pickFile(wrapper, new File(['内容'], 'a.pdf'))
+    expect(wrapper.find('[data-test="file-summary"]').text()).toContain('PDF')
+  })
+
+  it('真正不支持的扩展名仍被前端拒绝且不发起上传请求', async () => {
+    // 边界情况：放开 docx/pdf 不等于放开一切——老式 .doc 必须继续被拦截
+    const { wrapper } = mountDialog()
+
+    await pickFile(wrapper, new File(['内容'], 'a.doc'))
     await submitWithTitle(wrapper, '测试文档')
 
-    expect(wrapper.text()).toContain('仅支持 .md、.markdown 或 .txt')
+    expect(wrapper.text()).toContain('仅支持 .md、.markdown、.txt、.docx 或 .pdf')
     expect(knowledgeApi.uploadKnowledgeDocument).not.toHaveBeenCalled()
+  })
+
+  it('pdf 文件通过校验并调用上传 API', async () => {
+    // 保护行为：真实 pdf 字节不是合法 UTF-8，仍必须能走到上传请求
+    const { wrapper } = mountDialog()
+
+    await pickFile(wrapper, new File([new Uint8Array([0x25, 0x50, 0x44, 0x46, 0xff, 0xfe])], 'a.pdf'))
+    await submitWithTitle(wrapper, '测试文档')
+
+    expect(knowledgeApi.uploadKnowledgeDocument).toHaveBeenCalledTimes(1)
   })
 
   it('空文件被拒绝', async () => {

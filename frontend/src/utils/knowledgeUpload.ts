@@ -4,13 +4,13 @@
  * 事实说明：
  *  - 前端验证只用于改善体验（提前给出可读错误），**不能替代后端校验**：
  *    service 端仍会兜底校验类型/大小/编码/标题并返回 422；
- *  - 扩展名判定不区分大小写：.MD / .Markdown / .TXT 均视为合法；
- *  - `.md` / `.markdown` 映射为 markdown，`.txt` 映射为 text；
- *  - `.docx` 及任何其它扩展名一律拒绝（领域枚举虽含 word，但当前 HTTP
- *    上传不支持 Word）；
- *  - Word 类型文档不提供新版本上传入口（后端不支持上传 Word 文档）；
- *  - UTF-8 检查使用浏览器 TextDecoder 的严格模式（fatal），与后端
- *    content.decode('utf-8') 语义一致。
+ *  - 扩展名判定不区分大小写：.MD / .Markdown / .DOCX 均视为合法；
+ *  - `.md` / `.markdown` 映射为 markdown，`.txt` 映射为 text，
+ *    `.docx` 映射为 word，`.pdf` 映射为 pdf；其余扩展名一律拒绝；
+ *  - **word / pdf 是二进制格式，不做 UTF-8 校验**：真实 docx（zip 包）与 pdf
+ *    的字节都不是合法 UTF-8，若套用文本校验会把它们全部误判为「编码非法」。
+ *    后端 loader 对这两种类型同样不做本地解码，前后端语义保持一致；
+ *  - Word / PDF 文档与其它类型一样支持上传新版本（后端已支持同类型覆盖）。
  */
 
 import type { DocumentSourceTypeValue } from '@/api/knowledgeTypes'
@@ -37,7 +37,6 @@ export type KnowledgeUploadIssueCode =
   | 'invalid-utf8'
   | 'title-blank'
   | 'title-too-long'
-  | 'word-version-unsupported'
   | 'type-mismatch'
 
 /** 上传校验问题对象。 */
@@ -60,6 +59,22 @@ export interface UploadFileLike {
   arrayBuffer?: () => Promise<ArrayBuffer>
 }
 
+/** 需要本地按 UTF-8 解码的文本类型；word/pdf 是二进制，跳过编码校验。 */
+const TEXT_SOURCE_TYPES: readonly DocumentSourceTypeValue[] = ['markdown', 'text']
+
+/** 各来源类型可接受的扩展名（用于「类型不匹配」提示文案）。 */
+const EXPECTED_EXTENSIONS: Record<string, string> = {
+  markdown: '.md / .markdown',
+  text: '.txt',
+  word: '.docx',
+  pdf: '.pdf',
+}
+
+/** 是否为需要 UTF-8 校验的文本类型（word/pdf 为二进制，返回 false）。 */
+export function isTextSourceType(type: DocumentSourceTypeValue | null): boolean {
+  return type !== null && TEXT_SOURCE_TYPES.includes(type)
+}
+
 /** 根据文件名推导来源类型：扩展名不区分大小写；不支持的类型返回 null。 */
 export function detectSourceTypeByFilename(
   filename: string,
@@ -67,6 +82,8 @@ export function detectSourceTypeByFilename(
   const lower = (filename || '').toLowerCase()
   if (lower.endsWith('.md') || lower.endsWith('.markdown')) return 'markdown'
   if (lower.endsWith('.txt')) return 'text'
+  if (lower.endsWith('.docx')) return 'word'
+  if (lower.endsWith('.pdf')) return 'pdf'
   return null
 }
 
@@ -98,7 +115,7 @@ export function validateKnowledgeFileBasics(file: UploadFileLike | null): Knowle
     return {
       code: 'unsupported-extension',
       field: 'file',
-      message: '仅支持 .md、.markdown 或 .txt 文件（不支持 Word 文档）',
+      message: '仅支持 .md、.markdown、.txt、.docx 或 .pdf 文件',
     }
   }
   if (file.size <= 0) {
@@ -171,7 +188,7 @@ export async function validateKnowledgeFileUtf8(file: UploadFileLike): Promise<K
 }
 
 /**
- * 校验「新文档」上传：标题 → 文件属性 → UTF-8。
+ * 校验「新文档」上传：标题 → 文件属性 → UTF-8（仅文本类型）。
  * 返回第一个问题或 null（全部通过）。
  */
 export async function validateNewDocumentUpload(input: {
@@ -187,15 +204,29 @@ export async function validateNewDocumentUpload(input: {
   }
   const fileIssue = validateKnowledgeFileBasics(input.file)
   if (fileIssue) return fileIssue
-  return validateKnowledgeFileUtf8(input.file)
+  return validateEncodingFor(input.file)
 }
 
 /**
- * 校验「新版本」上传：Word 类型直接拒绝 → 文件属性 → 类型匹配 → UTF-8。
+ * 按文件推导出的类型决定是否做 UTF-8 校验。
+ *
+ * word/pdf 直接放行：docx 是 zip 包、pdf 含二进制流，两者都不是合法 UTF-8，
+ * 套用文本校验会把它们全部误判为「编码非法」而根本传不上去。
+ */
+async function validateEncodingFor(
+  file: UploadFileLike,
+): Promise<KnowledgeUploadIssue | null> {
+  if (!isTextSourceType(detectSourceTypeByFilename(file.name))) return null
+  return validateKnowledgeFileUtf8(file)
+}
+
+/**
+ * 校验「新版本」上传：文件属性 → 类型匹配 → UTF-8（仅文本类型）。
  * 返回第一个问题或 null（全部通过）。
  *
- * 注意：markdown 文档接受 .md/.markdown，text 文档只接受 .txt；
- * 文件推导类型必须与原文档 source_type 完全一致。
+ * 注意：新建版本的文件类型必须与原文档 source_type 完全一致——
+ * markdown 接受 .md/.markdown，text 只接受 .txt，word 只接受 .docx，
+ * pdf 只接受 .pdf。
  */
 export async function validateNewVersionUpload(
   input: {
@@ -210,13 +241,6 @@ export async function validateNewVersionUpload(
   if (input.fileCount > 1) {
     return { code: 'multiple-files', field: 'file', message: '一次只能上传一个文件' }
   }
-  if (String(input.documentSourceType) === 'word') {
-    return {
-      code: 'word-version-unsupported',
-      field: 'form',
-      message: 'Word 类型文档暂不支持上传新版本',
-    }
-  }
   if (input.file === null || input.file === undefined) {
     return { code: 'missing-file', field: 'file', message: '请选择要上传的文件' }
   }
@@ -224,17 +248,12 @@ export async function validateNewVersionUpload(
   if (fileIssue) return fileIssue
   const detected = detectSourceTypeByFilename(input.file.name)
   if (detected !== input.documentSourceType) {
-    const expected =
-      input.documentSourceType === 'markdown'
-        ? '.md / .markdown'
-        : input.documentSourceType === 'text'
-          ? '.txt'
-          : '原文档类型'
+    const expected = EXPECTED_EXTENSIONS[String(input.documentSourceType)] ?? '原文档类型'
     return {
       code: 'type-mismatch',
       field: 'file',
       message: `文件类型不匹配：该文档需要 ${expected} 文件`,
     }
   }
-  return validateKnowledgeFileUtf8(input.file)
+  return validateEncodingFor(input.file)
 }

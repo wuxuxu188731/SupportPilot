@@ -145,15 +145,33 @@ describe('VersionUploadDialog 目标信息与类型匹配', () => {
     expect(wrapper.find('[data-test="version-confirm-dialog"]').exists()).toBe(true)
   })
 
-  it('word 类型文档即使挂载也拒绝上传新版本', async () => {
-    // 保护行为：word 类型不得上传新版本（组件入口已防御，校验再兜底）
+  it('word 文档接受 .docx；传 .md 被拒绝', async () => {
+    // 保护行为：Word 类型已支持版本覆盖，文件必须同为 .docx；
+    // 且二进制字节不得被 UTF-8 校验误伤
     const { wrapper } = mountVersionDialog(docDetail({ source_type: 'word' }))
 
     await pickFile(wrapper, new File(['新内容'], 'v2.md'))
     await prepare(wrapper)
-
-    expect(wrapper.text()).toContain('Word 类型文档暂不支持上传新版本')
+    expect(wrapper.text()).toContain('文件类型不匹配')
     expect(knowledgeApi.uploadKnowledgeDocumentVersion).not.toHaveBeenCalled()
+
+    await pickFile(wrapper, new File([new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0xff])], 'v2.docx'))
+    await prepare(wrapper)
+    expect(wrapper.find('[data-test="version-confirm-dialog"]').exists()).toBe(true)
+  })
+
+  it('pdf 文档接受 .pdf；传 .md 被拒绝', async () => {
+    // 保护行为：PDF 类型同样支持版本覆盖，类型匹配双向成立
+    const { wrapper } = mountVersionDialog(docDetail({ source_type: 'pdf' }))
+
+    await pickFile(wrapper, new File(['新内容'], 'v2.md'))
+    await prepare(wrapper)
+    expect(wrapper.text()).toContain('文件类型不匹配')
+    expect(knowledgeApi.uploadKnowledgeDocumentVersion).not.toHaveBeenCalled()
+
+    await pickFile(wrapper, new File([new Uint8Array([0x25, 0x50, 0x44, 0x46, 0xff])], 'v2.pdf'))
+    await prepare(wrapper)
+    expect(wrapper.find('[data-test="version-confirm-dialog"]').exists()).toBe(true)
   })
 })
 

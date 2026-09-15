@@ -4,8 +4,13 @@ from dotenv import load_dotenv
 import os
 import math
 from dataclasses import dataclass
+from pathlib import Path
 
 load_dotenv()
+
+# 项目根目录：与 app/db/migrations.py 使用同一套推导方式，
+# 让相对路径配置（如解析缓存目录）不依赖进程 CWD。
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 MODEL_NAME = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
 
@@ -122,6 +127,7 @@ class KnowledgeSettings:
     )
     llama_cloud_api_key: str | None = None  # LlamaParse 解析密钥；未配置时 PDF/DOCX 无法入库
     llama_cloud_tier: str = "agentic"  # LlamaParse 解析档位，决定解析质量与计费单价
+    llama_cloud_cache_dir: str | None = None  # 解析产物缓存目录；None 表示关闭缓存
 
 
 def get_knowledge_settings() -> KnowledgeSettings:
@@ -163,7 +169,27 @@ def get_knowledge_settings() -> KnowledgeSettings:
         # 才会以 PARSING_UNAVAILABLE 明确失败，而不是让整个应用起不来。
         llama_cloud_api_key=(os.getenv("LLAMA_CLOUD_API_KEY", "").strip() or None),
         llama_cloud_tier=os.getenv("LLAMA_CLOUD_TIER", "agentic").strip() or "agentic",
+        llama_cloud_cache_dir=_llamaparse_cache_dir(),
     )
+
+
+# 解析产物缓存的默认位置：仓库内的 .artifacts/（已被 .gitignore 忽略）。
+# 相对路径按项目根解析，不依赖进程 CWD。
+DEFAULT_LLAMAPARSE_CACHE_DIR = ".artifacts/llamaparse-cache"
+
+
+def _llamaparse_cache_dir() -> str | None:
+    """返回解析缓存目录；显式配置为空字符串时返回 None（关闭缓存）。"""
+    raw = os.getenv("LLAMAPARSE_CACHE_DIR")
+    if raw is None:
+        raw = DEFAULT_LLAMAPARSE_CACHE_DIR
+    raw = raw.strip()
+    if not raw:
+        return None
+    candidate = Path(raw)
+    if not candidate.is_absolute():
+        candidate = PROJECT_ROOT / candidate
+    return str(candidate)
 
 
 def _finite_float(name: str, *, default: str) -> float:

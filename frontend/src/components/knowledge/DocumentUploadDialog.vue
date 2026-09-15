@@ -60,8 +60,8 @@ const fileSourceTypeText = computed(() => {
   return type ? knowledgeDisplayText(DOCUMENT_SOURCE_TYPE_TEXT, type) : null
 })
 
-/** 已按扩展名过滤的 accept 值（仅 .md/.markdown/.txt）。 */
-const ACCEPT_EXTENSIONS = '.md,.markdown,.txt'
+/** 已按扩展名过滤的 accept 值（与后端 _extract_source_type 放行的扩展名一致）。 */
+const ACCEPT_EXTENSIONS = '.md,.markdown,.txt,.docx,.pdf'
 
 /** 清空选择与校验错误（成功或重新选择时）。 */
 function resetForm(): void {
@@ -205,9 +205,9 @@ watch(
       </div>
 
       <n-alert type="info" :show-icon="true" class="rules-note">
-        仅支持 .md / .markdown / .txt 文本文件；单文件不超过 2MiB；内容必须为
-        合法 UTF-8。上传会同步执行解析、分块、向量化与索引建立，可能需要较长时间，
-        期间请勿重复提交。
+        支持 .md / .markdown / .txt 文本文件与 .docx / .pdf 文档；单文件不超过
+        2MiB；文本文件内容必须为合法 UTF-8。上传会同步执行解析、分块、向量化与
+        索引建立，Word 与 PDF 需要调用解析服务，可能需要较长时间，期间请勿重复提交。
       </n-alert>
 
       <p v-if="formError" class="field-error form-error" role="alert" data-test="form-error">

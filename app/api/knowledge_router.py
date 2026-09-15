@@ -71,18 +71,27 @@ def _knowledge_error_response(exc: KnowledgeError) -> HTTPException:
 
 
 def _extract_source_type(filename: str) -> DocumentSourceType:
+    """按扩展名映射来源类型；未知或缺失扩展名一律 422。
+
+    放行的扩展名必须与 ``DocumentLoader`` 实际支持的来源类型保持一致：
+    Markdown/TXT 本地解码，DOCX/PDF 交给外部解析服务提取。
+    """
     lower = (filename or "").lower()
     if lower.endswith(".md") or lower.endswith(".markdown"):
         return DocumentSourceType.MARKDOWN
     if lower.endswith(".txt"):
         return DocumentSourceType.TEXT
-    # Any other or absent extension is rejected; the user can rename to
-    # .md/.markdown/.txt. Empty (no extension) and unknown types both 422.
+    if lower.endswith(".docx"):
+        return DocumentSourceType.WORD
+    if lower.endswith(".pdf"):
+        return DocumentSourceType.PDF
+    # Empty (no extension) and unknown types both 422. 旧的 .doc（非 OOXML）
+    # 与 .pptx 等不在支持范围内，不给「猜格式」的余地。
     raise HTTPException(
         status_code=422,
         detail=_error_payload(
             "INVALID_DOCUMENT",
-            "unsupported file type; use .md/.markdown or .txt",
+            "unsupported file type; use .md/.markdown, .txt, .docx or .pdf",
         ),
     )
 

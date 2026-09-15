@@ -1,13 +1,12 @@
 <script setup lang="ts">
 /*
- * 新版本上传对话框（文档详情页，仅 admin 且文档为 active/disabled 且
- * 类型为 markdown/text 时提供入口）。
+ * 新版本上传对话框（文档详情页，仅 admin 且文档为 active/disabled 时提供入口）。
  *
  * 事实与约束（与后端契约一致）：
  *  - 版本上传**不提供重命名能力**：标题固定为当前文档标题（后端仍要求
  *    title 字段，前端自动传当前标题，不向用户提供重命名输入）；
  *  - 文件类型必须与原文档 source_type 一致（markdown 接受 .md/.markdown，
- *    text 只接受 .txt；word 不提供入口）；
+ *    text 只接受 .txt，word 只接受 .docx，pdf 只接受 .pdf）；
  *  - 提交前必须经过确认对话框（展示目标文档、当前版本与文件信息），
  *    确认前不发起任何请求；
  *  - 上传期间：表单锁定、防重复提交、长耗时提示、阻止误关闭、无虚假取消；
@@ -60,9 +59,16 @@ const fileInputRef = ref<HTMLInputElement | null>(null)
 /** 是否正在上传（防重复提交 + 锁定表单）。 */
 const submitting = computed(() => knowledgeStore.versionUploadSubmitting)
 
-/** 按文档类型推导可接受的扩展名（markdown → md/markdown；text → txt）。 */
-const acceptExtensions = computed(() =>
-  props.document.source_type === 'text' ? '.txt' : '.md,.markdown',
+/** 按文档类型推导可接受的扩展名（必须与原文档 source_type 一致）。 */
+const ACCEPT_BY_SOURCE_TYPE: Record<string, string> = {
+  markdown: '.md,.markdown',
+  text: '.txt',
+  word: '.docx',
+  pdf: '.pdf',
+}
+
+const acceptExtensions = computed(
+  () => ACCEPT_BY_SOURCE_TYPE[String(props.document.source_type)] ?? '.md,.markdown',
 )
 
 /** 当前有效版本号（用于确认内容展示）。 */

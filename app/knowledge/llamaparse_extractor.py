@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import Protocol
 
 from app.knowledge.base import InvalidDocumentError, ParsingUnavailableError
+from app.knowledge.llamaparse_cache import LlamaParseCache, cache_key
 
 # 默认解析档位：agentic 是面向复杂版式的高质量档位，也是本次评估实际验证过的档位。
 DEFAULT_TIER = "agentic"
@@ -59,6 +60,7 @@ class LlamaParseExtractor:
         version: str = DEFAULT_VERSION,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         client: object | None = None,
+        cache: LlamaParseCache | None = None,
     ) -> None:
         if not api_key.strip():
             raise ValueError("LLAMA_CLOUD_API_KEY is required")
@@ -67,6 +69,7 @@ class LlamaParseExtractor:
         self._version = version
         self._timeout_seconds = timeout_seconds
         self._client = client
+        self._cache = cache
 
     @property
     def tier(self) -> str:
@@ -91,7 +94,27 @@ class LlamaParseExtractor:
 
         上传时带上 ``(文件名, 字节)`` 二元组而不是裸字节：解析服务靠扩展名
         选择解析器，裸字节会让它无从判断格式。
+
+        配置了缓存时先查缓存；命中则完全跳过网络请求（不产生计费）。
         """
+        key = (
+            cache_key(content, tier=self._tier, version=self._version)
+            if self._cache is not None
+            else None
+        )
+        if key is not None and self._cache is not None:
+            cached = self._cache.get(key)
+            if cached is not None:
+                return cached
+
+        markdown = self._request_parse(content, suffix=suffix)
+
+        if key is not None and self._cache is not None:
+            self._cache.put(key, markdown)
+        return markdown
+
+    def _request_parse(self, content: bytes, *, suffix: str) -> str:
+        """真正发起一次上传 + 解析，并把失败收敛成解析不可用。"""
         client = self._resolve_client()
         filename = f"{UPLOAD_STEM}{suffix}"
         try:

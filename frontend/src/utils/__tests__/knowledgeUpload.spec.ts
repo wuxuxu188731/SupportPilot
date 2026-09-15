@@ -1,6 +1,6 @@
 /*
  * 知识库上传文件验证测试：扩展名映射（大小写）、类型拒绝、空文件、
- * 2MiB 上限、UTF-8 校验、标题长度、新版本类型匹配、Word 拒绝新版本。
+ * 2MiB 上限、UTF-8 校验、标题长度、新版本类型匹配、Word/PDF 接受与二进制跳过编码校验。
  * 全部为纯函数测试，不触达网络与真实文件系统。
  */
 
@@ -47,10 +47,20 @@ describe('扩展名 → 来源类型映射（不区分大小写）', () => {
     expect(detectSourceTypeByFilename('A.TXT')).toBe('text')
   })
 
-  it('.docx 及其它未知扩展名拒绝（映射为 null）', () => {
-    // 保护行为：Word 文档当前 HTTP 上传不可用，.docx 不得映射为 word
-    expect(detectSourceTypeByFilename('a.docx')).toBeNull()
-    expect(detectSourceTypeByFilename('a.pdf')).toBeNull()
+  it('.docx 映射为 word、.pdf 映射为 pdf（含大写扩展名）', () => {
+    // 保护行为：Word 与 PDF 已放开上传，扩展名必须推导出对应来源类型
+    expect(detectSourceTypeByFilename('a.docx')).toBe('word')
+    expect(detectSourceTypeByFilename('A.DOCX')).toBe('word')
+    expect(detectSourceTypeByFilename('a.pdf')).toBe('pdf')
+    expect(detectSourceTypeByFilename('A.PDF')).toBe('pdf')
+  })
+
+  it('仍需拒绝真正不支持的扩展名与缺失扩展名', () => {
+    // 边界情况：放开 docx/pdf 不等于放开一切——老式 .doc、.pptx、
+    // 无扩展名与空文件名都必须继续映射为 null
+    expect(detectSourceTypeByFilename('a.doc')).toBeNull()
+    expect(detectSourceTypeByFilename('a.pptx')).toBeNull()
+    expect(detectSourceTypeByFilename('a.png')).toBeNull()
     expect(detectSourceTypeByFilename('a')).toBeNull()
     expect(detectSourceTypeByFilename('')).toBeNull()
   })
@@ -64,10 +74,21 @@ describe('文件基础属性校验', () => {
     expect(issue?.field).toBe('file')
   })
 
-  it('不支持扩展名时报 unsupported-extension', () => {
-    // 保护行为：.docx 文件必须在客户端就被拒绝
-    const issue = validateKnowledgeFileBasics(fileLike('a.docx', 100))
+  it('.docx / .pdf 通过基础属性校验（不再被当作不支持类型）', () => {
+    // 保护行为：Word/PDF 已是受支持类型，基础属性校验必须放行
+    expect(validateKnowledgeFileBasics(fileLike('a.docx', 100))).toBeNull()
+    expect(validateKnowledgeFileBasics(fileLike('a.pdf', 100))).toBeNull()
+  })
+
+  it('真正不支持的扩展名仍报 unsupported-extension', () => {
+    // 边界情况：放开 docx/pdf 后，老式 .doc 与其它未知格式必须继续被拒绝，
+    // 否则前端会把后端注定 422 的文件发出去
+    const issue = validateKnowledgeFileBasics(fileLike('a.doc', 100))
     expect(issue?.code).toBe('unsupported-extension')
+    expect(issue?.field).toBe('file')
+    expect(validateKnowledgeFileBasics(fileLike('a.pptx', 100))?.code).toBe(
+      'unsupported-extension',
+    )
   })
 
   it('空文件（0 字节）被拒绝', () => {
@@ -133,9 +154,10 @@ describe('新文档上传组合校验', () => {
 
   it('标题错误优先于文件错误返回', async () => {
     // 保护行为：表单顺序上先暴露标题问题，避免用户先修一半
+    // （用一个确实非法的文件，否则「优先」无从体现）
     const issue = await validateNewDocumentUpload({
       title: '  ',
-      file: fileLike('a.docx', 100),
+      file: fileLike('a.doc', 100),
     })
     expect(issue?.code).toBe('title-blank')
   })
@@ -147,6 +169,18 @@ describe('新文档上传组合校验', () => {
       file: fileLike('a.md', 3, new Uint8Array([0xff, 0xfe, 0xff])),
     })
     expect(issue?.code).toBe('invalid-utf8')
+  })
+
+  it('Word / PDF 跳过 UTF-8 校验（二进制格式）', async () => {
+    // 保护行为：真实 docx 是 zip 包、pdf 含二进制流，字节都不是合法 UTF-8。
+    // 若对它们套用文本编码校验，会把所有真实文档误判为「编码非法」而根本传不上去。
+    const binary = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0xff, 0xfe, 0x00])
+    expect(
+      await validateNewDocumentUpload({ title: 'Word', file: fileLike('a.docx', 7, binary) }),
+    ).toBeNull()
+    expect(
+      await validateNewDocumentUpload({ title: 'PDF', file: fileLike('a.pdf', 7, binary) }),
+    ).toBeNull()
   })
 })
 
@@ -181,14 +215,61 @@ describe('新版本上传组合校验', () => {
     expect(issue?.code).toBe('type-mismatch')
   })
 
-  it('word 类型文档直接拒绝上传新版本', async () => {
-    // 保护行为：word 类型不可通过 HTTP 上传新版本（入口与校验双重拦截）
+  it('word 文档接受 .docx，且传 .md 被拒绝', async () => {
+    // 保护行为：Word 类型已支持上传新版本，但文件必须同为 .docx
+    expect(
+      await validateNewVersionUpload({
+        fileCount: 1,
+        file: fileLike('v2.docx', 64, new Uint8Array([0x50, 0x4b, 0x03, 0x04])),
+        documentSourceType: 'word',
+      }),
+    ).toBeNull()
+
     const issue = await validateNewVersionUpload({
       fileCount: 1,
       file: fileLike('v2.md', 64, utf8Bytes('正文')),
       documentSourceType: 'word',
     })
-    expect(issue?.code).toBe('word-version-unsupported')
+    expect(issue?.code).toBe('type-mismatch')
+    expect(issue?.message).toContain('.docx')
+  })
+
+  it('pdf 文档接受 .pdf，且传 .md 被拒绝', async () => {
+    // 保护行为：PDF 类型同样支持版本覆盖，类型匹配必须双向成立
+    expect(
+      await validateNewVersionUpload({
+        fileCount: 1,
+        file: fileLike('v2.pdf', 64, new Uint8Array([0x25, 0x50, 0x44, 0x46])),
+        documentSourceType: 'pdf',
+      }),
+    ).toBeNull()
+
+    const issue = await validateNewVersionUpload({
+      fileCount: 1,
+      file: fileLike('v2.md', 64, utf8Bytes('正文')),
+      documentSourceType: 'pdf',
+    })
+    expect(issue?.code).toBe('type-mismatch')
+    expect(issue?.message).toContain('.pdf')
+  })
+
+  it('word / pdf 新版本同样跳过 UTF-8 校验', async () => {
+    // 保护行为：二进制格式在版本上传路径上也不能套用编码校验
+    const binary = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0xff, 0xfe])
+    expect(
+      await validateNewVersionUpload({
+        fileCount: 1,
+        file: fileLike('v2.docx', 6, binary),
+        documentSourceType: 'word',
+      }),
+    ).toBeNull()
+    expect(
+      await validateNewVersionUpload({
+        fileCount: 1,
+        file: fileLike('v2.pdf', 6, binary),
+        documentSourceType: 'pdf',
+      }),
+    ).toBeNull()
   })
 
   it('一次选择多个文件被拒绝', async () => {

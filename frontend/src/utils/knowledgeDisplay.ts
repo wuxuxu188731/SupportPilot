@@ -23,7 +23,8 @@ import type {
 export const DOCUMENT_SOURCE_TYPE_TEXT: Record<DocumentSourceTypeValue, string> = {
   markdown: 'Markdown',
   text: '纯文本',
-  word: 'Word（只读兼容）',
+  word: 'Word',
+  pdf: 'PDF',
 }
 
 /** 文档来源类型 → 标签色（与文字同时展示，颜色不单独表意）。 */
@@ -31,6 +32,7 @@ export const DOCUMENT_SOURCE_TYPE_TAG: Record<DocumentSourceTypeValue, TagProps[
   markdown: 'info',
   text: 'default',
   word: 'warning',
+  pdf: 'error',
 }
 
 /** 文档状态 → 中文标签。 */

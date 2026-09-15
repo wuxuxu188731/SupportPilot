@@ -48,13 +48,13 @@ const activeVersionNo = computed(() => {
   return active ? `v${active.version_no}` : '—'
 })
 
-/** 是否允许上传新版本：admin + 有效状态（active/disabled）+ markdown/text 类型。 */
+/** 是否允许上传新版本：admin + 有效状态（active/disabled）。
+ *  文档类型不再限制——word/pdf 由解析服务处理，与文本类型同样支持版本覆盖。 */
 const canUploadVersion = computed(
   () =>
     knowledgeStore.isAdmin &&
     detail.value !== null &&
-    (detail.value.status === 'active' || detail.value.status === 'disabled') &&
-    (detail.value.source_type === 'markdown' || detail.value.source_type === 'text'),
+    (detail.value.status === 'active' || detail.value.status === 'disabled'),
 )
 
 /** 停用/启用确认对话框。 */

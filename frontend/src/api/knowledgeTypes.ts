@@ -14,8 +14,8 @@
 
 // —— 枚举取值（仅从后端代码取值，不新增不改名） ——
 
-/** 文档来源类型（后端 DocumentSourceType）；word 为领域兼容类型，当前 HTTP 上传不可用。 */
-export type DocumentSourceTypeValue = 'markdown' | 'text' | 'word'
+/** 文档来源类型（后端 DocumentSourceType）：markdown/text 本地解码，word/pdf 由解析服务提取。 */
+export type DocumentSourceTypeValue = 'markdown' | 'text' | 'word' | 'pdf'
 
 /** 文档生命周期状态（后端 DocumentStatus）。 */
 export type DocumentStatusValue = 'processing' | 'active' | 'disabled' | 'failed'

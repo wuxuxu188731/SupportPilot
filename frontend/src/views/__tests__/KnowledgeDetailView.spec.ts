@@ -264,16 +264,21 @@ describe('KnowledgeDetailView 角色与状态操作', () => {
     expect(failed.wrapper.find('[data-test="detail-enable"]').exists()).toBe(false)
   })
 
-  it('admin + word 类型：不提供上传新版本入口', async () => {
-    // 保护行为：word 类型文档不提供上传新版本（HTTP 上传不支持 Word）
-    vi.mocked(knowledgeApi.getKnowledgeDocumentDetail).mockResolvedValue(
-      detail({ source_type: 'word', status: 'active' }),
-    )
-    seedLogin('admin')
-    const { wrapper } = await mountKnowledgeDetail('/app/knowledge/doc-1')
+  it('admin + word/pdf 类型：同样提供上传新版本入口', async () => {
+    // 保护行为：Word 与 PDF 已支持版本覆盖，入口不能再按类型屏蔽
+    for (const sourceType of ['word', 'pdf'] as const) {
+      vi.mocked(knowledgeApi.getKnowledgeDocumentDetail).mockResolvedValue(
+        detail({ source_type: sourceType, status: 'active' }),
+      )
+      seedLogin('admin')
+      const { wrapper } = await mountKnowledgeDetail('/app/knowledge/doc-1')
 
-    expect(wrapper.find('[data-test="open-version-upload"]').exists()).toBe(false)
-    expect(wrapper.find('[data-test="detail-disable"]').exists()).toBe(true)
+      expect(
+        wrapper.find('[data-test="open-version-upload"]').exists(),
+        `${sourceType} 应提供上传新版本入口`,
+      ).toBe(true)
+      expect(wrapper.find('[data-test="detail-disable"]').exists()).toBe(true)
+    }
   })
 
   it('admin + active + markdown/text：显示上传新版本入口并打开对话框', async () => {

@@ -19,11 +19,12 @@ import {
 } from '@/utils/knowledgeDisplay'
 
 describe('枚举状态中文文案', () => {
-  it('文档来源类型：markdown/text/word', () => {
-    // 保护行为：三种来源类型必须都有明确中文文案
+  it('文档来源类型：markdown/text/word/pdf', () => {
+    // 保护行为：四种来源类型必须都有明确中文文案
     expect(DOCUMENT_SOURCE_TYPE_TEXT.markdown).toBe('Markdown')
     expect(DOCUMENT_SOURCE_TYPE_TEXT.text).toBe('纯文本')
-    expect(DOCUMENT_SOURCE_TYPE_TEXT.word).toBe('Word（只读兼容）')
+    expect(DOCUMENT_SOURCE_TYPE_TEXT.word).toBe('Word')
+    expect(DOCUMENT_SOURCE_TYPE_TEXT.pdf).toBe('PDF')
   })
 
   it('文档状态：processing/active/disabled/failed', () => {

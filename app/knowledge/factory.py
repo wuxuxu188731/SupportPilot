@@ -24,6 +24,7 @@ from app.knowledge.chunking import KnowledgeChunker
 from app.knowledge.dashscope_embeddings import DashScopeEmbeddingClient
 from app.knowledge.document_loader import DocumentLoader
 from app.knowledge.ingestion import KnowledgeIngestionService
+from app.knowledge.llamaparse_cache import LlamaParseCache
 from app.knowledge.llamaparse_extractor import LlamaParseExtractor
 from app.knowledge.qdrant_store import QdrantVectorStore
 from app.knowledge.reranking import DashScopeQwenReranker
@@ -78,6 +79,13 @@ def create_knowledge_services(
         LlamaParseExtractor(
             api_key=settings.llama_cloud_api_key,
             tier=settings.llama_cloud_tier,
+            # 缓存按「原始字节 + 档位 + 版本」做键，重复上传与失败重试
+            # 都不会二次计费；配置为空字符串时显式关闭。
+            cache=(
+                LlamaParseCache(settings.llama_cloud_cache_dir)
+                if settings.llama_cloud_cache_dir
+                else None
+            ),
         )
         if settings.llama_cloud_api_key
         else None
