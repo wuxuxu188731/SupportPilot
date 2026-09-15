@@ -825,17 +825,11 @@ class KnowledgeIngestionService:
         loaded: LoadedDocument,
         content_hash: str | None,
     ) -> IngestionReceipt:
-        """Run the chunk->embed->persist->activate pipeline for a reserved
-        version, closing any post-reservation failure into the job/document.
+        """执行预留版本的切分、嵌入、持久化和激活，将失败记录到任务与文档。
 
-        ``content_hash`` is ``None`` only on the synchronous re-run path
-        (:meth:`_reuse_duplicate_version`), where the version row already holds
-        the parsed content and therefore already holds the hash.
-
-        Exceptions are only caught here AFTER version+job rows exist. The safe
-        ``error_message`` on the job never carries API keys, raw document
-        bodies or the underlying traceback; ``KeyboardInterrupt`` /
-        ``SystemExit`` are deliberately never swallowed.
+        同步重跑允许 content_hash 为空，此时版本行已保存解析正文和哈希。
+        任务与版本建立后才处理管线异常；公开错误不包含密钥、正文或堆栈，
+        且不吞掉 KeyboardInterrupt 与 SystemExit。
         """
         # 异步任务已在 claim_job 中抢占并计数；同步入口的新任务才需要启动计数。
         if job.status is IngestionStatus.QUEUED:

@@ -421,6 +421,7 @@ def test_retry_after_a_post_parse_failure_reuses_stored_text_without_reparsing(
 
     assert len(harness.extractor.calls) == 1, "重试不得重新解析"
     assert harness.job(receipt.job_id).status is IngestionStatus.SUCCEEDED
+    assert harness.job(receipt.job_id).attempt_count == 2
     document = harness.store.get_document(
         organization_id=harness.organization_id,
         document_id=receipt.document_id,
@@ -638,6 +639,19 @@ def test_worker_recover_requeues_and_executes_stale_jobs(harness):
 
     assert recovered == [(harness.organization_id, stale_receipt.job_id)]
     assert harness.job(stale_receipt.job_id).status is IngestionStatus.SUCCEEDED
+    assert harness.job(stale_receipt.job_id).attempt_count == 2
+
+
+# 保护行为：保留同步入库入口时，真实任务记录仍应只计一次执行。
+def test_synchronous_ingestion_counts_one_attempt(harness):
+    receipt = harness.service.ingest_new_document(
+        organization_id=harness.organization_id,
+        uploaded_by_user_id=harness.user_id,
+        title="同步入库",
+        source_type=DocumentSourceType.MARKDOWN,
+        content=b"# Policy\n\nBody",
+    )
+    assert harness.job(receipt.job_id).attempt_count == 1
 
 
 def test_worker_keeps_consuming_after_a_job_fails(harness):
