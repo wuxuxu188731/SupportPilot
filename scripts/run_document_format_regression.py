@@ -568,6 +568,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--database", default=str(DEFAULT_OUTPUT_DIR / "state.db"))
     parser.add_argument("--cases", default=str(DEFAULT_CASES_PATH))
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT_DIR / "report.json"))
+    parser.add_argument("--collection", help="与指定数据库配套的 Qdrant 集合，用于续跑独立回归")
     parser.add_argument(
         "--fresh", action="store_true",
         help="使用新数据库和独立向量集合重新入库；保留历史结果并复用解析缓存",
@@ -580,10 +581,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="只跑指定形态（默认三种全跑；语料已入库时会跳过重复入库）",
     )
     args = parser.parse_args(argv)
+    if args.fresh and args.collection:
+        parser.error("--fresh 自动生成独立集合，不能同时指定 --collection")
 
     database = Path(args.database)
     output = Path(args.output)
-    collection_name = None
+    collection_name = args.collection
     if args.fresh:
         run_id = uuid4().hex
         database = database.parent / run_id / database.name

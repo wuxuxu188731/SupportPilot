@@ -73,3 +73,22 @@ def test_fresh_run_preserves_existing_state(tmp_path, monkeypatch):
     assert database.read_bytes() == b"old database"
     assert output.read_text(encoding="utf-8") == "old report"
     assert (captured["database_path"].parent / "report.json").exists()
+
+
+# 保护行为：独立回归续跑时，数据库与集合必须一起传给服务装配。
+def test_resume_passes_matching_collection(tmp_path, monkeypatch):
+    captured = {}
+
+    async def fake_run(**kwargs):
+        captured.update(kwargs)
+        return {"summary": {"all_results_consistent": True}}
+
+    monkeypatch.setattr(regression, "run_regression", fake_run)
+    monkeypatch.setattr(regression, "render_markdown", lambda report: "测试报告")
+    database = tmp_path / "state.db"
+    assert regression.main([
+        "--database", str(database), "--collection", "supportpilot_format_resume",
+        "--output", str(tmp_path / "report.json"),
+    ]) == 0
+    assert captured["database_path"] == database
+    assert captured["collection_name"] == "supportpilot_format_resume"
