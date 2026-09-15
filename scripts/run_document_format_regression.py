@@ -222,6 +222,16 @@ def heading_exactness(case: StageCCase, outcome: CaseOutcome) -> dict[str, bool]
     }
 
 
+def score_search_result(case, result, document_keys):
+    """基础设施失败或空证据必须终止回归，不能把三份空结果判成等价。"""
+    if not result.ok:
+        code = getattr(result.error, "code", "SEARCH_FAILED")
+        raise RuntimeError(f"检索失败：{case.case_id} code={code}")
+    if not result.citations:
+        raise RuntimeError(f"检索没有返回证据：{case.case_id}")
+    return score_case(case, result.citations, document_keys)
+
+
 def build_services(*, database_path: Path, settings) -> RegressionServices:
     """按生产同样的真实适配器装配入库 + Baseline 检索（不涉及大模型）。"""
     store = SQLiteKnowledgeStore(database_path=database_path)
@@ -428,7 +438,7 @@ async def run_regression(
                 organization_id=organization_id,
                 question=case.question,
             )
-            per_case.append(score_case(case, result.citations, document_keys))
+            per_case.append(score_search_result(case, result, document_keys))
         outcomes[format_name] = per_case
 
     return _compile_report(cases, outcomes, settings, formats)

@@ -2,6 +2,8 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from scripts import run_document_format_regression as regression
 
 
@@ -25,6 +27,14 @@ def test_scoring_requires_actual_document_and_heading():
     assert result.group_hits == {"general": True, "returns": False}
     result = regression.score_case(make_case(), [citation], {"g": "returns_exchange"})
     assert result.hit_count == 0
+
+
+# 边界情况：服务错误和空引用必须让回归失败，不能输出三格式等价的假成功。
+@pytest.mark.parametrize("ok", [False, True])
+def test_search_failure_or_empty_evidence_cannot_pass(ok):
+    result = SimpleNamespace(ok=ok, citations=[], error=SimpleNamespace(code="EMBEDDING_UNAVAILABLE"))
+    with pytest.raises(RuntimeError):
+        regression.score_search_result(make_case(), result, {})
 
 
 # 保护行为：命中数量相同但命中不同证据时，不得认定格式等价或标题全部命中。
