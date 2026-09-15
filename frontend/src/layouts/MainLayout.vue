@@ -114,7 +114,7 @@ function handleLogout(): void {
         <n-menu :options="menuOptions" :value="activeMenuKey" :indent="16" :icon-size="19" @update:value="handleMenuSelect" />
       </nav>
       <div class="sider-bottom">
-        <div class="sider-tip"><AppIcon name="spark" :size="22" /><strong>每一次服务，都更进一步</strong><p>让 AI 连接知识与协作，<br />让团队专注有温度的沟通。</p><router-link :to="{ name: 'chat' }">开启一段对话 <AppIcon name="arrow" :size="15" /></router-link></div>
+        <div class="sider-tip"><AppIcon name="spark" :size="22" /><strong>每一次服务，都更进一步</strong><p>让 AI 连接知识与协作，<br>让团队专注有温度的沟通。</p><router-link :to="{ name: 'chat' }">开启一段对话 <AppIcon name="arrow" :size="15" /></router-link></div>
         <div class="sider-footer"><span class="footer-dot" /> SupportPilot <span>服务，有章可循</span></div>
       </div>
     </aside>

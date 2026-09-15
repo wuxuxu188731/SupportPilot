@@ -9,8 +9,8 @@ import AppIcon from '@/components/common/AppIcon.vue'
       <div class="auth-logo"><span class="auth-brand-mark"><AppIcon name="spark" :size="25" /></span><span>SupportPilot<small>智能客服工作台</small></span></div>
       <div class="auth-brand-inner">
         <p class="auth-eyebrow">为每一份信任，用心回应</p>
-        <h2>好服务，<br />从一次<span>好对话</span>开始。</h2>
-        <p class="auth-brand-desc">连接知识、AI 与团队协作，<br />让复杂的售后问题，拥有清晰的解决路径。</p>
+        <h2>好服务，<br>从一次<span>好对话</span>开始。</h2>
+        <p class="auth-brand-desc">连接知识、AI 与团队协作，<br>让复杂的售后问题，拥有清晰的解决路径。</p>
         <div class="auth-art" aria-hidden="true">
           <div class="auth-orbit" /><div class="auth-orbit second" />
           <div class="art-ticket ticket-question"><span class="ticket-avatar"><AppIcon name="chat" /></span><div><b>每一个问题，都值得认真对待</b><span class="ticket-line" /><span class="ticket-line short" /></div></div>

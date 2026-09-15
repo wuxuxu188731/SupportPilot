@@ -31,8 +31,8 @@ const modules = [
       <section class="welcome-card">
         <div class="welcome-copy">
           <span class="hero-label"><span /> 专注沟通，从容服务</span>
-          <h2>你好，{{ authStore.currentUser?.username }}<br />让每一次服务，<em>更进一步。</em></h2>
-          <p>把繁杂留给工具，把用心留给客户。<br />你的 AI 客服伙伴，已在这里等你。</p>
+          <h2>你好，{{ authStore.currentUser?.username }}<br>让每一次服务，<em>更进一步。</em></h2>
+          <p>把繁杂留给工具，把用心留给客户。<br>你的 AI 客服伙伴，已在这里等你。</p>
           <n-button type="primary" size="large" data-test="go-chat" @click="router.push({ name: 'chat' })">进入客服对话 <AppIcon name="arrow" :size="18" /></n-button>
         </div>
         <div class="hero-art" aria-hidden="true">
