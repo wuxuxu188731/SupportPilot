@@ -22,6 +22,7 @@ export const themeOverrides: GlobalThemeOverrides = {
   Card: { borderRadius: '14px', titleFontWeight: '600' },
   Input: { borderRadius: '8px', colorFocus: '#ffffff' },
   Tag: { borderRadius: '5px' },
+  Empty: { textColor: '#727d72', extraTextColor: '#727d72', iconColor: '#b2c2a9' },
   Menu: {
     itemTextColor: '#b9cbbf',
     itemTextColorHover: '#ffffff',

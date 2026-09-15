@@ -53,46 +53,46 @@ button, input, textarea { font: inherit; }
 a { text-underline-offset: 3px; }
 
 /* 共用业务页面布局，让列表、详情与弹层遵循相同的空间节奏。 */
-.app-content :is(.knowledge-page, .approvals-page, .members-page, .knowledge-detail-page, .approval-detail-page) { max-width: 1280px; }
-.app-content .page-head { padding: 4px 0 20px; border-bottom: 1px solid var(--sp-color-border); margin-bottom: 6px; }
-.app-content .page-title { font-size: 26px; letter-spacing: -.7px; font-weight: 600; }
-.app-content :is(.filters, .filter-bar) { padding: 16px; background: #fff; border: 1px solid var(--sp-color-border); border-radius: 12px; }
-.app-content :is(.list-state, .page-empty) { min-height: 300px; padding: 32px; background: #ffffffa6; border: 1px dashed #d5ddce; border-radius: 12px; }
-.app-content :is(.doc-card, .member-row) { padding: 21px 23px; transition: border-color .18s, box-shadow .18s; }
-.app-content :is(.doc-card, .member-row):hover { border-color: #b7c7ae; box-shadow: 0 4px 18px #24473106; }
-.app-content .doc-title-row::before { content: ''; flex-shrink: 0; width: 7px; height: 20px; border-radius: 3px; background: #a8bd96; }
-.app-content .member-name-line::before { content: ''; width: 10px; height: 10px; border-radius: 50%; background: #94af85; }
-.app-content .filter-tabs { padding: 6px 20px 0; }
-.app-content .n-alert { border-radius: 10px; }
+.app-frame .app-content :is(.knowledge-page, .approvals-page, .members-page, .detail-page, .approval-detail) { max-width: 1280px; }
+.app-frame .app-content .page-head { padding: 4px 0 20px; border-bottom: 1px solid var(--sp-color-border); margin-bottom: 6px; }
+.app-frame .app-content .page-title { font-size: 26px; letter-spacing: -.7px; font-weight: 600; }
+.app-frame .app-content :is(.filters, .filter-bar) { padding: 16px; background: #fff; border: 1px solid var(--sp-color-border); border-radius: 12px; }
+.app-frame .app-content :is(.list-state, .page-empty) { min-height: 300px; padding: 32px; background: #ffffffa6; border: 1px dashed #d5ddce; border-radius: 12px; }
+.app-frame .app-content :is(.doc-card, .member-row, .approval-item) { padding: 21px 23px; transition: border-color .18s, box-shadow .18s; }
+.app-frame .app-content :is(.doc-card, .member-row, .approval-item):hover { border-color: #b7c7ae; box-shadow: 0 4px 18px #24473106; }
+.app-frame .app-content .doc-title-row::before { content: ''; flex-shrink: 0; width: 7px; height: 20px; border-radius: 3px; background: #a8bd96; }
+.app-frame .app-content .member-name-line::before { content: ''; width: 10px; height: 10px; border-radius: 50%; background: #94af85; }
+.app-frame .app-content .filter-tabs { padding: 6px 20px 0; }
+.app-frame .app-content .n-alert { border-radius: 10px; }
 .n-modal.n-card { width: calc(100% - 40px); }
 
 /* 对话区以留白和柔和背景区分会话列表、消息与输入区。 */
-.app-content .chat-page { gap: 16px; height: calc(100vh - 132px); }
-.app-content .chat-side { width: 266px; padding: 22px 12px; }
-.app-content .chat-main { box-shadow: 0 4px 24px #203e3405; }
-.app-content .chat-header { min-height: 68px; padding: 14px 26px; }
-.app-content .message-scroller { padding: 28px; background: #fafbf7; }
-.app-content .chat-composer { padding: 18px 26px 20px; }
-.app-content .message-composer { padding: 12px; border: 1px solid var(--sp-color-border); border-radius: 12px; background: #fafbf8; }
-.app-content .message-composer:focus-within { border-color: #87a580; box-shadow: 0 0 0 3px #32664f09; }
-.app-content .composer-hint { font-size: 11px; }
-.app-content .list-item { padding: 13px 12px; margin-bottom: 5px; }
-.app-content .list-item.active { border-color: #d4e0ca; }
-.app-content .bubble { padding: 15px 20px; }
-.app-content .user-bubble { border-radius: 14px 14px 4px 14px; }
-.app-content .agent-bubble { border-radius: 4px 14px 14px 14px; box-shadow: none; }
-.app-content .bubble-author { color: var(--sp-color-text-2); font-weight: 600; }
-.app-content .bubble-meta { margin-bottom: 5px; }
+.app-frame .app-content .chat-page { gap: 16px; height: calc(100vh - 72px - var(--sp-content-padding-y) - var(--sp-content-padding-y)); }
+.app-frame .app-content .chat-side { width: 266px; padding: 22px 12px; }
+.app-frame .app-content .chat-main { box-shadow: 0 4px 24px #203e3405; }
+.app-frame .app-content .chat-header { min-height: 68px; padding: 14px 26px; }
+.app-frame .app-content .message-scroller { padding: 28px; background: #fafbf7; }
+.app-frame .app-content .chat-composer { padding: 18px 26px 20px; }
+.app-frame .app-content .message-composer { padding: 12px; border: 1px solid var(--sp-color-border); border-radius: 12px; background: #fafbf8; }
+.app-frame .app-content .message-composer:focus-within { border-color: #87a580; box-shadow: 0 0 0 3px #32664f09; }
+.app-frame .app-content .composer-hint { font-size: 11px; }
+.app-frame .app-content .list-item { padding: 13px 12px; margin-bottom: 5px; }
+.app-frame .app-content .list-item.active { border-color: #d4e0ca; }
+.app-frame .app-content .bubble { padding: 15px 20px; }
+.app-frame .app-content .user-bubble { border-radius: 14px 14px 4px 14px; }
+.app-frame .app-content .agent-bubble { border-radius: 4px 14px 14px 14px; box-shadow: none; }
+.app-frame .app-content .bubble-author { color: var(--sp-color-text-2); font-weight: 600; }
+.app-frame .app-content .bubble-meta { margin-bottom: 5px; }
 
 /* 企业选择页使用相同品牌与卡片语言。 */
-.org-page .org-topbar { justify-content: space-between; align-items: center; min-height: 72px; padding-inline: 40px; }
-.org-page .org-main { max-width: 850px; padding-top: 65px; }
-.org-page .org-heading { margin-bottom: 34px; }
-.org-page .org-title { font-size: 30px; margin-bottom: 12px; }
-.org-page .org-card { border: 1px solid var(--sp-color-border); box-shadow: none; }
-.org-page .org-card .n-card__content { padding: 27px; }
-.org-page .org-card-name { overflow-wrap: anywhere; }
-.org-page .org-create-entry { height: 46px; border: 1px dashed #b7c9ab; background: #edf2e7; }
+body .org-page .org-topbar { justify-content: space-between; align-items: center; min-height: 72px; padding-inline: 40px; }
+body .org-page .org-main { max-width: 850px; padding-top: 65px; }
+body .org-page .org-heading { margin-bottom: 34px; }
+body .org-page .org-title { font-size: 30px; margin-bottom: 12px; }
+body .org-page .org-card { border: 1px solid var(--sp-color-border); box-shadow: none; }
+body .org-page .org-card .n-card__content { padding: 27px; }
+body .org-page .org-card-name { overflow-wrap: anywhere; }
+body .org-page .org-create-entry { height: 46px; border: 1px dashed #b7c9ab; background: #edf2e7; }
 @keyframes sp-enter { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
-@media (prefers-reduced-motion: no-preference) { .app-content > * { animation: sp-enter .35s ease both; } }
+@media (prefers-reduced-motion: no-preference) { .app-frame .app-content > * { animation: sp-enter .35s ease both; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }

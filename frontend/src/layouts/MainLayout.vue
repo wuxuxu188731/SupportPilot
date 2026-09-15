@@ -139,7 +139,7 @@ function handleLogout(): void {
 </template>
 
 <style scoped>
-.app-frame { display: flex; min-height: 100vh; }
+.app-frame { --sp-content-padding-y: 30px; display: flex; min-height: 100vh; }
 .app-sider { position: sticky; top: 0; display: flex; flex-direction: column; width: 232px; height: 100vh; flex-shrink: 0; padding: 30px 16px 20px; color: #b9cbbf; background: #203e34; }
 .topbar-brand { display: flex; align-items: center; gap: 11px; margin: 0 11px 45px; color: #f4f7ed; text-decoration: none; }
 .brand-mark { display: grid; place-items: center; width: 37px; height: 37px; flex-shrink: 0; border-radius: 10px; color: #dce9b0; background: #b9d6a018; border: 1px solid #aec99740; }
@@ -156,7 +156,7 @@ function handleLogout(): void {
 .topbar-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; }.topbar-link-button { font-size: 12px; }.topbar-divider { height: 24px; width: 1px; margin: 0 10px; background: var(--sp-color-border); }
 .topbar-user { display: flex; align-items: center; gap: 9px; }.user-avatar { display: grid; place-items: center; width: 31px; height: 31px; border: 1px solid #dde5ce; border-radius: 50%; font-size: 12px; font-weight: 600; background: #edf1df; color: #5f7244; }.topbar-username { max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }.logout-button { color: var(--sp-color-text-3); }
 .app-content { flex: 1; min-width: 0; padding: 30px 34px; }
-@media (min-width: 1600px) { .app-sider { width: 252px; }.app-content { padding: 38px 48px; }.app-topbar { padding-inline: 48px; } }
-@media (max-width: 1100px) { .app-sider { width: 210px; padding-inline: 12px; }.brand-name { font-size: 18px; }.topbar-breadcrumb > span:first-child, .breadcrumb-slash { display: none; }.app-topbar { padding-inline: 22px; }.app-content { padding: 26px 22px; } }
+@media (min-width: 1600px) { .app-frame { --sp-content-padding-y: 38px; } .app-sider { width: 252px; }.app-content { padding: 38px 48px; }.app-topbar { padding-inline: 48px; } }
+@media (max-width: 1100px) { .app-frame { --sp-content-padding-y: 26px; } .app-sider { width: 210px; padding-inline: 12px; }.brand-name { font-size: 18px; }.topbar-breadcrumb > span:first-child, .breadcrumb-slash { display: none; }.app-topbar { padding-inline: 22px; }.app-content { padding: 26px 22px; } }
 @media (max-width: 959px) { .app-sider { display: none; }.app-topbar { flex-wrap: wrap; }.topbar-actions { flex-wrap: wrap; }.app-content { padding: 20px; } }
 </style>
