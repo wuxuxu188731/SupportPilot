@@ -24,6 +24,7 @@ from app.knowledge.chunking import KnowledgeChunker
 from app.knowledge.dashscope_embeddings import DashScopeEmbeddingClient
 from app.knowledge.document_loader import DocumentLoader
 from app.knowledge.ingestion import KnowledgeIngestionService
+from app.knowledge.ingestion_worker import KnowledgeIngestionWorker
 from app.knowledge.llamaparse_cache import LlamaParseCache
 from app.knowledge.llamaparse_extractor import LlamaParseExtractor
 from app.knowledge.qdrant_store import QdrantVectorStore
@@ -51,6 +52,9 @@ class KnowledgeServices:
     retriever: HybridRetriever
     adaptive: AdaptiveKnowledgeSearchService
     vector_store: QdrantVectorStore
+    # 入库 worker：上传接口只入队，由它把解析/嵌入/写库跑完。装配完成后仍需
+    # 由应用生命周期调用 ``bind_loop()`` 与 ``recover()`` 才真正开始消费。
+    ingestion_worker: "KnowledgeIngestionWorker"
 
 
 def create_knowledge_services(
@@ -133,6 +137,13 @@ def create_knowledge_services(
         embedding_dimensions=settings.embedding_dimensions,
     )
 
+    # 入库异步化：worker 先建好，再作为 dispatcher 注入 ingestion —— 上传接口
+    # 入队后立刻返回 queued，解析与向量写入由 worker 在后台线程执行。
+    # 装配期不启动消费者（那时还没有事件循环），由 main.py 的 lifespan 调用
+    # bind_loop() + recover()。
+    ingestion_worker = KnowledgeIngestionWorker(service=ingestion, store=store)
+    ingestion.set_dispatcher(ingestion_worker)
+
     retriever = HybridRetriever(
         store=store,
         embedding=embedding,
@@ -176,4 +187,5 @@ def create_knowledge_services(
         retriever=retriever,
         adaptive=adaptive,
         vector_store=vector_store,
+        ingestion_worker=ingestion_worker,
     )

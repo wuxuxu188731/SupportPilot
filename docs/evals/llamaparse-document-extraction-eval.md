@@ -314,11 +314,25 @@ chunker 与下游（SQLite / Qdrant / 证据提示词）**一行不用改**。
   文件（文字层完整）。**没有覆盖扫描件 OCR、图片、多栏排版、复杂嵌套表格、
   手写体**——这些恰恰是 LlamaParse 相对本地解析最有价值的场景，
   也是它可能翻车的地方，需要单独补测。
+  > **2026-09-16 更新**：该项补测经决策**取消**，不再排期。
+  > 因此扫描件/复杂版式的表现**仍无结论**，已知风险保留。
 - **未跑端到端检索**：本次校验到"chunk 层面事实可检索"为止，
   没有真跑 DashScope embedding + Qdrant + 重排（需要外部服务）。
+  > **2026-09-16 更新：已收口。** 用 `scripts/run_document_format_regression.py`
+  > 把本文档的 `.md` / `.docx` / `.pdf` 三种形态分别入库到三个独立企业，
+  > 跑 3 个 `general_service` 金标用例（DashScope embedding + Qdrant 混合召回 +
+  > qwen3-rerank + SQLite 二次校验，Baseline 检索器）：**三格式的证据组命中数完全一致
+  > （各 5/6），且返回的 citation 列表逐条相同**，包括本文 §2.2 列出的 3 条金标
+  > `heading_path` 中的 2 条。
+  > 未命中的 `售后服务总则/5. 特殊说明/5.3 文档间冲突的处理` 在**历史 baseline 中
+  > 同样从未进 top-5**，与入库格式无关，属既有检索排序的召回缺口（详见
+  > `docs/knowledge-loader-remaining-tasks.md` §3 的 D5）。
+  > 结论：**`heading_path` 完全还原**这一前提在端到端链路上得到验证。
 - **只测了 `agentic` 一档**：`fast` / `cost_effective` / `agentic_plus` 的
   质量与价格权衡未评估。对这类纯文字政策文档，更便宜的档位很可能同样够用，
   建议在接入前补一组档位对比，直接决定单位成本。
+  > **2026-09-16 更新**：该项补测经决策**取消**。`LLAMA_CLOUD_TIER` 默认值仍为
+  > `agentic`，**没有**档位对比数据支撑。
 - **"相似度 1.0"是归一化后的结论**：归一化会抹掉空白与标记差异，
   引用/展示场景若要求与原文逐字节一致，需要看第 4 节的残留差异清单。
 
@@ -350,3 +364,23 @@ HTML 表格引入的 12%~15% 开销已经抹平。
 > 只是观察对象不同。
 
 仍未覆盖的部分见第 6 节（扫描件、复杂版式、档位对比、端到端检索回归）。
+
+## 8. 接入后的补充验证（2026-09-16）
+
+本文 §5 的接入建议已全部落地（见 `docs/knowledge-loader-remaining-tasks.md` §1.2），
+并在真实链路（DashScope + Qdrant）上补跑了 §5.4 建议的端到端检索回归。三条补充事实：
+
+1. **分块指标与原生 Markdown 齐平，且在真实入库路径上复现**：
+   同一份内容，`.md` 入库得 15 个 chunk / 最大 359 token，`.docx` 得
+   15 / 359，`.pdf` 得 15 / 360 —— 与 §7 的离线结论一致，说明归一化层
+   在真实链路上同样生效。
+2. **入库已异步化**：上传接口不再在请求里解析（同步解析实测约 27 秒，会拖到
+   前端上传超时）。上传只登记入队并返回 `queued`，解析/分块/Embedding/Qdrant
+   写入由后台 worker 推进，客户端轮询 `GET /knowledge/ingestion-jobs/{job_id}/`
+   取终态。因此「解析服务不可用」不再表现为 HTTP 5xx，而是 job 上的
+   `error_code="PARSING_UNAVAILABLE"`。
+3. **重复上传不再二次计费**：上传期按上传原始字节指纹去重，同一份文件重复上传
+   在**解析之前**就被拦下；解析产物另有按「原始字节 + 档位 + 版本」的缓存兜底。
+
+回归脚本：`scripts/run_document_format_regression.py`，
+产物：`.artifacts/document-format-regression/report.{json,md}`。

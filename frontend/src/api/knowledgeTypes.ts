@@ -25,7 +25,7 @@ export type IngestionStatusValue = 'queued' | 'running' | 'succeeded' | 'failed'
 
 // —— 响应模型 ——
 
-/** 上传结果回执（后端 IngestionReceiptResponse）：同步入库完成后的回执。 */
+/** 上传结果回执（后端 IngestionReceiptResponse）。 */
 export interface IngestionReceipt {
   /** 文档唯一标识（新文档上传成功后用于跳转详情） */
   document_id: string
@@ -33,7 +33,11 @@ export interface IngestionReceipt {
   version_id: string
   /** 本次入库任务唯一标识（用于查询任务状态/轮询） */
   job_id: string
-  /** 入库任务状态：同步管线成功时通常为 succeeded，也可能 queued/running/failed */
+  /**
+   * 入库任务状态。后端已改为异步入库：上传接口登记入队后立刻返回 queued，
+   * 解析与向量写入由后台 worker 推进，前端按 queued/running 轮询到终态。
+   * 只有「内容重复、复用既有成功版本」时才可能直接看到 succeeded。
+   */
   status: IngestionStatusValue
   /** 是否与当前有效版本内容相同：服务端复用既有版本，未创建重复版本 */
   deduplicated: boolean
@@ -45,8 +49,11 @@ export interface DocumentVersionInfo {
   version_id: string
   /** 版本序号：从 1 递增；新版本成功后自动成为 active 版本 */
   version_no: number
-  /** 规范化文本的 SHA-256 内容哈希（"sha256:<hex>"）：用于识别重复内容 */
-  content_hash: string
+  /**
+   * 规范化文本的 SHA-256 内容哈希（"sha256:<hex>"）：用于识别重复内容。
+   * 异步入库下版本行会先于解析结果落库，因此尚未解析完成时为 null。
+   */
+  content_hash: string | null
   /** 入库时使用的文档解析器版本标识 */
   loader_version: string
   /** 入库时使用的分块器版本标识 */

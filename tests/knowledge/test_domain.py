@@ -70,6 +70,7 @@ class TestDataclasses:
             "document_id",
             "version_no",
             "content_hash",
+            "source_hash",
             "raw_text",
             "loader_version",
             "chunker_version",
@@ -277,6 +278,19 @@ class TestKnowledgeStoreProtocol:
                 dict(
                     organization_id="org-a",
                     document_id="doc-a",
+                    source_hash="sha256:source",
+                    raw_bytes=b"raw",
+                    loader_version="loader-v1",
+                    chunker_version="chunker-v1",
+                    embedding_model="text-embedding-v4",
+                    embedding_dimensions=1024,
+                ),
+            ),
+            (
+                kb.KnowledgeStore.create_parsed_version,
+                dict(
+                    organization_id="org-a",
+                    document_id="doc-a",
                     content_hash="hash",
                     raw_text="body",
                     loader_version="loader-v1",
@@ -327,7 +341,7 @@ class TestKnowledgeStoreProtocol:
                 return _document()
 
             def create_version(self, *, organization_id, document_id,
-                               content_hash, raw_text, loader_version,
+                               source_hash, raw_bytes, loader_version,
                                chunker_version, embedding_model,
                                embedding_dimensions):
                 return kb.DocumentVersion(
@@ -335,7 +349,27 @@ class TestKnowledgeStoreProtocol:
                     organization_id=organization_id,
                     document_id=document_id,
                     version_no=1,
+                    content_hash=None,
+                    source_hash=source_hash,
+                    raw_text=None,
+                    loader_version=loader_version,
+                    chunker_version=chunker_version,
+                    embedding_model=embedding_model,
+                    embedding_dimensions=embedding_dimensions,
+                    created_at="2026-01-01T00:00:00Z",
+                )
+
+            def create_parsed_version(self, *, organization_id, document_id,
+                                      content_hash, raw_text, loader_version,
+                                      chunker_version, embedding_model,
+                                      embedding_dimensions):
+                return kb.DocumentVersion(
+                    version_id="v1",
+                    organization_id=organization_id,
+                    document_id=document_id,
+                    version_no=1,
                     content_hash=content_hash,
+                    source_hash=None,
                     raw_text=raw_text,
                     loader_version=loader_version,
                     chunker_version=chunker_version,
@@ -343,6 +377,37 @@ class TestKnowledgeStoreProtocol:
                     embedding_dimensions=embedding_dimensions,
                     created_at="2026-01-01T00:00:00Z",
                 )
+
+            def get_version_by_source_hash(self, *, organization_id, document_id,
+                                           source_hash):
+                return None
+
+            def record_version_content(self, *, organization_id, document_id,
+                                       version_id, content_hash, raw_text):
+                return kb.DocumentVersion(
+                    version_id=version_id,
+                    organization_id=organization_id,
+                    document_id=document_id,
+                    version_no=1,
+                    content_hash=content_hash,
+                    source_hash=None,
+                    raw_text=raw_text,
+                    loader_version="loader-v1",
+                    chunker_version="chunker-v1",
+                    embedding_model="text-embedding-v4",
+                    embedding_dimensions=1024,
+                    created_at="2026-01-01T00:00:00Z",
+                )
+
+            def read_version_raw_bytes(self, *, organization_id, document_id,
+                                       version_id):
+                return None
+
+            def claim_job(self, *, organization_id, job_id):
+                return None
+
+            def recover_stale_jobs(self):
+                return []
 
             def create_job(self, *, organization_id, document_id, version_id):
                 return kb.IngestionJob(

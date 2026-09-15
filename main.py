@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 
 from app.agent.prompts import SUPPORT_SYSTEM_PROMPT
@@ -39,8 +41,24 @@ from app.workflows.checkpointer import create_sqlite_checkpointer
 from app.workflows.runtime import LangGraphActionWorkflowRunner
 
 
+# 知识库服务在模块导入期完成装配（保持可被测试直接引用），但入库 worker 的
+# 消费者任务必须在事件循环里创建，因此启动/关闭动作放进 lifespan：
+#   * 启动：bind_loop() 建消费者；recover() 把上一次进程遗留的 queued/running
+#     任务重新排队——任务记录与上传原始字节都已落库，重启即可续跑，
+#     这是「进程内 worker 会丢任务」这一缺点的补丁；
+#   * 关闭：等当前任务收尾（有上限），彻底避免留下无法推进的僵尸任务。
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+  worker = knowledge_services.ingestion_worker
+  worker.bind_loop()
+  worker.recover()
+  try:
+    yield
+  finally:
+    await worker.stop()
 
-app = FastAPI()
+
+app = FastAPI(lifespan=_lifespan)
 # 装配 CORS：允许来源由 CORS_ALLOW_ORIGINS 配置（默认放行本机 Vite 开发
 # 服务器 5173）。前端开发时走 /api 代理属于同源请求，此配置用于直连后端
 # 或前后端分离部署的场景。

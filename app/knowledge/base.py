@@ -49,8 +49,15 @@ class DocumentVersion:
     organization_id: str
     document_id: str
     version_no: int
-    content_hash: str
-    raw_text: str
+    # 解析正文的 sha256（形如 ``sha256:<hex>``）。入库异步化后版本行会先在
+    # 上传接口里「预留」，此时正文还没解析出来，因此该字段在解析完成前为 None。
+    content_hash: str | None
+    # 上传文件的原始字节 sha256，上传时即可算出；承担上传期去重与 worker 取字节。
+    # 历史版本行（0013 之前写入的）没有这个指纹，因此可能是 None。
+    source_hash: str | None
+    # 解析后的正文。版本行刚预留、尚未解析时为 None——它与 content_hash 同生同灭，
+    # 因此「是否已解析」只需看 content_hash 一个字段。
+    raw_text: str | None
     loader_version: str
     chunker_version: str
     embedding_model: str
@@ -199,6 +206,25 @@ class IngestionFailedError(KnowledgeError):
 
     def __init__(self, *, reason: str) -> None:
         super().__init__("INGESTION_FAILED", f"ingestion failed: {reason}")
+
+
+class IngestionSourceMissingError(KnowledgeError):
+    """Raised when a queued version has no usable upload payload left.
+
+    入库异步化后，解析所需的原始字节在上传时暂存在版本行上，解析完成即清空。
+    若 worker 执行某个任务时既没有已解析正文、也读不到暂存字节，说明这份上传
+    已经无法完成——它不是「文档非法」（用户没传错东西），也不是「解析服务不可用」
+    （服务本身是好的），因此单独给一个稳定编码，避免被误报成前两者。
+    """
+
+    code = "INGESTION_SOURCE_MISSING"
+
+    def __init__(self, *, reason: str) -> None:
+        super().__init__(
+            "INGESTION_SOURCE_MISSING",
+            "the uploaded document payload is no longer available",
+        )
+        self.reason = reason
 
 
 class InsufficientEvidenceError(KnowledgeError):
@@ -370,6 +396,30 @@ class KnowledgeStore(Protocol):
         *,
         organization_id: str,
         document_id: str,
+        source_hash: str,
+        raw_bytes: bytes,
+        loader_version: str,
+        chunker_version: str,
+        embedding_model: str,
+        embedding_dimensions: int,
+    ) -> DocumentVersion:
+        """预留一个版本行：只登记原始字节指纹与待解析内容，正文暂为空。
+
+        ``content_hash``/``raw_text`` 由 :meth:`record_version_content` 在解析完成后
+        回填。同一 ``(org, document, source_hash)`` 重复预留会抛
+        :class:`DuplicateDocumentVersionError`，让「同一份文件重复上传」在解析之前
+        就被拦下。
+
+        同步路径（``KnowledgeIngestionService.ingest_new_document``）已解析完正文，
+        改用 :meth:`create_parsed_version`。
+        """
+        raise NotImplementedError
+
+    def create_parsed_version(
+        self,
+        *,
+        organization_id: str,
+        document_id: str,
         content_hash: str,
         raw_text: str,
         loader_version: str,
@@ -377,6 +427,73 @@ class KnowledgeStore(Protocol):
         embedding_model: str,
         embedding_dimensions: int,
     ) -> DocumentVersion:
+        """直接写入一个「已解析」的版本行（同步入库路径使用）。
+
+        与 :meth:`create_version` 的区别只在内容是否已经拿到：本方法一次写全
+        ``content_hash``/``raw_text``，不经过预留与回填两步。
+        """
+        raise NotImplementedError
+
+    def get_version_by_source_hash(
+        self,
+        *,
+        organization_id: str,
+        document_id: str,
+        source_hash: str,
+    ) -> DocumentVersion | None:
+        """按原始字节指纹查版本；不存在时返回 None（不抛异常）。"""
+        raise NotImplementedError
+
+    def record_version_content(
+        self,
+        *,
+        organization_id: str,
+        document_id: str,
+        version_id: str,
+        content_hash: str,
+        raw_text: str,
+    ) -> DocumentVersion:
+        """解析完成后回填正文与内容哈希，并清空暂存的原始字节。
+
+        清空 ``raw_bytes`` 与回填必须同事务完成：原始字节的唯一用途就是这次解析，
+        留着只会让数据库持续膨胀。
+        """
+        raise NotImplementedError
+
+    def read_version_raw_bytes(
+        self,
+        *,
+        organization_id: str,
+        document_id: str,
+        version_id: str,
+    ) -> bytes | None:
+        """读取暂存的上传原始字节；已被清空（或从未暂存）时返回 None。"""
+        raise NotImplementedError
+
+    def claim_job(
+        self,
+        *,
+        organization_id: str,
+        job_id: str,
+    ) -> IngestionJob | None:
+        """把 ``queued`` 任务原子置为 ``running``；已被抢占或已是终态时返回 None。
+
+        返回 None 让 worker 能安全地重复投递同一个任务（例如重启恢复后重复入队），
+        而不必自己维护「这个任务是不是我抢到的」这类状态。
+        """
+        raise NotImplementedError
+
+    def recover_stale_jobs(self) -> list[tuple[str, str]]:
+        """启动恢复：把上次进程遗留的非终态任务处理掉。
+
+        * ``running`` 任务：进程在解析/嵌入途中退出，任务永远不会有结果。若其版本
+          仍暂存着原始字节则重置回 ``queued`` 以便重新执行（返回给调用方重新排队）；
+          字节已丢失则标记 ``failed``，给出稳定的 ``INGESTION_INTERRUPTED`` 码。
+        * ``queued`` 任务：直接返回给调用方重新入队。
+
+        返回值是 ``(organization_id, job_id)`` 列表，正好是可以投递回 worker 的任务。
+        本方法是跨租户的运维操作（没有租户上下文），因此不接收 ``organization_id``。
+        """
         raise NotImplementedError
 
     def get_version_by_id(

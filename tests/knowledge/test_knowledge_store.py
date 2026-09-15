@@ -106,7 +106,7 @@ def create_version(
     chunk_id=None,
     raw_text="body",
 ):
-    version = store.create_version(
+    version = store.create_parsed_version(
         organization_id=context.organization_id,
         document_id=document.document_id,
         content_hash=content_hash,

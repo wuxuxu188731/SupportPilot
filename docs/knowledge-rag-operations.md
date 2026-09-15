@@ -89,6 +89,32 @@ curl -X POST "$BASE/knowledge/documents/" \
 
 响应：`201`，返回 `IngestionReceiptResponse`（文档 id、最新版本 id、Job id、状态）。
 
+**状态语义（入库已异步化）**：上传接口只做「校验 + 登记 + 入队」，**不再等待解析**，
+因此正常返回体的 `status` 是 `queued`。DOCX/PDF 的外部解析实测约 27 秒，放在请求里
+会拖到前端上传超时（默认 180 秒），所以解析、分块、Embedding、Qdrant 写入与激活
+全部由进程内 worker 在后台推进。客户端应拿 `job_id` 轮询到终态（见 5.7）。
+
+`status` 的取值含义：
+
+| status | 含义 | 客户端动作 |
+|---|---|---|
+| `queued` | 已登记入队，等待 worker 执行（**正常路径**） | 轮询 5.7，间隔建议 5 秒 |
+| `succeeded` | 内容与既有成功版本相同，服务端直接复用了该版本（此时 `deduplicated=true`） | 无需轮询 |
+| `failed` | 罕见：复用了某个已失败任务（`deduplicated=true`） | 查询 5.7 看 `error_code` |
+
+**依然同步失败的输入**（不会产生后台任务，错误直接返回）：
+
+- 标题为空或超过 200 字符 → `422 INVALID_DOCUMENT`；
+- 文件超过 `MAX_DOCUMENT_BYTES`（2 MiB）→ `422 INVALID_DOCUMENT`；
+- 扩展名不受支持（含 `.doc` / `.pptx`）→ `422 INVALID_DOCUMENT`；
+- Markdown/TXT 不是合法 UTF-8 或内容为空 → `422 INVALID_DOCUMENT`。
+  **注意**：`.docx` / `.pdf` 是二进制格式，不做 UTF-8 校验；真实 docx（zip 包）
+  与 pdf 的字节都不是合法 UTF-8，套用文本校验会把它们全部误判为「编码非法」。
+
+**解析类失败改为落在任务上**：解析服务不可用不再返回 5xx，而是在 `job` 上以
+`PARSING_UNAVAILABLE` 记录（见第 7 节）。这是有意的：上传本身是成功的，
+失败的是后续解析能力，客户端通过任务状态拿到如实结论。
+
 ### 5.2 上传新版本
 
 ```bash
@@ -98,7 +124,13 @@ curl -X POST "$BASE/knowledge/documents/$DOCID/versions/" \
   -F "file=@./returns_v2.md"
 ```
 
-响应：`201`。新版本在 Qdrant upsert 成功前不可见；失败保留旧激活版本。
+响应：`201`，与 5.1 同语义（`queued`）。新版本在 Qdrant upsert 成功前不可见；
+失败保留旧激活版本。
+
+**重复上传不重复计费**：服务端按「上传原始字节 + 解析档位 + 解析器版本」做缓存，
+并在上传期比对原始字节指纹。同一份文件重复上传会直接复用已预留的版本，
+**不会二次调用解析服务**（LlamaParse 按页计费），也不会创建重复版本
+（此时 `deduplicated=true`，`status` 为既有任务的状态）。
 
 ### 5.3 列出文档
 
@@ -142,6 +174,11 @@ curl -s "$BASE/knowledge/ingestion-jobs/$JOBID/" -H "Authorization: Bearer $TOKE
 
 返回 Job 状态与错误信息。跨租户/不存在的 `JOBID` 统一 404（`INGESTION_JOB_NOT_FOUND`）。
 
+异步入库下这是**唯一**能拿到入库终态与失败原因的接口，客户端应在
+`status` 为 `queued`/`running` 时每 5 秒轮询一次，终态即停止。
+前端已实现（`frontend/src/stores/knowledge.ts` 的 `startJobPolling` /
+`pollJobOnce`，页面隐藏时暂停，企业切换/退出登录时停止）。
+
 ## 6. 停用/启用语义小结
 
 - 停用：`document.status = DISABLED`，对应版本从可检索集合移除，Qdrant 查询层不再命中。
@@ -150,15 +187,40 @@ curl -s "$BASE/knowledge/ingestion-jobs/$JOBID/" -H "Authorization: Bearer $TOKE
 
 ## 7. 失败 Job 排查
 
-Ingestion 是同步编排；失败会有对应 Job 记录。排查步骤：
+入库是**异步**编排：上传接口登记入队后立刻返回，解析/分块/嵌入/写向量/激活
+由进程内 worker 执行。因此**失败不再表现为 HTTP 错误，而是落在 Job 上**。排查步骤：
 
 1. 用 `5.7` 查询 `JOBID` 查看 `status`、`error_code`、`error_message`。
 2. 常见错误与处理：
-   - `EmbeddingUnavailableError` / `VectorStoreUnavailableError`（HTTP 503）：DashScope 未配 Key、Qdrant 未启动、Qdrant 不可达。先看 `第 2 节` 环境变量与 `第 4 节` 健康检查。
-   - `INVALID_DOCUMENT`：文件超 2 MiB、非 UTF-8、非 `.md/.markdown/.txt` 后缀、表单字段不是恰好 `title` + `file`。
+   - `EMBEDDING_UNAVAILABLE`：DashScope 未配 Key、额度不足或服务不可达。先看 `第 2 节` 环境变量。
+   - `VECTOR_STORE_UNAVAILABLE`：Qdrant 未启动或不可达。先看 `第 4 节` 健康检查。
+   - `PARSING_UNAVAILABLE`：LlamaParse 不可达/超时/限流/额度耗尽，或未配置
+     `LLAMA_CLOUD_API_KEY`。**这不是「文档非法」**，文档本身没有问题。
+   - `INGESTION_SOURCE_MISSING`：该版本的暂存上传字节已不可用（例如被外部清理），
+     需要重新上传。
+   - `INGESTION_INTERRUPTED`：进程在解析途中退出且原始字节已丢失，任务无法续跑。
+     重新上传即可；若原始字节仍在，重启时会自动重新排队而不是标此错误。
+   - `INVALID_DOCUMENT`：见 5.1 的「依然同步失败的输入」——这类错误通常在上传时
+     就以 422 返回，只有少数场景（如同一文档并发写入竞争）才会落到任务上。
    - `DUPLICATE_DOCUMENT_VERSION`：同内容重复上传（content hash 相同）。
    - `DOCUMENT_DISABLED`：对已停用文档执行停用。启用后再操作即可。
-3. 上线原则：基础设施失败**不**被当作“无证据/无命中”，服务返回 5xx 以便暴露；只有标准库查询侧确实是空相关时才算“无命中”。
+3. 上线原则：基础设施失败**不**被当作“无证据/无命中”，服务返回 5xx 以便暴露；
+   只有标准库查询侧确实是空相关时才算“无命中”。
+
+## 7.1 进程重启后的任务恢复
+
+worker 是**进程内**的，因此进程退出会打断执行中的任务。恢复策略如下：
+
+- 上传的原始字节随版本行一起落库，任务记录也持久化，**任务不会凭空消失**；
+- 应用启动时（`main.py` 的 lifespan）会调用 `worker.recover()`：
+  - 遗留的 `queued` 任务 → 重新入队；
+  - 遗留的 `running` 任务，若版本仍暂存着原始字节 → 重置回 `queued` 并重新执行
+    （外部解析另有缓存，续跑不会二次计费）；
+  - 遗留的 `running` 任务，若原始字节已丢失、确实无法续跑 → 标记 `failed`，
+    错误码 `INGESTION_INTERRUPTED`，**不会**留下永远 `running` 的僵尸任务。
+
+因此「重启后任务卡在 running」不属于正常现象：看到该状态说明应用没有走完
+lifespan 的恢复流程（例如被强杀后又用旧进程继续跑）。
 
 ## 8. Collection 模型/维度不可原地混用
 

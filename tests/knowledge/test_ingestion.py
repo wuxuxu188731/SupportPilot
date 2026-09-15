@@ -47,13 +47,22 @@ def _stable_chunk_id(organization_id: str, version_id: str, ordinal: int) -> str
 class RecordingKnowledgeStore:
     """Minimal store fake that records each top-level call name in order and
     keeps just enough state for the service and the upsert fake to reason about
-    the document's active state."""
+    the document's active state.
+
+    同时承担两套版本写入路径：``create_parsed_version``（同步路径，一次写全正文）
+    与 ``create_version`` + ``record_version_content``（异步路径，先预留再回填）。
+    两条路径共用 ``_hash_key_to_version`` / ``_source_key_to_version`` 两个唯一索引，
+    与真实 SQLite 的两个唯一约束一一对应，好让去重与竞态分支都能被覆盖。
+    """
 
     def __init__(self, events):
         self.events = events
         self.documents: dict[str, KnowledgeDocument] = {}
         self.versions: dict[str, DocumentVersion] = {}
         self._hash_key_to_version: dict[tuple[str, str, str], str] = {}
+        self._source_key_to_version: dict[tuple[str, str, str], str] = {}
+        # version_id -> 暂存的上传原始字节（对应真实表的 raw_bytes 列）。
+        self.staged_bytes: dict[str, bytes] = {}
         self.jobs: dict[str, IngestionJob] = {}
         self.failed_jobs: list[tuple[str, str, str]] = []
         self._version_counter = 0
@@ -103,7 +112,7 @@ class RecordingKnowledgeStore:
         return doc
 
     # version -------------------------------------------------------------
-    def create_version(
+    def create_parsed_version(
         self,
         *,
         organization_id: str,
@@ -132,6 +141,7 @@ class RecordingKnowledgeStore:
             document_id=document_id,
             version_no=1,
             content_hash=content_hash,
+            source_hash=None,
             raw_text=raw_text,
             loader_version=loader_version,
             chunker_version=chunker_version,
@@ -144,6 +154,100 @@ class RecordingKnowledgeStore:
             (organization_id, document_id, content_hash)
         ] = version_id
         return version
+
+    def create_version(
+        self,
+        *,
+        organization_id: str,
+        document_id: str,
+        source_hash: str,
+        raw_bytes: bytes,
+        loader_version: str,
+        chunker_version: str,
+        embedding_model: str,
+        embedding_dimensions: int,
+    ) -> DocumentVersion:
+        """Reserve a version row without parsed content (async path)."""
+        self.events.append("create_version")
+        existing_id = self._source_key_to_version.get(
+            (organization_id, document_id, source_hash)
+        )
+        if existing_id is not None:
+            raise DuplicateDocumentVersionError(existing_version_id=existing_id)
+        version_id = self._new_version_id()
+        version = DocumentVersion(
+            version_id=version_id,
+            organization_id=organization_id,
+            document_id=document_id,
+            version_no=1,
+            content_hash=None,
+            source_hash=source_hash,
+            raw_text=None,
+            loader_version=loader_version,
+            chunker_version=chunker_version,
+            embedding_model=embedding_model,
+            embedding_dimensions=embedding_dimensions,
+            created_at="2026-01-01T00:00:00+00:00",
+        )
+        self.versions[version_id] = version
+        self.staged_bytes[version_id] = raw_bytes
+        self._source_key_to_version[
+            (organization_id, document_id, source_hash)
+        ] = version_id
+        return version
+
+    def record_version_content(
+        self,
+        *,
+        organization_id: str,
+        document_id: str,
+        version_id: str,
+        content_hash: str,
+        raw_text: str,
+    ) -> DocumentVersion:
+        self.events.append("record_version_content")
+        version = self.versions[version_id]
+        updated = DocumentVersion(
+            version_id=version.version_id,
+            organization_id=version.organization_id,
+            document_id=version.document_id,
+            version_no=version.version_no,
+            content_hash=content_hash,
+            source_hash=version.source_hash,
+            raw_text=raw_text,
+            loader_version=version.loader_version,
+            chunker_version=version.chunker_version,
+            embedding_model=version.embedding_model,
+            embedding_dimensions=version.embedding_dimensions,
+            created_at=version.created_at,
+        )
+        self.versions[version_id] = updated
+        self.staged_bytes.pop(version_id, None)
+        self._hash_key_to_version[
+            (organization_id, document_id, content_hash)
+        ] = version_id
+        return updated
+
+    def read_version_raw_bytes(
+        self,
+        *,
+        organization_id: str,
+        document_id: str,
+        version_id: str,
+    ) -> bytes | None:
+        return self.staged_bytes.get(version_id)
+
+    def get_version_by_source_hash(
+        self,
+        *,
+        organization_id: str,
+        document_id: str,
+        source_hash: str,
+    ) -> DocumentVersion | None:
+        version_id = self._source_key_to_version.get(
+            (organization_id, document_id, source_hash)
+        )
+        return None if version_id is None else self.versions[version_id]
 
     def get_version_by_hash(
         self,
@@ -244,6 +348,55 @@ class RecordingKnowledgeStore:
         )
         self.jobs[job_id] = running
         return running
+
+    def claim_job(
+        self,
+        *,
+        organization_id: str,
+        job_id: str,
+    ) -> IngestionJob | None:
+        """抢占 queued 任务；已终态或已被抢走时返回 None（与真实 store 同语义）。"""
+        self.events.append("claim_job")
+        job = self.jobs.get(job_id)
+        if job is None or job.status is not IngestionStatus.QUEUED:
+            return None
+        running = IngestionJob(
+            job_id=job_id,
+            organization_id=job.organization_id,
+            document_id=job.document_id,
+            version_id=job.version_id,
+            status=IngestionStatus.RUNNING,
+            attempt_count=job.attempt_count + 1,
+            error_code=None,
+            error_message=None,
+            started_at="2026-01-01T00:00:00+00:00",
+            finished_at=None,
+            created_at=job.created_at,
+        )
+        self.jobs[job_id] = running
+        return running
+
+    def recover_stale_jobs(self) -> list[tuple[str, str]]:
+        """把非终态任务重置为 queued 并交回调用方（与真实 store 同语义）。"""
+        stale: list[tuple[str, str]] = []
+        for job_id, job in self.jobs.items():
+            if job.status not in (IngestionStatus.QUEUED, IngestionStatus.RUNNING):
+                continue
+            self.jobs[job_id] = IngestionJob(
+                job_id=job_id,
+                organization_id=job.organization_id,
+                document_id=job.document_id,
+                version_id=job.version_id,
+                status=IngestionStatus.QUEUED,
+                attempt_count=job.attempt_count,
+                error_code=None,
+                error_message=None,
+                started_at=None,
+                finished_at=None,
+                created_at=job.created_at,
+            )
+            stale.append((job.organization_id, job_id))
+        return stale
 
     def fail_ingestion(
         self,

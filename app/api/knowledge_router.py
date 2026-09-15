@@ -147,10 +147,18 @@ def create_knowledge_router(
         request: Request,
         tenant: TenantContext = Depends(get_current_tenant),
     ) -> IngestionReceiptResponse:
+        """上传新文档：登记并入队，立刻返回 ``queued``。
+
+        解析（DOCX/PDF 走外部服务，实测约 27 秒）不再发生在这个请求里，
+        否则会阻塞事件循环并让大文档撞上前端上传超时。接口只做三件事：
+        校验、落库（document + 预留版本 + queued 任务 + 暂存原始字节）、入队。
+        前端已按 ``queued`` 回执启动任务轮询，由
+        ``GET /knowledge/ingestion-jobs/{job_id}/`` 推进到终态。
+        """
         _require_admin(tenant)
         title, content, source_type = await _read_upload_named_fields(request)
         try:
-            receipt = ingestion_service.ingest_new_document(
+            receipt = ingestion_service.queue_new_document(
                 organization_id=tenant.organization_id,
                 uploaded_by_user_id=tenant.user_id,
                 title=title,
@@ -176,10 +184,11 @@ def create_knowledge_router(
         request: Request,
         tenant: TenantContext = Depends(get_current_tenant),
     ) -> IngestionReceiptResponse:
+        """上传新版本：与新建文档同样只登记入队并返回 ``queued``。"""
         _require_admin(tenant)
         title, content, source_type = await _read_upload_named_fields(request)
         try:
-            receipt = ingestion_service.ingest_new_version(
+            receipt = ingestion_service.queue_new_version(
                 organization_id=tenant.organization_id,
                 uploaded_by_user_id=tenant.user_id,
                 document_id=document_id,

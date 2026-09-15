@@ -46,7 +46,9 @@ class DocumentVersionResponse(BaseModel):
 
     version_id: str
     version_no: int
-    content_hash: str
+    # 解析正文的 sha256；入库异步化后版本行会先在上传接口里预留，此时正文尚未
+    # 解析出来，因此该字段可能为 null（对应任务的 queued/running 阶段）。
+    content_hash: str | None
     loader_version: str
     chunker_version: str
     embedding_model: str
