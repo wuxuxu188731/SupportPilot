@@ -126,6 +126,22 @@ beforeEach(() => {
 })
 
 describe('KnowledgeDetailView 基本信息与版本历史', () => {
+  // 保护行为：未解析版本的空哈希显示占位符，点击时不尝试复制。
+  it('排队版本的空内容哈希可以正常展示和点击', async () => {
+    const pending = detail({ status: 'processing', active_version_id: null })
+    pending.versions = [{ ...pending.versions[0], content_hash: null }]
+    vi.mocked(knowledgeApi.getKnowledgeDocumentDetail).mockResolvedValue(pending)
+    seedLogin('admin')
+    const { wrapper } = await mountKnowledgeDetail('/app/knowledge/doc-1')
+    const hashButton = wrapper.findAll('[data-test="version-item"] button')[1]
+    expect(hashButton.text()).toBe('—')
+    expect(hashButton.attributes('title')).toBeUndefined()
+    await hashButton.trigger('click')
+    expect(wrapper.text()).not.toContain('已复制')
+    expect(wrapper.text()).not.toContain('null')
+    wrapper.unmount()
+  })
+
   it('加载详情并展示基本信息、版本历史与当前有效版本标记', async () => {
     // 保护行为：详情页必须展示真实字段（无正文/下载伪造，覆盖测试 18）
     vi.mocked(knowledgeApi.getKnowledgeDocumentDetail).mockResolvedValue(detail())

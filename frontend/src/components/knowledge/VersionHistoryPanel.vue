@@ -86,7 +86,7 @@ function display(value: string | number | null | undefined): string {
           <div class="meta-item meta-wide">
             <dt>内容哈希</dt>
             <dd>
-              <button type="button" class="id-link" :title="version.content_hash" @click="onCopy(version.content_hash)">
+              <button type="button" class="id-link" :title="version.content_hash ?? undefined" @click="onCopy(version.content_hash)">
                 {{ shorten(version.content_hash, 10, 6) }}
               </button>
             </dd>
