@@ -477,6 +477,12 @@ def _compile_report(cases, outcomes, settings, formats) -> dict[str, object]:
                 "results_consistent": all(
                     per_format[name] == per_format[formats[0]] for name in formats
                 ),
+                "evidence_consistent": all(
+                    per_format[name]["group_hits"] == per_format[formats[0]]["group_hits"]
+                    and per_format[name]["expected_heading_matches"]
+                    == per_format[formats[0]]["expected_heading_matches"]
+                    for name in formats
+                ),
                 "hit_counts": hit_counts,
             }
         )
@@ -498,6 +504,9 @@ def _compile_report(cases, outcomes, settings, formats) -> dict[str, object]:
             "comparison_complete": set(formats) == set(FORMAT_ORGANIZATIONS),
             "all_results_consistent": all(
                 report["results_consistent"] for report in case_reports
+            ),
+            "all_evidence_consistent": all(
+                report["evidence_consistent"] for report in case_reports
             ),
             "case_count": len(cases),
             "all_hit_counts_consistent": all(
@@ -525,6 +534,7 @@ def render_markdown(report: dict[str, object]) -> str:
     lines = ["# docx / pdf / md 入库检索等价性回归（自动生成）", ""]
     summary = report["summary"]
     lines.append(f"- 已完成三格式比较：{'是' if summary['comparison_complete'] else '否（仅部分格式）'}")
+    lines.append(f"- 金标证据组与预期标题命中逐项一致：{'是' if summary['all_evidence_consistent'] else '否'}")
     lines.append(f"- 证据组与引用路径逐项一致：{'是' if summary['all_results_consistent'] else '否'}")
     lines.append(f"- 用例数：{summary['case_count']}；证据组总数：{summary['total_groups']}")
     for format_name, hits in summary["per_format_group_hits"].items():
@@ -572,6 +582,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT_DIR / "report.json"))
     parser.add_argument("--collection", help="与指定数据库配套的 Qdrant 集合，用于续跑独立回归")
     parser.add_argument(
+        "--strict-citations", action="store_true",
+        help="除金标证据一致外，还要求全部引用路径及排序完全一致",
+    )
+    parser.add_argument(
         "--fresh", action="store_true",
         help="使用新数据库和独立向量集合重新入库；保留历史结果并复用解析缓存",
     )
@@ -615,7 +629,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(json.dumps(report["summary"], ensure_ascii=False, indent=2))
     print(f"报告已写入：{output}")
     print(f"摘要已写入：{markdown_path}")
-    return 0 if report["summary"]["all_results_consistent"] else 1
+    criterion = "all_results_consistent" if args.strict_citations else "all_evidence_consistent"
+    return 0 if report["summary"][criterion] else 1
 
 
 if __name__ == "__main__":

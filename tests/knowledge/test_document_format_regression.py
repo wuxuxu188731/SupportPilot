@@ -48,6 +48,7 @@ def test_summary_compares_actual_groups_and_boolean_values():
     report = regression._compile_report([make_case()], outcomes, settings, list(outcomes))
     assert report["summary"]["all_hit_counts_consistent"] is True
     assert report["summary"]["all_results_consistent"] is False
+    assert report["summary"]["all_evidence_consistent"] is False
     assert report["summary"]["all_expected_headings_matched"] is False
     assert report["summary"]["comparison_complete"] is False
 
@@ -62,7 +63,7 @@ def test_fresh_run_preserves_existing_state(tmp_path, monkeypatch):
 
     async def fake_run(**kwargs):
         captured.update(kwargs)
-        return {"summary": {"all_results_consistent": True}}
+        return {"summary": {"all_results_consistent": True, "all_evidence_consistent": True}}
 
     monkeypatch.setattr(regression, "run_regression", fake_run)
     monkeypatch.setattr(regression, "render_markdown", lambda report: "测试报告")
@@ -81,7 +82,7 @@ def test_resume_passes_matching_collection(tmp_path, monkeypatch):
 
     async def fake_run(**kwargs):
         captured.update(kwargs)
-        return {"summary": {"all_results_consistent": True}}
+        return {"summary": {"all_results_consistent": True, "all_evidence_consistent": True}}
 
     monkeypatch.setattr(regression, "run_regression", fake_run)
     monkeypatch.setattr(regression, "render_markdown", lambda report: "测试报告")
@@ -92,3 +93,17 @@ def test_resume_passes_matching_collection(tmp_path, monkeypatch):
     ]) == 0
     assert captured["database_path"] == database
     assert captured["collection_name"] == "supportpilot_format_resume"
+
+
+# 保护行为：额外引用不同必须如实记录，同时单独报告金标证据是否一致。
+def test_extra_citations_are_separate_from_required_evidence():
+    groups = {"general": True, "returns": False}
+    outcomes = {
+        "markdown": [regression.CaseOutcome("case", ["总则/时限", "附录/A"], groups)],
+        "pdf": [regression.CaseOutcome("case", ["总则/时限", "附录/B"], groups)],
+    }
+    settings = SimpleNamespace(embedding_model="fake", embedding_dimensions=3,
+                               qdrant_collection="test", rerank_model="fake")
+    report = regression._compile_report([make_case()], outcomes, settings, list(outcomes))
+    assert report["summary"]["all_evidence_consistent"] is True
+    assert report["summary"]["all_results_consistent"] is False
