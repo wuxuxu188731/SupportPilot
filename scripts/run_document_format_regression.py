@@ -55,9 +55,10 @@ import argparse
 import asyncio
 import json
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Sequence
+from uuid import uuid4
 
 from app.core.config import get_knowledge_settings
 from app.evals.stage_c.models import StageCCase, load_stage_c_cases
@@ -101,6 +102,12 @@ SOURCE_TYPE_BY_FORMAT = {
     "pdf": DocumentSourceType.PDF,
 }
 _TITLE = "售后服务总则"
+_DOCUMENT_KEY_BY_TITLE = {
+    "售后服务总则": "general_service",
+    "退货与换货政策": "returns_exchange",
+    "物流配送与异常处理": "logistics",
+    "VIP会员权益": "vip",
+}
 _SUPPORTING_TITLE_BY_STEM = {
     "02-退货与换货政策": "退货与换货政策",
     "04-物流配送与异常处理": "物流配送与异常处理",
@@ -177,7 +184,7 @@ def expected_general_service_headings(case: StageCCase) -> list[str]:
     ]
 
 
-def score_case(case: StageCCase, citations) -> CaseOutcome:
+def score_case(case: StageCCase, citations, document_keys: dict[str, str]) -> CaseOutcome:
     """按 stage_c 的判据逐组判定命中，不做任何自定义放宽。
 
     「命中一组」的定义与 ``app/evals/stage_c/scoring.py`` 完全一致：该组里
@@ -190,20 +197,12 @@ def score_case(case: StageCCase, citations) -> CaseOutcome:
     ]
     group_hits: dict[str, bool] = {}
     for group in case.required_evidence_groups:
-        general_service_options = [
-            alternative
-            for alternative in group.any_of
-            if alternative.document_key == GENERAL_SERVICE_KEY
-        ]
-        if not general_service_options:
-            # 该组与本文件无关（可能由辅助文档满足）：记为命中，避免把与本次
-            # 比较无关的组算成缺失，污染「每格式命中数」。
-            group_hits[group.group_id] = True
-            continue
+        # 所有证据组都按实际文档身份与标题路径判分，辅助文档不能默认命中。
         group_hits[group.group_id] = any(
-            heading_matches(heading, alternative.heading_path)
-            for heading in headings
-            for alternative in general_service_options
+            document_keys.get(citation.document_id) == alternative.document_key
+            and heading_matches(citation.heading_path, alternative.heading_path)
+            for citation in citations
+            for alternative in group.any_of
         )
     return CaseOutcome(
         case_id=case.case_id,
@@ -340,26 +339,26 @@ async def ingest_corpus(
     plan.extend(
         (title, path, DocumentSourceType.MARKDOWN) for title, path in supporting
     )
-    existing_titles = {
-        document.title
+    existing_documents = {
+        document.title: document
         for document in store.list_documents(organization_id=organization_id)
     }
 
     worker.bind_loop()
     try:
         for title, path, source_type in plan:
-            if title in existing_titles:
-                print(f"  [跳过] {organization_id} / {title}（已入库）")
-                continue
             content = path.read_bytes()
+            existing = existing_documents.get(title)
             print(
                 f"  [入队] {organization_id} / {title} "
                 f"({source_type.value}, {len(content)} 字节)..."
             )
-            receipt = ingestion.queue_new_document(
+            queue = ingestion.queue_new_version if existing else ingestion.queue_new_document
+            identity = {"document_id": existing.document_id} if existing else {"title": title}
+            receipt = queue(
                 organization_id=organization_id,
                 uploaded_by_user_id=_REGRESSION_USER_ID,
-                title=title,
+                **identity,
                 source_type=source_type,
                 content=content,
             )
@@ -390,6 +389,7 @@ async def run_regression(
     database_path: Path,
     cases_path: Path,
     formats: Sequence[str],
+    collection_name: str | None = None,
 ) -> dict[str, object]:
     """跑完整回归并返回报告载荷。"""
     all_cases = load_stage_c_cases(cases_path)
@@ -399,6 +399,8 @@ async def run_regression(
     print(f"[用例] 选中 {len(cases)} 个 general_service 用例")
 
     settings = get_knowledge_settings()
+    if collection_name is not None:
+        settings = replace(settings, qdrant_collection=collection_name)
     services = build_services(database_path=database_path, settings=settings)
     ensure_tenants(database_path)
 
@@ -415,13 +417,18 @@ async def run_regression(
             supporting=supporting,
         )
         per_case: list[CaseOutcome] = []
+        document_keys = {
+            document.document_id: _DOCUMENT_KEY_BY_TITLE[document.title]
+            for document in services.store.list_documents(organization_id=organization_id)
+            if document.title in _DOCUMENT_KEY_BY_TITLE
+        }
         for case in cases:
             print(f"  [检索] {case.case_id} ...")
             result = services.baseline.search(
                 organization_id=organization_id,
                 question=case.question,
             )
-            per_case.append(score_case(case, result.citations))
+            per_case.append(score_case(case, result.citations, document_keys))
         outcomes[format_name] = per_case
 
     return _compile_report(cases, outcomes, settings, formats)
@@ -455,6 +462,9 @@ def _compile_report(cases, outcomes, settings, formats) -> dict[str, object]:
                 ),
                 "per_format": per_format,
                 "hit_counts_consistent": len(set(hit_counts.values())) == 1,
+                "results_consistent": all(
+                    per_format[name] == per_format[formats[0]] for name in formats
+                ),
                 "hit_counts": hit_counts,
             }
         )
@@ -473,13 +483,17 @@ def _compile_report(cases, outcomes, settings, formats) -> dict[str, object]:
         },
         "cases": case_reports,
         "summary": {
+            "comparison_complete": set(formats) == set(FORMAT_ORGANIZATIONS),
+            "all_results_consistent": all(
+                report["results_consistent"] for report in case_reports
+            ),
             "case_count": len(cases),
             "all_hit_counts_consistent": all(
                 report["hit_counts_consistent"] for report in case_reports
             ),
             "all_expected_headings_matched": all(
                 all(
-                    per_format["expected_heading_matches"].values()
+                    all(per_format["expected_heading_matches"].values())
                     for per_format in report["per_format"].values()
                 )
                 for report in case_reports
@@ -498,6 +512,8 @@ def render_markdown(report: dict[str, object]) -> str:
     formats = report["run"]["formats"]
     lines = ["# docx / pdf / md 入库检索等价性回归（自动生成）", ""]
     summary = report["summary"]
+    lines.append(f"- 已完成三格式比较：{'是' if summary['comparison_complete'] else '否（仅部分格式）'}")
+    lines.append(f"- 证据组与引用路径逐项一致：{'是' if summary['all_results_consistent'] else '否'}")
     lines.append(f"- 用例数：{summary['case_count']}；证据组总数：{summary['total_groups']}")
     for format_name, hits in summary["per_format_group_hits"].items():
         lines.append(f"- {format_name} 命中证据组：{hits}")
@@ -543,6 +559,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--cases", default=str(DEFAULT_CASES_PATH))
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT_DIR / "report.json"))
     parser.add_argument(
+        "--fresh", action="store_true",
+        help="使用新数据库和独立向量集合重新入库；保留历史结果并复用解析缓存",
+    )
+    parser.add_argument(
         "--formats",
         nargs="+",
         choices=sorted(FORMAT_ORGANIZATIONS),
@@ -552,6 +572,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     database = Path(args.database)
+    output = Path(args.output)
+    collection_name = None
+    if args.fresh:
+        run_id = uuid4().hex
+        database = database.parent / run_id / database.name
+        output = output.parent / run_id / output.name
+        collection_name = f"supportpilot_format_{run_id}"
     database.parent.mkdir(parents=True, exist_ok=True)
     report = asyncio.run(
         run_regression(
@@ -559,10 +586,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             database_path=database,
             cases_path=Path(args.cases),
             formats=args.formats,
+            collection_name=collection_name,
         )
     )
 
-    output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -573,7 +600,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(json.dumps(report["summary"], ensure_ascii=False, indent=2))
     print(f"报告已写入：{output}")
     print(f"摘要已写入：{markdown_path}")
-    return 0 if report["summary"]["all_hit_counts_consistent"] else 1
+    return 0 if report["summary"]["all_results_consistent"] else 1
 
 
 if __name__ == "__main__":
