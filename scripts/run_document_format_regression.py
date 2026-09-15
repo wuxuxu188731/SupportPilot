@@ -356,6 +356,8 @@ async def ingest_corpus(
 
     worker.bind_loop()
     try:
+        # 续跑数据库可能含上次中断的任务，先恢复再按原始字节去重入队。
+        worker.recover()
         for title, path, source_type in plan:
             content = path.read_bytes()
             existing = existing_documents.get(title)
