@@ -16,6 +16,7 @@ from app.knowledge.base import (
     KnowledgeDocument,
     KnowledgeError,
     KnowledgeStore,
+    ParsingUnavailableError,
     RetrievalEvent,
 )
 
@@ -35,5 +36,6 @@ __all__ = [
     "KnowledgeDocument",
     "KnowledgeError",
     "KnowledgeStore",
+    "ParsingUnavailableError",
     "RetrievalEvent",
 ]

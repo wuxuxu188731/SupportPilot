@@ -1,9 +1,18 @@
-"""Markdown/TXT/Word loader: normalise bytes into ``LoadedDocument``.
+"""Markdown/TXT/Word/PDF loader: normalise bytes into ``LoadedDocument``.
 
-The loader is deliberately dependency-light: Markdown/TXT decoding remains
-local, while Word uses python-docx to validate the OOXML package and extract
-all body paragraphs, including paragraphs nested in tables. Splitting into
-token-bounded chunks happens later in ``app.knowledge.chunking``.
+两条提取路径：
+
+* **本地解码**：Markdown/TXT 直接 UTF-8 解码，零外部依赖；
+* **外部解析**：DOCX/PDF 交给注入的 :class:`~app.knowledge.llamaparse_extractor.DocumentExtractor`
+  提取，再经 :mod:`app.knowledge.markdown_normalizer` 归一化成项目规范的
+  Markdown（HTML 表 → 管道表），最后与原生 Markdown 走同一套标题栈切分。
+
+两条路径最终都产出带 ``heading_path`` 的 section，因此下游 chunker
+与检索完全不需要区分文档来源。
+
+历史说明：``WordDocumentExtractor`` 是本项目早期的本地 DOCX 提取实现。
+DOCX 改走外部解析后它已不再被 ``DocumentLoader`` 使用，但予以保留——
+它是一份不依赖网络的降级实现，也是 OOXML 直读行为的参考实现。
 """
 
 from __future__ import annotations
@@ -17,9 +26,18 @@ from docx import Document
 from docx.opc.exceptions import PackageNotFoundError
 from docx.oxml.ns import qn
 
-from app.knowledge.base import DocumentSourceType, InvalidDocumentError
+from app.knowledge.base import (
+    DocumentSourceType,
+    InvalidDocumentError,
+    ParsingUnavailableError,
+)
+from app.knowledge.llamaparse_extractor import DocumentExtractor
+from app.knowledge.markdown_normalizer import normalize_extracted_markdown
 
-LOADER_VERSION = "supportpilot-loader-v1"
+# 升到 v2：同一份 DOCX 在 v1（本地 OOXML 直读、无标题层级）与 v2（外部解析、
+# 带标题层级）下会产出不同的 chunk，版本号必须随之变化，否则历史版本的
+# 可追溯性会被破坏。
+LOADER_VERSION = "supportpilot-loader-v2"
 # Hard upper bound on a single document's raw byte size.
 MAX_DOCUMENT_BYTES = 2 * 1024 * 1024
 
@@ -29,6 +47,12 @@ _HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.+?)\s*$")
 _WORD_TEXT_TAG = qn("w:t")
 _WORD_TAB_TAG = qn("w:tab")
 _WORD_BREAK_TAGS = {qn("w:br"), qn("w:cr")}
+
+# 需要外部解析的格式 -> 上报给解析服务的文件扩展名（服务端据此选择解析器）。
+_REMOTE_SUFFIX_BY_SOURCE_TYPE = {
+    DocumentSourceType.WORD: ".docx",
+    DocumentSourceType.PDF: ".pdf",
+}
 
 
 class WordDocumentExtractor:
@@ -94,9 +118,12 @@ class DocumentLoader:
     def __init__(
         self,
         *,
-        word_extractor: WordDocumentExtractor | None = None,
+        document_extractor: DocumentExtractor | None = None,
     ) -> None:
-        self._word_extractor = word_extractor or WordDocumentExtractor()
+        # DOCX/PDF 依赖外部解析服务，因此显式注入而不是内部构造：没有配置
+        # 提取器时，加载这类文档会明确报「解析能力不可用」，而不是悄悄
+        # 退回一个内容残缺的本地解析结果。
+        self._document_extractor = document_extractor
 
     def load(
         self,
@@ -106,12 +133,8 @@ class DocumentLoader:
         if len(content) > MAX_DOCUMENT_BYTES:
             raise InvalidDocumentError(reason="document exceeds maximum size")
 
-        if source_type is DocumentSourceType.WORD:
-            text = self._word_extractor.extract(content)
-            return LoadedDocument(
-                text=text,
-                sections=(LoadedSection(heading_path=None, content=text),),
-            )
+        if source_type in _REMOTE_SUFFIX_BY_SOURCE_TYPE:
+            return self._load_extracted(content, source_type)
 
         try:
             text = content.decode("utf-8")
@@ -128,6 +151,36 @@ class DocumentLoader:
         else:
             sections = (LoadedSection(heading_path=None, content=text),)
 
+        return LoadedDocument(text=text, sections=sections)
+
+    def _load_extracted(
+        self,
+        content: bytes,
+        source_type: DocumentSourceType,
+    ) -> LoadedDocument:
+        """走外部解析 + 归一化，再复用 Markdown 的标题栈切分。
+
+        归一化后与原生 Markdown 完全同构，因此 section 划分、heading_path
+        与偏移定位都能直接复用同一套逻辑，下游 chunker 无需感知文档来源。
+        """
+        if self._document_extractor is None:
+            raise ParsingUnavailableError(
+                reason="no document extractor is configured for this loader"
+            )
+
+        raw_markdown = self._document_extractor.extract(
+            content,
+            suffix=_REMOTE_SUFFIX_BY_SOURCE_TYPE[source_type],
+        )
+        text = normalize_extracted_markdown(raw_markdown)
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+
+        if not text.strip():
+            raise InvalidDocumentError(reason="document is empty")
+
+        # 提取结果没有标题时，_extract_markdown_sections 会给出一个
+        # heading_path 为 None 的 section，与 TEXT 路径的行为一致。
+        sections = self._extract_markdown_sections(text)
         return LoadedDocument(text=text, sections=sections)
 
     @staticmethod

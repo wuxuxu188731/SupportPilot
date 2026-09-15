@@ -24,6 +24,7 @@ from app.knowledge.chunking import KnowledgeChunker
 from app.knowledge.dashscope_embeddings import DashScopeEmbeddingClient
 from app.knowledge.document_loader import DocumentLoader
 from app.knowledge.ingestion import KnowledgeIngestionService
+from app.knowledge.llamaparse_extractor import LlamaParseExtractor
 from app.knowledge.qdrant_store import QdrantVectorStore
 from app.knowledge.reranking import DashScopeQwenReranker
 from app.knowledge.retrieval import BaselineKnowledgeSearchService, HybridRetriever
@@ -71,7 +72,17 @@ def create_knowledge_services(
     """
     store = SQLiteKnowledgeStore(database_path=database_path)
 
-    loader = DocumentLoader()
+    # 解析密钥缺失时不阻止装配：DOCX/PDF 会在上传时以 PARSING_UNAVAILABLE
+    # 明确失败，Markdown/TXT 路径不受影响。
+    document_extractor = (
+        LlamaParseExtractor(
+            api_key=settings.llama_cloud_api_key,
+            tier=settings.llama_cloud_tier,
+        )
+        if settings.llama_cloud_api_key
+        else None
+    )
+    loader = DocumentLoader(document_extractor=document_extractor)
     chunker = KnowledgeChunker()
 
     embedding = DashScopeEmbeddingClient(

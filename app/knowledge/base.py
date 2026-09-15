@@ -4,9 +4,16 @@ from typing import Protocol, Sequence
 
 
 class DocumentSourceType(str, Enum):
-    MARKDOWN = "markdown"
-    TEXT = "text"
-    WORD = "word"
+    """知识文档的来源格式。
+
+    取值与 ``documents.source_type`` 的 CHECK 约束一一对应，新增取值
+    必须同时补一个放开约束的迁移（见 migrations/versions/0012）。
+    """
+
+    MARKDOWN = "markdown"   # 项目原生 Markdown，本地 UTF-8 解码
+    TEXT = "text"           # 纯文本，本地 UTF-8 解码
+    WORD = "word"           # DOCX，经文档提取服务解析
+    PDF = "pdf"             # PDF，经文档提取服务解析
 
 
 class DocumentStatus(str, Enum):
@@ -224,6 +231,29 @@ class EmbeddingUnavailableError(KnowledgeError):
 
     def __init__(self, *, reason: str) -> None:
         super().__init__("EMBEDDING_UNAVAILABLE", f"embedding unavailable: {reason}")
+
+
+class ParsingUnavailableError(KnowledgeError):
+    """Raised when the external document-parsing service cannot serve a request.
+
+    PDF/DOCX 的正文提取依赖外部解析服务（LlamaParse）。该服务不可达、
+    超时、限流或额度耗尽时抛本异常。它与
+    :class:`InvalidDocumentError` 是两类不同的失败：前者是「文档本身没问题，
+    但解析能力暂时不可用」，不应让调用方以为用户上传了坏文件，
+    更不能降级成空文档——那会让一份从未被解析的文档静默进入知识库。
+
+    与 :class:`EmbeddingUnavailableError` 一致：``reason`` 只用于进程内
+    诊断，对外暴露的 ``safe_message`` 不含密钥与上游响应体。
+    """
+
+    code = "PARSING_UNAVAILABLE"
+
+    def __init__(self, *, reason: str) -> None:
+        self.reason = reason
+        super().__init__(
+            "PARSING_UNAVAILABLE",
+            "document parsing service unavailable",
+        )
 
 
 class VectorStoreUnavailableError(KnowledgeError):

@@ -10,12 +10,15 @@ def _field_names(cls):
 
 
 class TestEnums:
-    # 保护行为：文档来源类型必须包含 Markdown、纯文本和 Word 三种支持格式。
+    # 保护行为：文档来源类型必须包含 Markdown、纯文本、Word 与 PDF 四种支持格式。
+    # 取值同时受 documents.source_type 的 CHECK 约束，新增取值必须配迁移
+    # （见 migrations/versions/0012）与 tests/db/test_migrations.py 的约束测试。
     def test_document_source_type_values(self):
         assert {e.value for e in kb.DocumentSourceType} == {
             "markdown",
             "text",
             "word",
+            "pdf",
         }
 
     def test_document_status_values(self):

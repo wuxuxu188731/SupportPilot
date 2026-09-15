@@ -46,7 +46,12 @@ from app.knowledge.chunking import (
     TARGET_CHUNK_TOKENS,
     KnowledgeChunker,
 )
-from app.knowledge.document_loader import DocumentLoader, WordDocumentExtractor
+from app.knowledge.document_loader import (
+    DocumentLoader,
+    LoadedDocument,
+    LoadedSection,
+    WordDocumentExtractor,
+)
 
 DEFAULT_EXTRACT_DIR = _REPO_ROOT / ".artifacts" / "llamaparse-extract"
 DEFAULT_REFERENCE_DIR = _REPO_ROOT / "docs" / "knowledge"
@@ -479,10 +484,16 @@ def evaluate_document(
         "hard_wrap_samples": hard_wrap_lines(text_text)[:5],
     }
 
-    # ---- 现有 loader 对照：docx 走 python-docx，pdf 根本走不通 -------------
+    # ---- v1 loader 对照：docx 曾走 python-docx，pdf 完全走不通 -------------
+    # LOADER_VERSION 升到 v2 后，DOCX 也改走外部解析，DocumentLoader 不再内置
+    # python-docx 路径。这里直接调用 WordDocumentExtractor 并手工包成 v1 的
+    # 「单个无标题 section」，以复现改造前的行为基线。
     if document_name.lower().endswith(".docx") and source_path is not None and source_path.exists():
         word_text = WordDocumentExtractor().extract(source_path.read_bytes())
-        word_loaded = loader.load(source_path.read_bytes(), DocumentSourceType.WORD)
+        word_loaded = LoadedDocument(
+            text=word_text,
+            sections=(LoadedSection(heading_path=None, content=word_text),),
+        )
         word_chunks = chunker.split(
             word_loaded,
             organization_id="eval-org",
@@ -491,7 +502,7 @@ def evaluate_document(
         )
         word_normalized = normalize(word_text)
         evaluation.existing_loader_view = {
-            "loader": "WordDocumentExtractor(python-docx)",
+            "loader": "v1 WordDocumentExtractor(python-docx)",
             "supported": True,
             "raw_chars": len(word_text),
             "similarity": round(

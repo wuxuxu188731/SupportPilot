@@ -120,6 +120,8 @@ class KnowledgeSettings:
     rerank_instruct: str = (  # 英文重排序指令，默认强调寻找能回答问题的段落
         "Given a web search query, retrieve relevant passages that answer the query."
     )
+    llama_cloud_api_key: str | None = None  # LlamaParse 解析密钥；未配置时 PDF/DOCX 无法入库
+    llama_cloud_tier: str = "agentic"  # LlamaParse 解析档位，决定解析质量与计费单价
 
 
 def get_knowledge_settings() -> KnowledgeSettings:
@@ -157,6 +159,10 @@ def get_knowledge_settings() -> KnowledgeSettings:
             "KNOWLEDGE_RERANK_INSTRUCT",
             "Given a web search query, retrieve relevant passages that answer the query.",
         ).strip(),
+        # 解析密钥是可选配置：缺失时服务照常启动，只有真正上传 PDF/DOCX 时
+        # 才会以 PARSING_UNAVAILABLE 明确失败，而不是让整个应用起不来。
+        llama_cloud_api_key=(os.getenv("LLAMA_CLOUD_API_KEY", "").strip() or None),
+        llama_cloud_tier=os.getenv("LLAMA_CLOUD_TIER", "agentic").strip() or "agentic",
     )
 
 

@@ -623,6 +623,96 @@ def test_unplanned_strategy_downgrade_refuses_data_loss(tmp_path):
         ).fetchone() == ("unplanned",)
 
 
+def _seed_document(database_path, document_id, source_type):
+    """插入一份最小可用的知识文档，用于验证 source_type 约束。
+
+    前提：调用方已经执行过 ``seed_two_memberships``（documents 的外键指向
+    memberships，且该函数不是幂等的）。
+    """
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            INSERT INTO documents(
+                id, organization_id, uploaded_by_user_id,
+                title, source_type, status
+            ) VALUES (?, 'org-a', 'user-a', '文档', ?, 'processing')
+            """,
+            (document_id, source_type),
+        )
+
+
+def test_source_type_migration_allows_word_and_pdf(tmp_path):
+    # 保护行为：0012 之后 documents.source_type 必须接受 word 与 pdf，
+    # 同时仍然拒绝未知取值——放开约束不等于取消校验。
+    database_path = tmp_path / "source-types.db"
+    upgrade_database(database_path)
+    seed_two_memberships(database_path)
+
+    _seed_document(database_path, "doc-pdf", "pdf")
+    _seed_document(database_path, "doc-word", "word")
+
+    with sqlite3.connect(database_path) as connection:
+        stored = connection.execute(
+            "SELECT source_type FROM documents ORDER BY id"
+        ).fetchall()
+    assert stored == [("pdf",), ("word",)]
+
+    with sqlite3.connect(database_path) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                """
+                INSERT INTO documents(
+                    id, organization_id, uploaded_by_user_id,
+                    title, source_type, status
+                ) VALUES ('doc-bad', 'org-a', 'user-a', '文档', 'pptx', 'processing')
+                """
+            )
+
+
+def test_source_type_downgrade_restores_legacy_check_when_safe(tmp_path):
+    # 保护行为：库里没有 word/pdf 行时，降级必须把约束还原成 0009 的原始形态，
+    # 且 markdown/text 行继续可用。
+    database_path = tmp_path / "source-types-safe-downgrade.db"
+    config = alembic_config(database_path)
+    upgrade_database(database_path)
+    seed_two_memberships(database_path)
+    _seed_document(database_path, "doc-md", "markdown")
+
+    command.downgrade(config, "0011_action_approval_workflow")
+
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT source_type FROM documents"
+        ).fetchall() == [("markdown",)]
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                """
+                INSERT INTO documents(
+                    id, organization_id, uploaded_by_user_id,
+                    title, source_type, status
+                ) VALUES ('doc-pdf', 'org-a', 'user-a', '文档', 'pdf', 'processing')
+                """
+            )
+
+
+def test_source_type_downgrade_refuses_data_loss(tmp_path):
+    # 边界情况：库里已存在 pdf 文档时降级会让该行失去合法性，
+    # 必须拒绝降级并保留数据，而不是静默改回约束。
+    database_path = tmp_path / "source-types-protected-downgrade.db"
+    config = alembic_config(database_path)
+    upgrade_database(database_path)
+    seed_two_memberships(database_path)
+    _seed_document(database_path, "doc-pdf", "pdf")
+
+    with pytest.raises(RuntimeError, match="word/pdf"):
+        command.downgrade(config, "0011_action_approval_workflow")
+
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT source_type FROM documents WHERE id='doc-pdf'"
+        ).fetchone() == ("pdf",)
+
+
 def test_action_workflow_migration_upgrade_and_rollback(tmp_path):
     # 保护行为：0011 动作工作流迁移可创建九张业务表，并可对称回滚到 0010。
     database_path = tmp_path / "action-workflow.db"

@@ -27,6 +27,7 @@ from app.knowledge.base import (
     InvalidDocumentError,
     KnowledgeDocument,
     KnowledgeStore,
+    ParsingUnavailableError,
     VectorStoreUnavailableError,
 )
 from app.knowledge.chunking import CHUNKER_VERSION, KnowledgeChunker
@@ -44,6 +45,7 @@ ERROR_CODE_BY_EXCEPTION = {
     EmbeddingUnavailableError: "EMBEDDING_UNAVAILABLE",
     VectorStoreUnavailableError: "VECTOR_STORE_UNAVAILABLE",
     InvalidDocumentError: "INVALID_DOCUMENT",
+    ParsingUnavailableError: "PARSING_UNAVAILABLE",
 }
 INGESTION_FAILED_MESSAGE = "knowledge ingestion failed"
 # Safe, stable error messages forever pinned by code. These never interpolate
@@ -53,6 +55,7 @@ SAFE_ERROR_MESSAGE_BY_CODE = {
     "EMBEDDING_UNAVAILABLE": "embedding service unavailable",
     "VECTOR_STORE_UNAVAILABLE": "vector store unavailable",
     "INVALID_DOCUMENT": "invalid document",
+    "PARSING_UNAVAILABLE": "document parsing service unavailable",
 }
 
 def _lookup_error_code(exc: Exception) -> str | None:
