@@ -1,0 +1,7 @@
+MD文档转成PDF：
+示例：
+pandoc 01-售后服务总则.md -o 01-售后服务总则.pdf --pdf-engine=xelatex -V CJKmainfont="SimSun"
+
+MD文档转成docx：
+示例：
+pandoc 01-售后服务总则.md -o 01-售后服务总则.docx
