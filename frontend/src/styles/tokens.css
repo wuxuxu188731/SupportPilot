@@ -1,44 +1,23 @@
-/*
- * 设计令牌：全站统一的颜色、间距、圆角与字体层级。
- *
- * 颜色语义（现代、克制、可信赖的企业工作台）：
- * --sp-color-primary  主操作色：企业蓝，用于按钮/链接/选中态
- * --sp-color-success  成功/生效状态
- * --sp-color-warning  警告/待处理状态
- * --sp-color-error    错误/危险状态
- * --sp-color-text-*   正文层级文本
- * --sp-color-border   分隔线与描边
- * --sp-color-bg-*     页面/卡片/悬浮背景
- */
-
+/* 全站设计令牌：暖白底色、松绿主色与清晰的文本层级。 */
 :root {
-  /* —— 主色板 —— */
-  --sp-color-primary: #2456c7;
-  --sp-color-primary-hover: #3a6ad6;
-  --sp-color-primary-pressed: #1c439d;
-  --sp-color-primary-weak: #e8effc;
-  --sp-color-success: #1f9d55;
-  --sp-color-warning: #b7791f;
-  --sp-color-error: #c0392b;
-
-  /* —— 文本层级 —— */
-  --sp-color-text-1: #1a2233;
-  --sp-color-text-2: #4a5468;
-  --sp-color-text-3: #8a94a6;
-
-  /* —— 描边与背景 —— */
-  --sp-color-border: #dde3ec;
-  --sp-color-border-strong: #c6cede;
-  --sp-color-bg-page: #f4f6fa;
+  --sp-color-primary: #32664f;
+  --sp-color-primary-hover: #437c62;
+  --sp-color-primary-pressed: #244e3c;
+  --sp-color-primary-weak: #eaf1e8;
+  --sp-color-success: #367655;
+  --sp-color-warning: #a5752e;
+  --sp-color-error: #bd5147;
+  --sp-color-text-1: #27382e;
+  --sp-color-text-2: #59675e;
+  --sp-color-text-3: #727d72;
+  --sp-color-border: #e1e5dc;
+  --sp-color-border-strong: #cbd3c5;
+  --sp-color-bg-page: #f7f8f3;
   --sp-color-bg-card: #ffffff;
-  --sp-color-bg-hover: #f0f4fb;
-
-  /* —— 圆角 —— */
+  --sp-color-bg-hover: #f1f4ed;
   --sp-radius-sm: 6px;
   --sp-radius-md: 10px;
   --sp-radius-lg: 14px;
-
-  /* —— 间距刻度（4 的倍数） —— */
   --sp-space-1: 4px;
   --sp-space-2: 8px;
   --sp-space-3: 12px;
@@ -47,24 +26,17 @@
   --sp-space-6: 24px;
   --sp-space-8: 32px;
   --sp-space-10: 40px;
-
-  /* —— 字体 —— */
-  --sp-font-family: 'Inter', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei',
-    'Helvetica Neue', Arial, sans-serif;
-  /* 等宽字体：Markdown 行内代码与代码块使用 */
-  --sp-font-family-mono: 'JetBrains Mono', 'SFMono-Regular', Consolas, 'Liberation Mono',
-    Menlo, monospace;
+  --sp-font-family: 'Aptos', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --sp-font-family-mono: 'Cascadia Code', Consolas, monospace;
   --sp-font-size-xs: 12px;
   --sp-font-size-sm: 13px;
   --sp-font-size-base: 14px;
+  --sp-font-size-md: 14px;
   --sp-font-size-lg: 16px;
-  --sp-font-size-xl: 20px;
-  --sp-font-size-xxl: 26px;
-
-  /* —— 阴影 —— */
-  --sp-shadow-card: 0 1px 2px rgba(26, 34, 51, 0.06), 0 4px 16px rgba(26, 34, 51, 0.06);
-  --sp-shadow-pop: 0 6px 24px rgba(26, 34, 51, 0.14);
-
+  --sp-font-size-xl: 24px;
+  --sp-font-size-xxl: 30px;
+  --sp-shadow-card: 0 4px 20px #263d2c08, 0 12px 32px #263d2c06;
+  --sp-shadow-pop: 0 12px 40px #263d2c1f;
   color: var(--sp-color-text-1);
   font-family: var(--sp-font-family);
   font-size: var(--sp-font-size-base);
@@ -72,26 +44,55 @@
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; min-height: 100%; background: var(--sp-color-bg-page); }
+#app { min-height: 100vh; }
+::selection { background: #d9e6c9; color: #254a36; }
+:focus-visible { outline: 2px solid var(--sp-color-primary); outline-offset: 3px; }
+button, input, textarea { font: inherit; }
+a { text-underline-offset: 3px; }
 
-/* 基础重置与页面底色 */
-* {
-  box-sizing: border-box;
-}
+/* 共用业务页面布局，让列表、详情与弹层遵循相同的空间节奏。 */
+.app-content :is(.knowledge-page, .approvals-page, .members-page, .knowledge-detail-page, .approval-detail-page) { max-width: 1280px; }
+.app-content .page-head { padding: 4px 0 20px; border-bottom: 1px solid var(--sp-color-border); margin-bottom: 6px; }
+.app-content .page-title { font-size: 26px; letter-spacing: -.7px; font-weight: 600; }
+.app-content :is(.filters, .filter-bar) { padding: 16px; background: #fff; border: 1px solid var(--sp-color-border); border-radius: 12px; }
+.app-content :is(.list-state, .page-empty) { min-height: 300px; padding: 32px; background: #ffffffa6; border: 1px dashed #d5ddce; border-radius: 12px; }
+.app-content :is(.doc-card, .member-row) { padding: 21px 23px; transition: border-color .18s, box-shadow .18s; }
+.app-content :is(.doc-card, .member-row):hover { border-color: #b7c7ae; box-shadow: 0 4px 18px #24473106; }
+.app-content .doc-title-row::before { content: ''; flex-shrink: 0; width: 7px; height: 20px; border-radius: 3px; background: #a8bd96; }
+.app-content .member-name-line::before { content: ''; width: 10px; height: 10px; border-radius: 50%; background: #94af85; }
+.app-content .filter-tabs { padding: 6px 20px 0; }
+.app-content .n-alert { border-radius: 10px; }
+.n-modal.n-card { width: calc(100% - 40px); }
 
-html,
-body {
-  margin: 0;
-  padding: 0;
-  min-height: 100%;
-  background: var(--sp-color-bg-page);
-}
+/* 对话区以留白和柔和背景区分会话列表、消息与输入区。 */
+.app-content .chat-page { gap: 16px; height: calc(100vh - 132px); }
+.app-content .chat-side { width: 266px; padding: 22px 12px; }
+.app-content .chat-main { box-shadow: 0 4px 24px #203e3405; }
+.app-content .chat-header { min-height: 68px; padding: 14px 26px; }
+.app-content .message-scroller { padding: 28px; background: #fafbf7; }
+.app-content .chat-composer { padding: 18px 26px 20px; }
+.app-content .message-composer { padding: 12px; border: 1px solid var(--sp-color-border); border-radius: 12px; background: #fafbf8; }
+.app-content .message-composer:focus-within { border-color: #87a580; box-shadow: 0 0 0 3px #32664f09; }
+.app-content .composer-hint { font-size: 11px; }
+.app-content .list-item { padding: 13px 12px; margin-bottom: 5px; }
+.app-content .list-item.active { border-color: #d4e0ca; }
+.app-content .bubble { padding: 15px 20px; }
+.app-content .user-bubble { border-radius: 14px 14px 4px 14px; }
+.app-content .agent-bubble { border-radius: 4px 14px 14px 14px; box-shadow: none; }
+.app-content .bubble-author { color: var(--sp-color-text-2); font-weight: 600; }
+.app-content .bubble-meta { margin-bottom: 5px; }
 
-#app {
-  min-height: 100vh;
-}
-
-/* 统一键盘焦点可见性：基本可访问性要求 */
-:focus-visible {
-  outline: 2px solid var(--sp-color-primary);
-  outline-offset: 2px;
-}
+/* 企业选择页使用相同品牌与卡片语言。 */
+.org-page .org-topbar { justify-content: space-between; align-items: center; min-height: 72px; padding-inline: 40px; }
+.org-page .org-main { max-width: 850px; padding-top: 65px; }
+.org-page .org-heading { margin-bottom: 34px; }
+.org-page .org-title { font-size: 30px; margin-bottom: 12px; }
+.org-page .org-card { border: 1px solid var(--sp-color-border); box-shadow: none; }
+.org-page .org-card .n-card__content { padding: 27px; }
+.org-page .org-card-name { overflow-wrap: anywhere; }
+.org-page .org-create-entry { height: 46px; border: 1px dashed #b7c9ab; background: #edf2e7; }
+@keyframes sp-enter { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+@media (prefers-reduced-motion: no-preference) { .app-content > * { animation: sp-enter .35s ease both; } }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }

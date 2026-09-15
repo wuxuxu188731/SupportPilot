@@ -1,26 +1,39 @@
 import type { GlobalThemeOverrides } from 'naive-ui'
 
-/*
- * Naive UI 主题覆盖：把组件默认色与 styles/tokens.css 中的设计令牌对齐，
- * 保证「企业蓝」在表单、按钮、标签等组件上保持一致。
- */
+/** Naive UI 主题与设计令牌同步，覆盖表单、菜单和业务卡片。 */
 export const themeOverrides: GlobalThemeOverrides = {
   common: {
-    primaryColor: '#2456c7',
-    primaryColorHover: '#3a6ad6',
-    primaryColorPressed: '#1c439d',
-    primaryColorSuppl: '#2456c7',
-    successColor: '#1f9d55',
-    warningColor: '#b7791f',
-    errorColor: '#c0392b',
-    borderRadius: '10px',
-    fontFamily:
-      "'Inter', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif",
+    primaryColor: '#32664f',
+    primaryColorHover: '#437c62',
+    primaryColorPressed: '#244e3c',
+    primaryColorSuppl: '#32664f',
+    successColor: '#367655',
+    warningColor: '#a5752e',
+    errorColor: '#bd5147',
+    textColorBase: '#27382e',
+    textColor1: '#27382e',
+    textColor2: '#59675e',
+    textColor3: '#727d72',
+    borderColor: '#e1e5dc',
+    borderRadius: '8px',
+    fontFamily: "'Aptos', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif",
   },
-  Button: {
-    fontWeight: '500',
-  },
-  Card: {
-    borderRadius: '14px',
+  Button: { fontWeight: '500', heightMedium: '36px', heightLarge: '44px' },
+  Card: { borderRadius: '14px', titleFontWeight: '600' },
+  Input: { borderRadius: '8px', colorFocus: '#ffffff' },
+  Tag: { borderRadius: '5px' },
+  Menu: {
+    itemTextColor: '#b9cbbf',
+    itemTextColorHover: '#ffffff',
+    itemTextColorActive: '#e0edb8',
+    itemTextColorActiveHover: '#e0edb8',
+    itemIconColor: '#9db5a5',
+    itemIconColorHover: '#ffffff',
+    itemIconColorActive: '#d7e8a5',
+    itemIconColorActiveHover: '#d7e8a5',
+    itemColorHover: '#304f40',
+    itemColorActive: '#385544',
+    itemColorActiveHover: '#3d5c49',
+    borderRadius: '8px',
   },
 }

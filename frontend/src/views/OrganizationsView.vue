@@ -12,6 +12,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { NAlert, NButton, NCard, NEmpty, NSpin, useMessage } from 'naive-ui'
 
 import RoleTag from '@/components/common/RoleTag.vue'
+import AppIcon from '@/components/common/AppIcon.vue'
 import OrganizationCreateDialog from '@/components/organization/OrganizationCreateDialog.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useOrganizationStore } from '@/stores/organization'
@@ -66,6 +67,7 @@ async function handleLogout(): Promise<void> {
   <div class="org-page">
     <!-- 顶栏：当前登录用户与退出登录 -->
     <header class="org-topbar">
+      <div class="org-brand"><AppIcon name="spark" :size="26" /> <strong>SupportPilot</strong><span>企业工作空间</span></div>
       <div class="org-user">
         <span class="org-username">当前用户：{{ authStore.currentUser?.username }}</span>
         <n-button quaternary size="small" aria-label="退出登录" @click="handleLogout">
@@ -157,6 +159,9 @@ async function handleLogout(): Promise<void> {
 </template>
 
 <style scoped>
+.org-brand { display: flex; align-items: center; gap: 12px; color: var(--sp-color-primary); }
+.org-brand strong { font-size: 21px; letter-spacing: -.5px; }
+.org-brand > span { margin-left: 10px; padding-left: 20px; border-left: 1px solid var(--sp-color-border); font-size: 12px; color: var(--sp-color-text-3); }
 .org-page {
   display: flex;
   flex-direction: column;

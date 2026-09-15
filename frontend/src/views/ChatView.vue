@@ -13,9 +13,10 @@
  */
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { NAlert, NButton, NDrawer, NDrawerContent, NEmpty, useMessage } from 'naive-ui'
+import { NAlert, NButton, NDrawer, NDrawerContent, useMessage } from 'naive-ui'
 
 import MainLayout from '@/layouts/MainLayout.vue'
+import AppIcon from '@/components/common/AppIcon.vue'
 import ConversationList from '@/components/chat/ConversationList.vue'
 import MessageList from '@/components/chat/MessageList.vue'
 import MessageComposer from '@/components/chat/MessageComposer.vue'
@@ -210,13 +211,18 @@ onMounted(() => {
           >
             {{ chatStore.notice }}
           </n-alert>
-          <n-empty description="选择一个会话，或新建会话开始客服对话" size="small">
-            <template #extra>
-              <n-button type="primary" data-test="start-new-conversation" @click="showCreateDialog = true">
-                新建会话
-              </n-button>
-            </template>
-          </n-empty>
+          <div class="chat-welcome-mark"><AppIcon name="spark" :size="38" /></div>
+          <span class="chat-eyebrow">SUPPORTPILOT · 你的 AI 客服伙伴</span>
+          <h1 class="chat-welcome-title">今天，有什么可以一起解决？</h1>
+          <p class="chat-welcome-desc">选择一个会话，或新建会话开始客服对话</p>
+          <n-button type="primary" size="large" data-test="start-new-conversation" @click="showCreateDialog = true">
+            新建会话 <AppIcon name="arrow" :size="17" class="create-arrow" />
+          </n-button>
+          <div class="chat-capabilities">
+            <div><AppIcon name="knowledge" /><strong>有据可循</strong><span>结合知识库，查找相关依据</span></div>
+            <div><AppIcon name="chat" /><strong>连贯沟通</strong><span>保留对话上下文，持续跟进</span></div>
+            <div><AppIcon name="shield" /><strong>协同处理</strong><span>关键提案，交由人工审批</span></div>
+          </div>
           <p v-if="chatStore.conversations.length > 0" class="empty-tip">
             也可在左侧会话列表中选择已有会话继续对话。
           </p>
@@ -295,6 +301,15 @@ onMounted(() => {
 </template>
 
 <style scoped>
+.chat-welcome-mark { display: grid; place-items: center; width: 80px; height: 80px; margin-bottom: 6px; border: 1px solid #d7e3c9; border-radius: 24px; background: #edf3e5; color: #537b49; transform: rotate(-7deg); }
+.chat-eyebrow { margin-top: 8px; font-size: 10px; letter-spacing: 1.5px; color: var(--sp-color-text-3); }
+.chat-welcome-title { margin: 0; font-size: clamp(21px, 2vw, 28px); font-weight: 500; letter-spacing: -.6px; text-align: center; }
+.chat-welcome-desc { margin: 0 0 10px; color: var(--sp-color-text-3); font-size: 13px; text-align: center; }
+.create-arrow { margin-left: 22px; }
+.chat-capabilities { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); width: min(100%, 620px); gap: 12px; margin-top: 36px; }
+.chat-capabilities > div { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; padding: 18px; border: 1px solid var(--sp-color-border); border-radius: 10px; background: #fafbf7; color: #65825c; }
+.chat-capabilities strong { font-size: 13px; font-weight: 500; color: var(--sp-color-text-1); }
+.chat-capabilities span { font-size: 11px; line-height: 1.8; color: var(--sp-color-text-3); }
 .chat-page {
   display: flex;
   gap: var(--sp-space-5);
