@@ -837,10 +837,12 @@ class KnowledgeIngestionService:
         bodies or the underlying traceback; ``KeyboardInterrupt`` /
         ``SystemExit`` are deliberately never swallowed.
         """
-        self._store.mark_job_running(
-            organization_id=organization_id,
-            job_id=job.job_id,
-        )
+        # 异步任务已在 claim_job 中抢占并计数；同步入口的新任务才需要启动计数。
+        if job.status is IngestionStatus.QUEUED:
+            self._store.mark_job_running(
+                organization_id=organization_id,
+                job_id=job.job_id,
+            )
         try:
             # 3. chunk + embed (embedding sees only plain chunk contents).
             chunks = self._chunker.split(

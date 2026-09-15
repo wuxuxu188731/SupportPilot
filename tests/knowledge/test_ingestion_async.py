@@ -264,6 +264,7 @@ def test_run_job_parses_chunks_embeds_and_activates(harness):
     job = harness.job(receipt.job_id)
     assert job.status is IngestionStatus.SUCCEEDED
     assert job.error_code is None
+    assert job.attempt_count == 1
 
     document = harness.store.get_document(
         organization_id=harness.organization_id,
@@ -322,6 +323,7 @@ def test_run_job_is_idempotent_for_a_finished_job(harness):
     )
 
     assert again is None
+    assert harness.job(receipt.job_id).attempt_count == 1
     assert len(harness.extractor.calls) == parses_after_first_run
     assert len(harness.vectors.upserts) == 1
 
@@ -351,6 +353,7 @@ def test_parse_failure_is_recorded_on_the_job_not_on_the_upload(harness):
     job = harness.job(receipt.job_id)
     assert job.status is IngestionStatus.FAILED
     assert job.error_code == "PARSING_UNAVAILABLE"
+    assert job.attempt_count == 1
     assert "llamaparse" not in (job.error_message or "")
 
     document = harness.store.get_document(
@@ -388,6 +391,7 @@ def test_retry_after_a_post_parse_failure_reuses_stored_text_without_reparsing(
     failed_job = harness.job(receipt.job_id)
     assert failed_job.status is IngestionStatus.FAILED
     assert failed_job.error_code == "VECTOR_STORE_UNAVAILABLE"
+    assert failed_job.attempt_count == 1
 
     # 解析产物已经落库：正文在、原始字节已清空。
     version = harness.version(receipt.version_id, receipt.document_id)
