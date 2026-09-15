@@ -18,3 +18,4 @@ python-dotenv>=1.0,<2.0
 langgraph>=1.1,<2.0
 langgraph-checkpoint-sqlite>=3.1,<4.0
 jsonschema>=4.0,<5.0  # 测试/评测直接依赖：tests/evals/test_knowledge_eval.py 校验报告 JSON Schema
+llama-cloud>=2.16,<3.0  # 文档解析：scripts/run_llamaparse_extract.py 用 LlamaParse 提取 docx/pdf
