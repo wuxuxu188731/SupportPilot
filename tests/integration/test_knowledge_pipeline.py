@@ -71,7 +71,8 @@ class FakeEmbeddingClient:
         self.embed_document_calls += 1
         return [self._vector(text) for text in texts]
 
-    def embed_query(self, text):
+    def embed_query(self, text, *, timeout_seconds=5):
+        """按正式查询接口接收超时预算，返回确定性测试向量。"""
         self._maybe_fail()
         return self._vector(text)
 
