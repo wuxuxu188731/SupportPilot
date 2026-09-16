@@ -580,6 +580,62 @@ class TestVersionActivation:
             candidate_ids=[new_chunk_id],
         ) == []
 
+    def test_resolve_active_citations_carries_exact_offsets(
+        self, store_with_two_versions
+    ):
+        # 保护行为：引用校验返回的块必须带上它在版本正文中的精确字符区间，
+        # 且满足 content == raw_text[start_offset:end_offset]——这是前端
+        # 「引用跳转到正文对应位置」唯一可信的定位依据（正文里重复出现的
+        # 文本无法靠搜索定位）。
+        store, context, document, _old, new_version = store_with_two_versions
+        raw_text = "# 退货政策\n\n签收后 7 日内可申请退货，退款 3 个工作日到账。"
+        # 用真实存在的正文覆盖默认内容，让偏移契约可以被完整断言。
+        store.record_version_content(
+            organization_id=context.organization_id,
+            document_id=document.document_id,
+            version_id=new_version.version_id,
+            content_hash="sha256:new",
+            raw_text=raw_text,
+        )
+        prefix = "签收后 7 日内可申请退货"
+        start = raw_text.index(prefix)
+        store.replace_chunks(
+            organization_id=context.organization_id,
+            document_id=document.document_id,
+            version_id=new_version.version_id,
+            chunks=[
+                DocumentChunk(
+                    chunk_id=new_chunk_id,
+                    organization_id=context.organization_id,
+                    document_id=document.document_id,
+                    version_id=new_version.version_id,
+                    ordinal=0,
+                    heading_path="退货政策",
+                    content=raw_text[start:],
+                    token_count=20,
+                    start_offset=start,
+                    end_offset=len(raw_text),
+                )
+            ],
+        )
+        store.activate_version(
+            organization_id=context.organization_id,
+            document_id=document.document_id,
+            version_id=new_version.version_id,
+            job_id=job_for(new_version).job_id,
+        )
+
+        chunks = store.resolve_active_citations(
+            organization_id=context.organization_id,
+            candidate_ids=[new_chunk_id],
+        )
+
+        assert len(chunks) == 1
+        # 边界情况：偏移必须是正文中的绝对字符位置，且区间切片与块正文逐字相等。
+        assert chunks[0].start_offset == start
+        assert chunks[0].end_offset == len(raw_text)
+        assert raw_text[chunks[0].start_offset : chunks[0].end_offset] == chunks[0].content
+
     def test_list_active_chunks_preserves_order_across_two_active_versions(
         self, store_with_document
     ):

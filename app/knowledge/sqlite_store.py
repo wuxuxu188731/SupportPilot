@@ -120,6 +120,10 @@ class SQLiteKnowledgeStore(KnowledgeStore):
             content=row["content"],
             token_count=row["token_count"],
             document_title=row["title"],
+            # 调用方的查询使用 SELECT c.*，因此偏移列本来就在结果集里；
+            # 这里映射出来，供上层构造可跳转的引用。
+            start_offset=row["start_offset"],
+            end_offset=row["end_offset"],
         )
 
     @staticmethod

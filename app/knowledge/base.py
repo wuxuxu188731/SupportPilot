@@ -99,6 +99,13 @@ class ChunkWithDocumentTitle:
     content: str
     token_count: int
     document_title: str
+    # 该块在「所属版本正文」（document_versions.raw_text）中的精确字符区间，
+    # 满足 content == raw_text[start_offset:end_offset]。它是引用跳转到正文
+    # 对应位置的唯一依据：正文里重复出现的文本无法靠搜索定位，只能靠偏移。
+    # 字符数按 Python str 计数（非 utf-8 字节数，也不是行号）。
+    start_offset: int
+    # 区间结束位置（不含），恒有 end_offset > start_offset（数据库 CHECK 约束）。
+    end_offset: int
 
 
 @dataclass(frozen=True)
