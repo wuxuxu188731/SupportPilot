@@ -1,0 +1,60 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:v1.18.2
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "/qdrant/qdrant", "--version"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env.production
+    environment:
+      CHAT_DB_PATH: /data/chat_history.db
+      LANGGRAPH_CHECKPOINT_DB_PATH: /data/langgraph_checkpoint.db
+      QDRANT_URL: http://qdrant:6333
+      LLAMAPARSE_CACHE_DIR: /data/llamaparse-cache
+    volumes:
+      - app_data:/data
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    expose:
+      - "8000"
+    restart: unless-stopped
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  frontend:
+    build:
+      context: frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: /api
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+    restart: unless-stopped
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  app_data:
+  qdrant_data:

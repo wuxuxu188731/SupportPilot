@@ -9,6 +9,7 @@ aaa.py
 *.db-shm
 *.db-wal
 .env
+.env.production
 .artifacts/
 .claude/
 *Zone.Identifier*
