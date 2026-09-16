@@ -305,43 +305,40 @@ def test_same_agent_runner_rebinds_between_tenants(tmp_path):
     assert "企业A耳机 x1" not in second_messages[2]["content"]
 
 
+# 保护行为：业务工具与传统 RAG 可在同一轮中协作，并保留知识引用。
 def test_business_and_knowledge_tools_share_one_grounded_turn(tmp_path):
     scope = build_golden_path(tmp_path)
 
-    class FakeAdaptiveService:
+    class FakeBaselineService:
         calls = []
 
         def search(self, **kwargs):
             self.calls.append(kwargs)
             payload = {
                 "ok": True,
-                "data": {
-                    "result_code": "KNOWLEDGE_FOUND",
-                    "strategy": "multi",
+                "citations": [{
+                    "citation_id": "C1",
+                    "document_id": "doc-a",
+                    "version_id": "version-a",
+                    "chunk_id": "chunk-a",
+                    "title": "Delay compensation",
+                    "heading_path": "/eligibility",
+                    "content": "Compensation applies after the promised date.",
+                }],
+                "retrieval_summary": {
+                    "strategy": "baseline",
+                    "round_count": 1,
                     "evidence_status": "sufficient",
-                    "citations": [{
-                        "citation_id": "C1",
-                        "document_id": "doc-a",
-                        "version_id": "version-a",
-                        "chunk_id": "chunk-a",
-                        "title": "Delay compensation",
-                        "heading_path": "/eligibility",
-                        "content": "Compensation applies after the promised date.",
-                    }],
-                    "retrieval_summary": {
-                        "strategy": "multi",
-                        "round_count": 1,
-                        "evidence_status": "sufficient",
-                        "latency_ms": 2,
-                    },
+                    "latency_ms": 2,
                 },
+                "error": None,
             }
             return SimpleNamespace(public_dict=lambda: payload)
 
-    adaptive = FakeAdaptiveService()
+    baseline = FakeBaselineService()
     composite = CompositeToolGateway([
         create_customer_support_tool_gateway(scope["database_path"]),
-        KnowledgeToolGateway(service=adaptive),
+        KnowledgeToolGateway(service=baseline),
     ])
     client = FakeCompletionClient([
         tool_call_response("call-order", "get_order", {"order_no": "ORD-GOLDEN-001"}),
@@ -367,9 +364,9 @@ def test_business_and_knowledge_tools_share_one_grounded_turn(tmp_path):
         if event.type == "tool_call.completed"
     ] == ["get_order", "get_logistics", "search_knowledge"]
     assert [item.citation_id for item in result.citations] == ["C1"]
-    assert result.retrieval_summary.strategy == "multi"
+    assert result.retrieval_summary.strategy == "baseline"
     assert result.answer_incomplete is False
-    assert adaptive.calls[0]["organization_id"] == scope["context"].organization_id
+    assert baseline.calls[0]["organization_id"] == scope["context"].organization_id
 
 
 def test_agent_can_retry_after_gateway_validation_failure(tmp_path):

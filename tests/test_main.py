@@ -42,6 +42,7 @@ def test_main_wires_sqlite_service_without_global_messages(
       main.support_agent_runner,
       CustomerSupportAgentRunner,
   )
+  assert main.knowledge_tool_gateway._service is main.knowledge_services.baseline
   assert {
       item["function"]["name"]
       for item in main.support_tool_gateway.definitions

@@ -18,22 +18,19 @@ class RecordingService:
         return SimpleNamespace(
             public_dict=lambda: {
                 "ok": True,
-                "data": {
-                    "result_code": "SEARCH_NOT_NEEDED",
-                    "strategy": "none",
-                    "evidence_status": "not_needed",
-                    "citations": [],
-                    "retrieval_summary": {
-                        "strategy": "none",
-                        "round_count": 0,
-                        "evidence_status": "not_needed",
-                        "latency_ms": 1,
-                    },
+                "citations": [],
+                "retrieval_summary": {
+                    "strategy": "baseline",
+                    "round_count": 1,
+                    "evidence_status": "insufficient",
+                    "latency_ms": 1,
                 },
+                "error": None,
             }
         )
 
 
+# 保护行为：模型只能提供原始查询文本，租户与检索参数均由服务端控制。
 def test_bound_search_uses_server_context_and_only_question():
     service = RecordingService()
     gateway = KnowledgeToolGateway(service=service)
@@ -48,10 +45,13 @@ def test_bound_search_uses_server_context_and_only_question():
         }
     ]
     assert payload["ok"] is True
+    assert payload["data"]["strategy"] == "baseline"
+    assert payload["data"]["result_code"] == "INSUFFICIENT_EVIDENCE"
     schema = gateway.definitions[0]["function"]["parameters"]
     assert set(schema["properties"]) == {"question"}
 
 
+# 边界情况：模型不得通过额外字段控制租户、身份或检索预算。
 @pytest.mark.parametrize(
     "field", ["organization_id", "user_id", "role", "top_k", "rounds"]
 )
@@ -64,14 +64,19 @@ def test_knowledge_tool_rejects_model_controlled_fields(field):
     assert result["error"]["code"] == "INVALID_ARGUMENTS"
 
 
-def test_bound_gateway_allows_one_search_per_request():
+# 保护行为：复杂问题可在同一请求内使用不同 query 连续检索两到三次。
+def test_bound_gateway_allows_multiple_searches_per_request():
     service = RecordingService()
     gateway = KnowledgeToolGateway(service=service)
     fn = gateway.bind(context=ORG_A)["search_knowledge"]
     assert fn(question="returns")["ok"] is True
-    second = fn(question="warranty")
-    assert second["error"]["code"] == "SEARCH_BUDGET_EXCEEDED"
-    assert len(service.calls) == 1
+    assert fn(question="warranty")["ok"] is True
+    assert fn(question="shipping exclusions")["ok"] is True
+    assert [call["question"] for call in service.calls] == [
+        "returns",
+        "warranty",
+        "shipping exclusions",
+    ]
     assert gateway.bind(context=ORG_A)["search_knowledge"](
         question="new request"
     )["ok"] is True

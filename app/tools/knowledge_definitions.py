@@ -12,7 +12,9 @@ def get_knowledge_tool_definitions() -> list[dict]:
             "function": {
                 "name": "search_knowledge",
                 "description": (
-                    "Search the current organization's trusted policy knowledge."
+                    "检索当前企业可信知识库。将你要查询的内容直接作为 question；"
+                    "简单问题调用 1 次，涉及多个独立主题或条件的复杂问题可拆分为"
+                    "不同 query 调用 2-3 次，再综合各次检索结果回答。"
                 ),
                 "parameters": schema,
             },

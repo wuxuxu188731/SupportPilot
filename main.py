@@ -114,10 +114,8 @@ get_current_tenant = create_current_tenant_dependency(
     get_current_user=get_current_user,
 )
 
-# NOTE (I4 / Stage A): `knowledge_services.baseline` (the Baseline retriever) is
-# deliberately NOT exposed over HTTP in Stage A. Only ingestion + store are wired
-# into create_knowledge_router below. Stage B registers the baseline retriever as
-# an agent tool.
+# 知识库管理 HTTP 路由只暴露入库与存储能力；传统 RAG 检索仅作为 Agent
+# 工具使用，不额外开放公共检索接口。
 knowledge_services = create_knowledge_services(
     database_path=database_path,
     settings=get_knowledge_settings(),
@@ -125,7 +123,7 @@ knowledge_services = create_knowledge_services(
     model_name=MODEL_NAME,
 )
 knowledge_tool_gateway = KnowledgeToolGateway(
-  service=knowledge_services.adaptive,
+  service=knowledge_services.baseline,
 )
 # 动作工具 Gateway（设计 12）：只暴露 propose_refund / propose_compensation /
 # get_action_status；审批、恢复与执行不进入工具面，只能通过认证 HTTP API。
