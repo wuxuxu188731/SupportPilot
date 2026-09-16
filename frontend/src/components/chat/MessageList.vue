@@ -19,7 +19,7 @@ import { nextTick, ref, watch } from 'vue'
 import { NSpin, NEmpty } from 'naive-ui'
 
 import type { ChatMessageView } from '@/stores/chat'
-import type { RetrievalSummary } from '@/api/types'
+import type { CitationTarget, RetrievalSummary } from '@/api/types'
 import { formatMessageTime } from '@/utils/time'
 import AssistantAnswer from '@/components/chat/AssistantAnswer.vue'
 import CitationList from '@/components/chat/CitationList.vue'
@@ -39,6 +39,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   /** 待审批卡片「查看审批」：上抛给 ChatView 进行路由跳转 */
   'open-approval': [approvalId: string]
+  /** 引用卡片「查看原文位置」：上抛结构化定位信息给 ChatView */
+  'open-document': [payload: CitationTarget]
 }>()
 
 /** 消息滚动容器。 */
@@ -160,7 +162,11 @@ function messageTimeText(createdAt: string): string {
             <p v-if="message.structured.retrieval_summary" class="retrieval-summary" data-test="retrieval-summary">
               {{ retrievalSummaryText(message.structured.retrieval_summary) }}
             </p>
-            <CitationList v-if="message.structured.citations.length > 0" :citations="message.structured.citations" />
+            <CitationList
+              v-if="message.structured.citations.length > 0"
+              :citations="message.structured.citations"
+              @open-document="(payload) => emit('open-document', payload)"
+            />
             <AgentEventTimeline v-if="message.structured.events.length > 0" :events="message.structured.events" />
             <div v-if="message.structured.pending_approvals.length > 0" class="pending-approvals" data-test="pending-approvals">
               <p class="pending-heading">待审批提案</p>

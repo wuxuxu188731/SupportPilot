@@ -1,5 +1,6 @@
 /*
- * 知识引用列表测试：结构化 citations 展示文档标题/路径/正文/辅助标识。
+ * 知识引用列表测试：结构化 citations 展示文档标题/路径/正文/辅助标识，
+ * 以及「查看原文位置」入口（结构化载荷、无偏移时降级、键盘可达）。
  * 测试数据来自结构化字段，不解析回答文本。
  */
 
@@ -7,7 +8,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { describe, expect, it } from 'vitest'
 
 import CitationList from '@/components/chat/CitationList.vue'
-import type { Citation } from '@/api/types'
+import type { Citation, CitationTarget } from '@/api/types'
 
 const CITATIONS: Citation[] = [
   {
@@ -18,8 +19,15 @@ const CITATIONS: Citation[] = [
     title: '退货与换货政策',
     heading_path: '2. 退货流程',
     content: '消费者可在签收后 7 日内申请退货。',
+    start_offset: 120,
+    end_offset: 138,
   },
 ]
+
+/** 构造一条引用（默认带偏移，便于覆盖降级场景）。 */
+function citation(partial: Partial<Citation> = {}): Citation {
+  return { ...CITATIONS[0], ...partial }
+}
 
 describe('CitationList 引用列表', () => {
   it('渲染引用编号、文档标题与引用正文', async () => {
@@ -58,5 +66,82 @@ describe('CitationList 引用列表', () => {
     await flushPromises()
 
     expect(wrapper.text()).not.toContain('章节：null')
+  })
+})
+
+describe('CitationList「查看原文位置」入口', () => {
+  it('每条引用都有键盘可达的查看入口（button 而非 div）', async () => {
+    // 保护行为：跳转正文是操作而不是展示，必须是可聚焦、可键盘触发的 button
+    const wrapper = mount(CitationList, {
+      props: { citations: [citation(), citation({ citation_id: 'C2' })] },
+    })
+    await flushPromises()
+
+    const buttons = wrapper.findAll('button[data-test^="open-document-"]')
+    expect(buttons).toHaveLength(2)
+    expect(buttons[0].element.tagName).toBe('BUTTON')
+    expect(buttons[0].text()).toBe('查看原文位置')
+  })
+
+  it('emit 的载荷是结构化字段，不从回答文本或引用正文解析', async () => {
+    // 保护行为：跳转载荷必须逐字段取自 citations（文档、版本、偏移、标题路径）
+    const wrapper = mount(CitationList, { props: { citations: CITATIONS } })
+    await flushPromises()
+
+    await wrapper.find('[data-test="open-document-C1"]').trigger('click')
+
+    const emitted = wrapper.emitted('openDocument')
+    expect(emitted).toHaveLength(1)
+    expect(emitted?.[0]?.[0]).toEqual({
+      documentId: 'doc-1',
+      versionId: 'ver-3',
+      startOffset: 120,
+      endOffset: 138,
+      headingPath: '2. 退货流程',
+      title: '退货与换货政策',
+    } satisfies CitationTarget)
+  })
+
+  it('偏移为 null 时入口仍可用，但不再声称"定位"', async () => {
+    // 边界情况：后端允许偏移为空（决策 2），此时降级为「查看来源文档」
+    const wrapper = mount(CitationList, {
+      props: { citations: [citation({ start_offset: null, end_offset: null })] },
+    })
+    await flushPromises()
+
+    const button = wrapper.find('[data-test="open-document-C1"]')
+    expect(button.text()).toBe('查看来源文档')
+
+    await button.trigger('click')
+    const payload = wrapper.emitted('openDocument')?.[0]?.[0] as CitationTarget
+    expect(payload.startOffset).toBeNull()
+    expect(payload.endOffset).toBeNull()
+    // 标题路径仍然带上，供查看器回退到所属章节
+    expect(payload.headingPath).toBe('2. 退货流程')
+  })
+
+  it('旧载荷缺少偏移字段时同样按降级处理（undefined 等价 null）', async () => {
+    // 边界情况：历史载荷不含两个偏移字段，`== null` 判断必须同时覆盖 undefined
+    const legacy = citation()
+    delete legacy.start_offset
+    delete legacy.end_offset
+    const wrapper = mount(CitationList, { props: { citations: [legacy] } })
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="open-document-C1"]').text()).toBe('查看来源文档')
+  })
+
+  it('偏移为 0 时仍视为可精确定位（不得用取反判断）', async () => {
+    // 边界情况：片段恰好在正文开头时 start_offset === 0；
+    // 用 !start_offset 判断会把合法定位误判成无偏移
+    const wrapper = mount(CitationList, {
+      props: { citations: [citation({ start_offset: 0, end_offset: 12 })] },
+    })
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="open-document-C1"]').text()).toBe('查看原文位置')
+    await wrapper.find('[data-test="open-document-C1"]').trigger('click')
+    const payload = wrapper.emitted('openDocument')?.[0]?.[0] as CitationTarget
+    expect(payload.startOffset).toBe(0)
   })
 })

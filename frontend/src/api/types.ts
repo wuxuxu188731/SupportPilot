@@ -264,6 +264,25 @@ export interface RetrievalSummary {
   latency_ms: number
 }
 
+/** 引用跳转载荷：从引用卡片（CitationList）上抛的**结构化**定位信息。
+ *
+ *  全部字段直接取自 citations 元素；禁止从回答文本或引用正文里解析，
+ *  也禁止在跳转链路上重新猜测版本或偏移。 */
+export interface CitationTarget {
+  /** 来源文档标识 */
+  documentId: string
+  /** 来源版本标识（偏移相对该版本正文，必须一并携带） */
+  versionId: string
+  /** 引用片段起始字符偏移；null 表示无法精确定位（降级为只打开文档） */
+  startOffset: number | null
+  /** 引用片段结束字符偏移（不含）；null 表示无法精确定位 */
+  endOffset: number | null
+  /** 引用标题路径：偏移不可用时用于回退到所属章节 */
+  headingPath: string | null
+  /** 文档标题（仅用于面板头部占位；正文响应里的标题才是服务端可信来源） */
+  title: string
+}
+
 /** 待审批提案摘要（后端 PendingApproval）。
  *  唯一可信来源是聊天响应的该结构化数组，禁止从自然语言解析 Approval ID。 */
 export interface PendingApproval {

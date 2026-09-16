@@ -74,6 +74,8 @@ const STRUCTURED: LLMResponse = {
       title: '引用文档',
       heading_path: null,
       content: '引用正文内容',
+      start_offset: 3,
+      end_offset: 11,
     },
   ],
   retrieval_summary: {
@@ -127,8 +129,29 @@ describe('MessageList 基础消息渲染', () => {
   })
 })
 
-describe('MessageList 历史消息安全性', () => {
-  it('历史消息不伪造引用与审批卡片', async () => {
+describe('MessageList 引用跳转透传', () => {
+  it('引用卡片的查看入口会把结构化载荷上抛给 ChatView', async () => {
+    // 保护行为：MessageList 只做透传，不解析也不改写引用定位信息
+    const wrapper = mountList([
+      userMessage('问题', 'live'),
+      assistantLiveMessage({ sendState: 'ok', structured: STRUCTURED }),
+    ])
+    await flushPromises()
+
+    await wrapper.find('[data-test="open-document-C1"]').trigger('click')
+
+    const emitted = wrapper.emitted('open-document')
+    expect(emitted).toHaveLength(1)
+    expect(emitted?.[0]?.[0]).toMatchObject({
+      documentId: 'doc-1',
+      versionId: 'ver-1',
+      startOffset: 3,
+      endOffset: 11,
+    })
+  })
+})
+
+describe('MessageList 历史消息安全性', () => {  it('历史消息不伪造引用与审批卡片', async () => {
     // 安全边界：服务端历史不含结构化信息，界面不得从文本猜测并伪造
     // 引用卡片/审批卡片（覆盖测试 25）
     const wrapper = mountList([
