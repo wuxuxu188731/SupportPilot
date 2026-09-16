@@ -132,6 +132,7 @@ class _Store:
 
 
 def _chunk(chunk_id, *, tokens=10):
+    content = f"trusted content {chunk_id}"
     return ChunkWithDocumentTitle(
         chunk_id=chunk_id,
         organization_id="org-a",
@@ -139,9 +140,12 @@ def _chunk(chunk_id, *, tokens=10):
         version_id="version-1",
         ordinal=0,
         heading_path="/returns",
-        content=f"trusted content {chunk_id}",
+        content=content,
         token_count=tokens,
         document_title="Returns",
+        # 区间与 content 自洽：内容取自 raw_text[0:len(content)]。
+        start_offset=0,
+        end_offset=len(content),
     )
 
 
@@ -216,6 +220,10 @@ def test_single_runs_one_query_and_returns_grounded_citation(adaptive_scope):
         "return window"
     ]
     assert [item.citation_id for item in result.citations] == ["C1"]
+    # 保护行为：Agentic Search 的引用同样要带块在版本正文中的精确区间，
+    # 否则 Baseline 能跳转而 Adaptive 不能跳转（两条链路行为不一致）。
+    assert result.citations[0].start_offset == 0
+    assert result.citations[0].end_offset == len("trusted content c1")
     assert result.retrieval_summary.round_count == 1
     assert result.retrieval_summary.strategy == "single"
     assert len(adaptive_scope.store.events) == 1

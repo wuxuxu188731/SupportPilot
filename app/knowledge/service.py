@@ -454,6 +454,10 @@ class AdaptiveKnowledgeSearchService:
                 title=item.chunk.document_title,
                 heading_path=item.chunk.heading_path,
                 content=item.chunk.content,
+                # 与 Baseline 一致：引用必须带上块在版本正文中的精确区间，
+                # 否则前端只能「打开文档」而不能定位到具体位置。
+                start_offset=item.chunk.start_offset,
+                end_offset=item.chunk.end_offset,
             )
             for index, item in enumerate(items, start=1)
         ]

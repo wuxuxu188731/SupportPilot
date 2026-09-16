@@ -49,7 +49,28 @@ def test_citation_serializes_public_fields():
         "title": "七天无理由退货政策",
         "heading_path": "/退货政策/时限",
         "content": "退货期限为收货后七天内。",
+        # 未提供偏移时序列化为 null：前端据此降级为「只打开来源文档」。
+        "start_offset": None,
+        "end_offset": None,
     }
+
+
+def test_citation_serializes_chunk_offsets_when_present():
+    # 保护行为：带偏移的引用必须把区间透出到 HTTP/工具结果，前端才有定位依据。
+    citation = Citation(
+        citation_id="C2",
+        document_id="doc-1",
+        version_id="version-1",
+        chunk_id="chunk-2",
+        title="七天无理由退货政策",
+        heading_path="/退货政策/时限",
+        content="退货期限为收货后七天内。",
+        start_offset=12,
+        end_offset=24,
+    )
+    payload = citation.public_dict()
+    assert payload["start_offset"] == 12
+    assert payload["end_offset"] == 24
 
 
 def test_retrieval_summary_serializes_without_internal_reasoning():

@@ -28,6 +28,9 @@ def _scored(
             content=content,
             token_count=10,
             document_title="测试文档",
+            # 本文件只验证重排，偏移取与 content 自洽的 0 起点即可。
+            start_offset=0,
+            end_offset=len(content),
         ),
         fused_score=score,
     )

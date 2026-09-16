@@ -42,6 +42,14 @@ class Citation:
     title: str
     heading_path: str | None
     content: str
+    # 该片段在「所属版本正文」（document_versions.raw_text）中的起始字符偏移。
+    # 前端据此在正文里滚动并高亮引用位置；正文中重复出现的文本无法靠搜索定位，
+    # 因此偏移是唯一可信的定位依据。取 None 表示无法精确定位（例如历史数据或
+    # 由测试/评测直接构造的引用），此时前端降级为「只打开来源文档」。
+    start_offset: int | None = None
+    # 区间结束位置（不含），满足 raw_text[start_offset:end_offset] == content。
+    # 与 start_offset 同生同灭：两者要么都可信，要么都为 None。
+    end_offset: int | None = None
 
     def public_dict(self) -> dict:
         return _public_dict(self)

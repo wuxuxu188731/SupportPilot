@@ -679,6 +679,9 @@ def test_historical_fused_candidate_replay_recalls_every_golden_section():
                     content="",
                     token_count=item["token_count"],
                     document_title=item["document_key"],
+                    # 历史回放只关心排序与预算，正文为空故偏移取空区间 [0, 0)。
+                    start_offset=0,
+                    end_offset=0,
                 )
             )
             document_key_by_chunk[item["chunk_id"]] = item["document_key"]

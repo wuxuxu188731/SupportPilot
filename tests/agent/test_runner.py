@@ -205,9 +205,10 @@ def test_run_one_turn_requires_positive_tool_round_limit(max_tool_rounds):
     )
 
 
-def _knowledge_payload(*citation_ids, sufficient=True):
-  citations = [
-    {
+def _knowledge_payload(*citation_ids, sufficient=True, with_offsets=True):
+  citations = []
+  for citation_id in citation_ids:
+    citation = {
       "citation_id": citation_id,
       "document_id": "doc-1",
       "version_id": "version-1",
@@ -216,8 +217,11 @@ def _knowledge_payload(*citation_ids, sufficient=True):
       "heading_path": "/window",
       "content": "trusted policy",
     }
-    for citation_id in citation_ids
-  ]
+    if with_offsets:
+      # 与真实服务端一致：引用携带块在版本正文中的字符区间。
+      citation["start_offset"] = 120
+      citation["end_offset"] = 134
+    citations.append(citation)
   return {
     "ok": sufficient,
     "data": {
@@ -257,6 +261,33 @@ def test_validate_final_citations_rejects_unknown_and_missing_required():
   )
   assert missing.missing_required_citation is True
   assert missing.answer_incomplete is True
+
+
+def test_validate_final_citations_preserves_chunk_offsets():
+  # 保护行为：引用对象是从工具体返回的 dict 重建的（Citation(**dict)），
+  # 因此新增的 start_offset / end_offset 必须能穿过这条链路保留下来——
+  # 否则前端拿不到定位依据，也无法察觉（重建成功但不带偏移）。
+  validation = validate_final_citations(
+    "Window [C1].", _knowledge_payload("C1")
+  )
+  assert len(validation.citations) == 1
+  citation = validation.citations[0]
+  assert citation.start_offset == 120
+  assert citation.end_offset == 134
+  # HTTP 序列化必须一并输出这两个字段（前端只读 public_dict 的形状）。
+  assert citation.public_dict()["start_offset"] == 120
+  assert citation.public_dict()["end_offset"] == 134
+
+
+def test_validate_final_citations_tolerates_legacy_payload_without_offsets():
+  # 边界情况：不含偏移的历史/降级载荷不得让重建失败，偏移应回落为 None，
+  # 由前端按「无法精确定位」处理。
+  validation = validate_final_citations(
+    "Window [C1].", _knowledge_payload("C1", with_offsets=False)
+  )
+  assert len(validation.citations) == 1
+  assert validation.citations[0].start_offset is None
+  assert validation.citations[0].end_offset is None
 
 
 def test_runner_emits_content_free_citation_invalid_event():

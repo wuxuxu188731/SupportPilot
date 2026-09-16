@@ -34,6 +34,7 @@ def _chunk_ref(
     content="policy content",
     token_count=10,
     organization_id="org-a",
+    start_offset=0,
 ):
     return ChunkWithDocumentTitle(
         chunk_id=chunk_id,
@@ -45,6 +46,10 @@ def _chunk_ref(
         content=content,
         token_count=token_count,
         document_title=title,
+        # 默认给出与 content 自洽的区间（测试正文为 "policy content"，
+        # 恰为 raw_text[0:14]），需要别的区间时由调用方覆盖 start_offset。
+        start_offset=start_offset,
+        end_offset=start_offset + len(content),
     )
 
 
@@ -626,3 +631,35 @@ def test_trace_explains_budget_filter_top_k_and_duplicate_decisions(
     serialized = json.dumps(result.retrieval_trace.to_dict(), ensure_ascii=False)
     assert "policy content" not in serialized
     assert "诊断候选选择" not in serialized
+
+
+def test_build_citations_carries_chunk_offsets_for_frontend_jump():
+    # 保护行为：Baseline 构造的引用必须带上块在版本正文中的精确区间，
+    # 且区间与引用正文一一对应（前端按该区间在正文里滚动并高亮）。
+    selected = [
+        _chunk_ref(
+            chunk_id="chunk-a0",
+            content="签收后 7 日内可申请退货",
+            start_offset=120,
+        ),
+        _chunk_ref(
+            chunk_id="chunk-a1",
+            content="退款 3 个工作日到账",
+            start_offset=400,
+        ),
+    ]
+
+    citations = BaselineKnowledgeSearchService._build_citations(selected)
+
+    assert [
+        (citation.citation_id, citation.start_offset, citation.end_offset)
+        for citation in citations
+    ] == [
+        ("C1", 120, 120 + len("签收后 7 日内可申请退货")),
+        ("C2", 400, 400 + len("退款 3 个工作日到账")),
+    ]
+    # 区间长度必须等于引用正文长度，否则前端高亮会错位。
+    for citation in citations:
+        assert (
+            citation.end_offset - citation.start_offset == len(citation.content)
+        )

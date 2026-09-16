@@ -387,6 +387,9 @@ class BaselineKnowledgeSearchService:
                 title=ref.document_title,
                 heading_path=ref.heading_path,
                 content=ref.content,
+                # 带上块在版本正文中的精确区间，供前端跳转到正文对应位置。
+                start_offset=ref.start_offset,
+                end_offset=ref.end_offset,
             )
             for i, ref in enumerate(selected, start=1)
         ]

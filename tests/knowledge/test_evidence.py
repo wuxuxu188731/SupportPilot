@@ -33,6 +33,7 @@ def multi_plan(*queries):
 
 
 def evidence(score=0.8, matched=(0, 1)):
+    content = "seven day return window"
     return RoundEvidence(
         chunk=ChunkWithDocumentTitle(
             chunk_id="chunk-1",
@@ -41,9 +42,12 @@ def evidence(score=0.8, matched=(0, 1)):
             version_id="version-1",
             ordinal=0,
             heading_path="/returns",
-            content="seven day return window",
+            content=content,
             token_count=5,
             document_title="Returns",
+            # 区间与 content 自洽（该断言不需要真实正文，只需偏移可携带）。
+            start_offset=0,
+            end_offset=len(content),
         ),
         fused_score=score,
         matched_query_indexes=matched,
