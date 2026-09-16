@@ -20,6 +20,13 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { getDocumentVersionContent, getKnowledgeDocumentDetail } from '@/api/knowledge'
 import type { DocumentContentOutlineItem, DocumentContentResponse } from '@/api/knowledgeTypes'
 import {
+  invalidateCachedContent,
+  readCachedActiveVersionNo,
+  readCachedContent,
+  writeCachedActiveVersionNo,
+  writeCachedContent,
+} from '@/utils/documentContentCache'
+import {
   clearHighlight,
   locateElementByOffset,
   locateRangeByOffsets,
@@ -46,8 +53,6 @@ type LocateMode = 'exact' | 'fallback' | 'none'
 const content = ref<DocumentContentResponse | null>(null)
 const loading = ref(false)
 const error = ref<string | null>(null)
-/** 会话内缓存：key 为 `documentId/versionId`，避免重复请求同一版本 */
-const cache = new Map<string, DocumentContentResponse>()
 
 const bodyRef = ref<HTMLElement | null>(null)
 const locateMode = ref<LocateMode>('none')
@@ -71,12 +76,18 @@ const activeVersionNo = ref<number | null>(null)
  * 读取当前有效版本的序号。
  *
  * 为什么需要额外一次请求：正文响应只带本次版本的 version_no，而历史版本提示要求
- * 上屏「当前有效版本 vM」，只能从文档详情的版本列表里取；只在确实是历史版本时才请求。
+ * 上屏「当前有效版本 vM」，只能从文档详情的版本列表里取；只在确实是历史版本时才请求，
+ * 且按文档缓存结果（同一文档内切换引用不重复请求详情）。
  */
 async function loadActiveVersionNo(): Promise<void> {
   const current = content.value
   if (current === null || current.active_version_id === null) return
   const documentId = current.document_id
+  const cached = readCachedActiveVersionNo(documentId)
+  if (cached !== undefined) {
+    activeVersionNo.value = cached
+    return
+  }
   try {
     const detail = await getKnowledgeDocumentDetail(documentId)
     // 企业切换或文档切换后丢弃迟到结果
@@ -85,6 +96,7 @@ async function loadActiveVersionNo(): Promise<void> {
       (version) => version.version_id === detail.active_version_id,
     )
     activeVersionNo.value = active?.version_no ?? null
+    if (active !== undefined) writeCachedActiveVersionNo(documentId, active.version_no)
   } catch {
     // 取不到版本号不影响正文阅读：提示里退回「其它版本」
     activeVersionNo.value = null
@@ -99,8 +111,7 @@ const hasOutline = computed(() => (content.value?.outline.length ?? 0) > 0)
  * 并发保护：只有最后一次请求的结果会写回状态。
  */
 async function load(force = false): Promise<void> {
-  const key = `${props.documentId}/${props.versionId}`
-  const cached = cache.get(key)
+  const cached = readCachedContent(props.documentId, props.versionId)
   if (!force && cached !== undefined) {
     content.value = cached
     error.value = null
@@ -118,7 +129,7 @@ async function load(force = false): Promise<void> {
     const response = await getDocumentVersionContent(documentId, versionId)
     // 请求期间目标已切换：丢弃本次结果，避免把旧版本正文显示在新引用上
     if (props.documentId !== documentId || props.versionId !== versionId) return
-    cache.set(key, response)
+    writeCachedContent(response)
     content.value = response
   } catch {
     if (props.documentId !== documentId || props.versionId !== versionId) return
@@ -227,8 +238,7 @@ function scrollToOutlineItem(item: DocumentContentOutlineItem): void {
 
 /** 重试：绕过缓存强制重新请求。 */
 function retry(): void {
-  const key = `${props.documentId}/${props.versionId}`
-  cache.delete(key)
+  invalidateCachedContent(props.documentId, props.versionId)
   void load(true)
 }
 

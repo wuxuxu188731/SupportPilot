@@ -9,9 +9,12 @@
  *    回到 /app/chat 并显示「会话不存在或已不可访问」提示；
  *  - 切换企业/退出登录：tenantReset 清理聊天状态，本页监听企业变化后
  *    回到会话列表重新加载，防止旧企业数据污染新企业页面；
- *  - 桌面端左侧会话列表常驻；窄屏使用抽屉切换会话列表。
+ *  - 桌面端左侧会话列表常驻；窄屏使用抽屉切换会话列表；
+ *  - 引用「查看原文位置」：桌面（>=1280px）在右侧内嵌正文面板同屏并排，
+ *    窄屏降级为整页跳转到知识库文档详情页；面板状态只存在本页局部状态，
+ *    不写 localStorage，切换企业时随 tenantReset 关闭。
  */
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { NAlert, NButton, NDrawer, NDrawerContent, useMessage } from 'naive-ui'
 
@@ -22,6 +25,8 @@ import MessageList from '@/components/chat/MessageList.vue'
 import MessageComposer from '@/components/chat/MessageComposer.vue'
 import NewConversationDialog from '@/components/chat/NewConversationDialog.vue'
 import ConversationSettingsDialog from '@/components/chat/ConversationSettingsDialog.vue'
+import DocumentContentPanel from '@/components/chat/DocumentContentPanel.vue'
+import type { CitationTarget } from '@/api/types'
 import { useChatStore } from '@/stores/chat'
 import { useOrganizationStore } from '@/stores/organization'
 
@@ -39,6 +44,27 @@ const showCreateDialog = ref(false)
 const showSettingsDialog = ref(false)
 /** 窄屏会话列表抽屉显隐。 */
 const showMobileList = ref(false)
+
+/** 同屏并排正文面板的最小宽度（低于该宽度走整页降级，避免把对话区压坏）。 */
+const DOC_PANEL_MIN_WIDTH = 1280
+const DOC_PANEL_MEDIA_QUERY = `(min-width: ${DOC_PANEL_MIN_WIDTH}px)`
+
+/** 是否允许同屏并排（桌面 >= 1280px）。 */
+const canShowDocPanel = ref(false)
+
+/** 当前正文面板的定位目标；null 表示面板关闭。 */
+const docTarget = ref<CitationTarget | null>(null)
+
+/** 媒体查询：只监听宽度变化，不在滚动/尺寸变化时做任何重排。 */
+let docPanelMedia: MediaQueryList | null = null
+
+/** 按媒体查询同步"是否允许并排"。 */
+function syncDocPanelMedia(event?: MediaQueryListEvent): void {
+  canShowDocPanel.value = event === undefined ? (docPanelMedia?.matches ?? false) : event.matches
+}
+
+/** 面板是否真正显示：窄屏即便有目标也不并排（走整页降级）。 */
+const showDocPanel = computed(() => canShowDocPanel.value && docTarget.value !== null)
 
 /** 路由参数中的会话 id（无参路由为 null）。 */
 const routeConversationId = computed(() => {
@@ -114,6 +140,36 @@ function onOpenApproval(approvalId: string): void {
   void router.push({ name: 'approval-detail', params: { approvalId } })
 }
 
+/**
+ * 引用卡片「查看原文位置」：打开来源文档正文并定位到引用区间。
+ *
+ * 窄屏（< 1280px）不做挤压式并排，改为整页跳转到知识库文档详情页并带上定位参数，
+ * 由该页复用同一个查看器组件（设计稿 4.4 的窄屏降级）。
+ */
+function onOpenDocument(target: CitationTarget): void {
+  if (!canShowDocPanel.value) {
+    // 窄屏：整页跳转，保留版本与偏移，让详情页打开时自动定位
+    void router.push({
+      name: 'knowledge-detail',
+      params: { documentId: target.documentId },
+      query: {
+        versionId: target.versionId,
+        ...(target.startOffset == null ? {} : { start: String(target.startOffset) }),
+        ...(target.endOffset == null ? {} : { end: String(target.endOffset) }),
+        ...(target.headingPath == null ? {} : { heading: target.headingPath }),
+      },
+    })
+    return
+  }
+  // 打开面板不滚动对话区（保持用户阅读位置），也不改写会话路由
+  docTarget.value = target
+}
+
+/** 关闭正文面板：不重载会话、不改路由，只收起面板。 */
+function onCloseDocument(): void {
+  docTarget.value = null
+}
+
 /** 关闭一次性提示。 */
 function onCloseNotice(): void {
   chatStore.clearNotice()
@@ -131,11 +187,12 @@ watch(routeConversationId, (conversationId) => {
 })
 
 // 企业切换：聊天状态已由 tenantReset 清理，这里回到会话列表并重新加载，
-// 防止旧企业的会话/消息残留到新企业页面
+// 防止旧企业的会话/消息残留到新企业页面；正文面板必须一并关闭
 watch(
   () => organizationStore.currentOrganizationId,
   (organizationId, previous) => {
     if (organizationId && organizationId !== previous) {
+      docTarget.value = null
       if (routeConversationId.value) {
         void router.replace({ name: 'chat' })
       }
@@ -150,6 +207,17 @@ onMounted(() => {
   if (routeConversationId.value) {
     void openConversationById(routeConversationId.value)
   }
+  // 监听宽度变化：只在跨越 1280px 时改变"能否并排"，不做布局重排
+  if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+    docPanelMedia = window.matchMedia(DOC_PANEL_MEDIA_QUERY)
+    syncDocPanelMedia()
+    docPanelMedia.addEventListener('change', syncDocPanelMedia)
+  }
+})
+
+onBeforeUnmount(() => {
+  docPanelMedia?.removeEventListener('change', syncDocPanelMedia)
+  docPanelMedia = null
 })
 </script>
 
@@ -239,6 +307,7 @@ onMounted(() => {
                 chatStore.historyLoadedConversationId === chatStore.currentConversationId
             "
             @open-approval="onOpenApproval"
+            @open-document="onOpenDocument"
           />
 
           <!-- 历史加载失败：展示错误与重试 -->
@@ -262,6 +331,13 @@ onMounted(() => {
           </footer>
         </template>
       </section>
+
+      <!-- 桌面端：正文面板与对话区同屏并排（不是遮罩抽屉，避免盖住对话） -->
+      <DocumentContentPanel
+        v-if="showDocPanel && docTarget"
+        :target="docTarget"
+        @close="onCloseDocument"
+      />
 
       <!-- 窄屏：会话列表抽屉 -->
       <n-drawer v-model:show="showMobileList" placement="left" :width="300">

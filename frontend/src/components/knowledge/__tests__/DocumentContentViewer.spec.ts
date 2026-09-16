@@ -17,6 +17,7 @@ vi.mock('@/api/knowledge', () => ({
 import { getDocumentVersionContent, getKnowledgeDocumentDetail } from '@/api/knowledge'
 import type { DocumentContentResponse } from '@/api/knowledgeTypes'
 import DocumentContentViewer from '@/components/knowledge/DocumentContentViewer.vue'
+import { clearDocumentContentCache } from '@/utils/documentContentCache'
 
 /** 正文文本：包含标题、加粗与列表，用于覆盖目录与偏移标记对齐 */
 const TEXT = '# 退货总则\n\n签收后 7 日内可申请**退货**，超期不再受理。\n\n- 需保持商品完好\n'
@@ -49,6 +50,8 @@ function mountViewer(props: Record<string, unknown> = {}) {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  // 正文缓存是模块级（跨组件实例复用），用例之间必须显式清空，避免互相污染
+  clearDocumentContentCache()
   // jsdom 未实现 scrollIntoView / scrollTo：替换为可断言的桩，避免抛异常
   Element.prototype.scrollIntoView = vi.fn()
   Element.prototype.scrollTo = vi.fn()
