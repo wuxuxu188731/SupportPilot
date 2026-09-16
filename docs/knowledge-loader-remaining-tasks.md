@@ -3,8 +3,8 @@
 > 状态文档，最后更新 2026-09-16。
 > 配套阅读：`docs/evals/llamaparse-document-extraction-eval.md`（解析效果评估与结论依据）。
 >
-> **本次会话进度**：任务 1（入库异步化）代码已完成、任务 2（端到端检索回归）已跑通；
-> 任务 3 经决策**取消**。详见 §1.4 交接状态与剩余风险。
+> **收尾进度**：本次收尾项已完成：入库计数、前端空哈希、回归脚本修复及验证均已提交。
+> 任务 3 仍按原决策取消。最终检查见 §1.4，复现命令见 §6。
 
 ## 1. 文档目的与当前进度
 
@@ -38,7 +38,7 @@ PDF 完全无法处理。本次改造引入 LlamaParse 作为富文本文档的�
 | 解析缓存 | `app/knowledge/llamaparse_cache.py`：按 **原始字节 + 档位 + 版本** 做键，原子写入；重复上传与失败重试不二次计费 |
 | 测试 | Python 1010 通过；前端 462 通过；`vue-tsc` 与 `eslint` 均无告警 |
 
-**阶段 D（任务 1，入库异步化）：已完成，待提交**
+**阶段 D（任务 1，入库异步化）：已完成并提交**
 
 | 交付物 | 说明 |
 |---|---|
@@ -48,7 +48,7 @@ PDF 完全无法处理。本次改造引入 LlamaParse 作为富文本文档的�
 | `app/knowledge/ingestion_worker.py` | 进程内 worker：单消费者 + 专用单线程执行器，串行执行；`bind_loop()` / `enqueue()` / `drain()` / `recover()` / `stop()` |
 | 上传接口 | `knowledge_router.py` 改调 `queue_*`，**不再在请求里解析**，立刻返回 `queued` |
 | 应用生命周期 | `main.py` 用 `lifespan` 执行 `worker.bind_loop()` + `worker.recover()`，关闭时 `await worker.stop()` |
-| 重启恢复 | `queued` 任务重新入队；`running` 且原始字节仍在的重置回 `queued` 续跑；字节已丢失的标 `INGESTION_INTERRUPTED`，**不留僵尸任务** |
+| 重启恢复 | `queued` 任务重新入队；`running` 且有原始字节或已解析正文的重置回 `queued` 续跑；两者都不可用的标 `INGESTION_INTERRUPTED`，**不留僵尸任务** |
 | 不重复计费 | 上传期按原始字节指纹去重（`(org, document, source_hash)` 唯一约束），重复上传在**解析之前**就被拦下 |
 | 新增错误码 | `INGESTION_SOURCE_MISSING`（暂存字节已不可用）、`INGESTION_INTERRUPTED`（进程中断且无法续跑） |
 | 测试 | `tests/knowledge/test_ingestion_async.py`：21 个新用例，覆盖入队不等解析、端到端执行、幂等重投、解析失败落任务、去重不二次计费、重启恢复、队列满 |
@@ -59,78 +59,36 @@ PDF 完全无法处理。本次改造引入 LlamaParse 作为富文本文档的�
 |---|---|
 | `scripts/run_document_format_regression.py` | 把 `01-售后服务总则` 的 `.md` / `.docx` / `.pdf` 三种形态分别入库到**三个独立企业**（`fmt-md` / `fmt-docx` / `fmt-pdf`），跑 3 个 `general_service` 用例，逐格式比对证据组命中与 citation 的 `heading_path` |
 | 判据复用 | 直接用 `app/evals/stage_c/scoring.py` 的 `heading_matches`，不另写一套口径 |
-| 结果 | **3/3 用例的证据组命中数三格式一致（各 5/6）；三格式返回的 citation 列表逐条相同**（含唯一未命中的 `5.3 文档间冲突的处理`，见 §3 待决决策 D5） |
+| 结果 | **3/3 用例的金标证据组与预期标题命中逐项一致（各 5/6）**；本次复跑 PDF 有一条额外引用不同，不再声称全部 citation 相同（见 §1.4） |
 
 ### 1.3 剩余任务总览
 
 | # | 任务 | 阶段 | 体量 | 状态 |
 |---|---|---|---|---|
-| 1 | 入库异步化 | D | 大 | **代码完成**，待提交（见 §1.4 未完成项） |
+| 1 | 入库异步化 | D | 大 | **完成并提交**，收尾验证见 §1.4 |
 | 2 | 端到端检索回归 | E | 小 | **完成**，报告见 `.artifacts/document-format-regression/` |
 | 3 | 扫描件与档位对比补测 | F | 中 | **已取消**（2026-09-16 决策） |
 
-### 1.4 交接状态与剩余风险
+### 1.4 收尾结果（2026-09-16）
 
-**已完成的验证**
+| 原未完成项 | 处理结果 |
+|---|---|
+| `attempt_count` 重复累加 | 已修复：只有 queued 任务在管线中启动计数，已经 claim 的 running 任务不再重复加一。覆盖成功、失败、重复投递、同步入口、重试和重启恢复 |
+| 前端测试与类型检查 | 463 个测试通过；vue-tsc、eslint 通过。修复 `VersionHistoryPanel.vue` 将 nullable 哈希直接传入 HTML title 的类型错误，并验证空哈希显示与点击 |
+| 回归脚本状态耦合 | 新增 `--fresh` 创建独立数据库和向量集合；`--collection` 支持续跑；先恢复中断任务，再按原始字节去重，不再只按同名文档跳过 |
+| 回归判分可信度 | 辅助证据组不再默认命中；同时校验文档身份与标题。修复布尔值汇总；服务失败或空证据不能判成通过 |
+| 之前跳过的 Qdrant 集成用例 | 10 个实际运行通过；发现并修复 FakeEmbeddingClient 缺少 timeout_seconds 参数的问题 |
+| Python 全量 | 最终复跑 1039 passed / 10 skipped / 0 failed；10 个 Qdrant 集成用例在额度暂停前已单独运行全部通过，本轮服务不可达而跳过。迁移与 CLI 子进程检查通过 |
 
-| 验证项 | 命令 | 结果 |
-|---|---|---|
-| Python 全量测试 | 见 §6 复现命令 | 1009 passed / 10 skipped / 1 failed |
-| 迁移升降级 | 同上（含 `tests/db/test_migrations.py`） | 通过 |
-| 端到端检索回归 | `scripts/run_document_format_regression.py` | exit 0，三格式一致 |
+**真实回归结果**：12 份入库任务全部成功，三个格式各命中 5/6 证据组，逐组真假值和预期标题命中一致。11 个任务 attempt_count=1；一个实际中断恢复的任务为 2。12 个版本均已有正文，暂存 raw_bytes 均已清空。
 
-> 那 1 个 failed 是 `tests/evals/stage_c/test_stage_c_cli.py::test_documented_source_tree_entrypoint_can_import_app`，
-> 失败原因是本机沙箱禁止子进程使用**管道 stdio**（`PermissionError: [WinError 5]`），
-> 不是代码缺陷。基线（改动前）同样是这 1 个失败，因此本次改动**未引入新失败**。
+**引用差异如实保留**：冲突政策问题中，PDF 的第 5 条引用是「退货与换货政策/1. 无理由退货/1.2 商品状态要求」，MD/DOCX 为「退货与换货政策/6. 与其他政策的关系」。它们不影响该问题金标证据组的判分。默认验收要求金标证据组与预期标题命中逐项一致；`--strict-citations` 额外要求完整引用顺序一致，本次不满足该更强条件。共同缺失的 5.3 条款仍属 D5，未调整检索算法掩盖缺口。
 
-**未完成 / 未验证（交给下一位接手者）**
+**样本范围**：仍为一份总则的 MD/DOCX/PDF 和三份辅助 Markdown 政策。其他七份政策的富文本形式未测；扫描件与档位对比仍按任务 3 的取消决定不执行。D1/D2/D3/D4/D5 的既有延期或另行立项决定保留。
 
-1. **`attempt_count` 被自增两次（确认的缺陷，未修）**
-   `run_job` 先调 `claim_job`（`attempt_count + 1`），随后 `_pipeline_version` 又调
-   `mark_job_running`（再 `+ 1`），因此**一次成功入库会显示 `attempt_count=2`**。
-   回归库实测每个 job 都是 2。
-   修法：`_pipeline_version` 在「任务已由 `claim_job` 置为 running」时不应再调
-   `mark_job_running`——把作业准备收敛成一个 helper
-   （`job if job is not None else create_job + mark_job_running`）即可。
-   影响面：仅诊断字段失真，不影响入库正确性；断言 `attempt_count` 的既有测试需一并核对。
+已提交的修复包括：`d132efa`（计数）、`2b5e5a9`（前端）、`9587753` / `58094ab` / `9b56b15` / `6aa218a` / `da0d318`（回归）、`9f1affb`（重试覆盖）、`b8691a1`（集成替身）。原阶段 D 已在 `683ab49` 提交，旧交接中的“尚未提交”已过时。
 
-2. **前端测试与类型检查未跑**
-   `frontend/node_modules` 存在但 `node` / `pnpm` 不在当前 PATH，因此以下未执行：
-   `pnpm test`、`pnpm run type-check`（`vue-tsc`）、`pnpm run lint`。
-   本次前端改动只有 `frontend/src/api/knowledgeTypes.ts` 的两处类型放宽
-   （`content_hash: string | null`、`IngestionReceipt.status` 注释），
-   但 `VersionHistoryPanel.vue` 渲染 `content_hash` 的实际表现**尚未验证**。
-   已核查：`shorten()` / `onCopy()` 对 `null` 均有保护（返回 `—` / 直接 return），
-   理论上不会崩，但需真实跑一次前端测试确认。
-
-3. **回归只覆盖 3 个用例 / 1 份文档**
-   只有 `01-售后服务总则` 有 docx/pdf 形态，所以「三格式等价」的结论只对这份文档成立。
-   其余 7 份政策文档**没有** docx/pdf 版本，未纳入比较。
-
-4. **`--formats` 支持分批重跑但有状态耦合**
-   回归脚本默认跳过已入库语料（`state.db` 复用）。若要重跑必须删掉
-   `.artifacts/document-format-regression/state.db`，否则会跳过入库只跑检索。
-
-**本次改动涉及的文件**
-
-```
-新增  migrations/versions/0013_document_versions_async_ingestion.py
-新增  app/knowledge/ingestion_worker.py
-新增  scripts/run_document_format_regression.py
-新增  tests/knowledge/test_ingestion_async.py
-修改  app/knowledge/base.py            协议 + DocumentVersion 增加 source_hash/raw_text 可空
-修改  app/knowledge/sqlite_store.py    预留/回填/抢占/恢复四个方法与 job 相关实现
-修改  app/knowledge/ingestion.py       queue_* + run_job，同步入口保持不变
-修改  app/knowledge/factory.py         装配 worker 并注入为 dispatcher
-修改  app/api/knowledge_router.py      上传改走 queue_*
-修改  app/schemas/knowledge.py         DocumentVersionResponse.content_hash 放宽为可空
-修改  main.py                          lifespan：bind_loop + recover + stop
-修改  frontend/src/api/knowledgeTypes.ts  同步类型放宽
-修改  tests/{api,knowledge}/*          既有用例适配新契约
-修改  docs/knowledge-rag-operations.md 第 5.1/5.2/5.7/7 节改写为异步语义，新增 7.1 重启恢复
-```
-
-**尚未提交**：以上改动仍在工作区，未 commit。
+可归档结果见 [收尾验证报告](evals/knowledge-loader-completion.md)。原始产物保存在 `.artifacts/document-format-regression/45e53c872b7f446e817aa9fbc7c11ed1/verified-report.json` 与同名 `.md`。
 
 ## 2. 任务详情
 
@@ -193,7 +151,7 @@ PDF 完全无法处理。本次改造引入 LlamaParse 作为富文本文档的�
 Baseline 是确定性检索（embedding → Qdrant 混合召回 → 交叉重排 → SQLite 二次校验），
 Adaptive 还要跑 Planner/Assessor 大模型调用，会引入与本任务无关的随机性。
 
-**验收结果**（`.artifacts/document-format-regression/report.json` / `report.md`）
+**最新验收结果**（完整产物路径见 §1.4，旧 report 仅作历史记录）
 
 | 用例 | md | docx | pdf | 命中数一致 |
 |---|---|---|---|---|
@@ -202,7 +160,7 @@ Adaptive 还要跑 Planner/Assessor 大模型调用，会引入与本任务无�
 | `multi-priority-doc-conflict-01` | 2 | 2 | 2 | ✅ |
 
 - 证据组命中总数：md 5 / docx 5 / pdf 5（满分 6，见下方说明）；
-- 三格式返回的 citation 列表**逐条相同**（不只是命中数相同）；
+- 三格式金标证据组与预期标题命中逐项一致；全部 citation 并非逐条相同，见 §1.4；
 - `multi-priority-doc-conflict-01` 唯一未命中的 `售后服务总则/5. 特殊说明/5.3 文档间冲突的处理`
   在**三种格式里都同样缺失**。核对该用例在 `.artifacts/stage-c-retrieval*/report*.json`
   中的历史 baseline 结果，该 heading 从来不在 top-5 里——这是既有的检索排序特性，
@@ -290,7 +248,7 @@ Adaptive 还要跑 Planner/Assessor 大模型调用，会引入与本任务无�
 - [x] 重复上传同一份文档不产生重复的解析计费（原任务 4）
       —— 上传期按原始字节指纹去重，重复上传在解析之前就被拦下
 - [x] 入库的 docx/pdf 文档，其 chunk 的 `heading_path` 与同内容 `.md` 入库一致（任务 2）
-      —— 三格式 citation 列表逐条相同，证据组命中数一致
+      —— 三格式金标证据组与预期标题命中逐项一致，额外引用差异见 §1.4
 - [x] 大文档上传不会因请求超时而失败（任务 1）
       —— 上传接口不再等待解析，立刻返回 `queued`
 - [x] ~~扫描件场景有明确结论，`LLAMA_CLOUD_TIER` 默认值有依据~~（任务 3 已取消，本条作废）
@@ -308,42 +266,47 @@ Adaptive 还要跑 Planner/Assessor 大模型调用，会引入与本任务无�
 ### 6.1 Python 测试
 
 ```powershell
-# 必须显式指定 --basetemp：本机沙箱禁止 pytest 使用系统临时目录，
-# 否则会以「Access is denied」直接失败（不是用例失败）。
-$env:DASHSCOPE_API_KEY = (Get-ItemProperty -Path 'HKCU:\Environment' -Name 'DashScope_API_KEY').DashScope_API_KEY
-.venv\Scripts\python.exe -m pytest -q --basetemp=.artifacts/pytest-tmp
+# 外部模型使用替身，测试不需要真实 DashScope 密钥。
+$env:DASHSCOPE_API_KEY = 'offline-test-placeholder'
+$env:QDRANT_URL = 'http://127.0.0.1:6333'
+$env:NO_PROXY = 'localhost,127.0.0.1,::1'
+.venv\Scripts\python.exe -m pytest -q --basetemp=.artifacts/pytest-loader-resumed
 ```
 
-预期：`1009 passed, 10 skipped, 1 failed`。
-那 1 个 failed 是 `test_documented_source_tree_entrypoint_can_import_app`
-（沙箱禁止子进程管道 stdio），与本次改动无关。
+Qdrant 应先启动。最后一轮结果为 1039 passed / 10 skipped / 0 failed，日志见 `.artifacts/pytest-loader-resumed.log`；10 项 Qdrant 集成已在此前定向执行中全部通过。额度暂停前的一轮全量在 89% 被中断，不作为完成依据。受限沙箱可能阻止子进程管道；本次在获批执行环境完成该检查。
 
-`DASHSCOPE_API_KEY` 从 Windows 用户环境变量 `DashScope_API_KEY` 读取后注入子进程；
-项目 `.env` 里**没有**这个键（只有 `AUTH_SECRET_KEY` 与 `LLAMA_CLOUD_API_KEY`）。
-
-### 6.2 端到端检索回归（需要 DashScope + Qdrant）
+### 6.2 端到端检索回归（需要已授权的 DashScope + Qdrant）
 
 ```powershell
 $env:DASHSCOPE_API_KEY = (Get-ItemProperty -Path 'HKCU:\Environment' -Name 'DashScope_API_KEY').DashScope_API_KEY
-.venv\Scripts\python.exe scripts\run_document_format_regression.py
+$env:QDRANT_URL = 'http://127.0.0.1:6333'
+# 生成新的数据库、独立集合和报告，保留旧结果；解析缓存仍可复用。
+.venv\Scripts\python.exe scripts\run_document_format_regression.py --fresh
 
-# 只跑某一种形态（语料已入库会自动跳过）
-.venv\Scripts\python.exe scripts\run_document_format_regression.py --formats word
-
-# 重跑全部（必须先删 state.db，否则会跳过入库）
-Remove-Item .artifacts\document-format-regression\state.db
+# 使用对应数据库和集合续跑；同字节版本成功后不重新解析或嵌入。
+.venv\Scripts\python.exe scripts\run_document_format_regression.py `
+  --database .artifacts/document-format-regression/45e53c872b7f446e817aa9fbc7c11ed1/state.db `
+  --collection supportpilot_format_45e53c872b7f446e817aa9fbc7c11ed1 `
+  --output .artifacts/document-format-regression/45e53c872b7f446e817aa9fbc7c11ed1/verified-report.json
 ```
 
-产物：`.artifacts/document-format-regression/report.json` 与 `report.md`。
-首次跑约 13 分钟（12 份文档入库，每份 embedding+Qdrant 约 65 秒）。
+`--formats word` 只验证选中格式，报告明确标记三格式比较未完成。`--strict-citations` 将全部引用路径和顺序一致作为额外退出条件。无需删除 state.db；只替换数据库而复用旧集合会造成不必要的旧向量混杂。
 
-### 6.3 本机环境注意事项
+### 6.3 前端验证
 
-- **Qdrant**：已在跑（`http://localhost:6333`）。注意本机系统代理会劫持
-  `localhost` 请求并导致 `WinError 10054`，因此所有本地 Qdrant 客户端都必须带
-  `trust_env=False`（`create_knowledge_services` 与回归脚本都已处理；
-  `tests/integration/test_*.py` 里**没有**处理，所以那 10 个集成用例在本机恒为
-  skipped —— 这是环境问题，不是用例问题）。
-- **pytest 的 `--basetemp`**：见 6.1。
-- **前端**：`frontend/node_modules` 存在，但 `node` / `pnpm` 不在当前 PATH，
-  前端测试与 `vue-tsc` 本次未执行。
+在 frontend 目录执行：
+
+```powershell
+node node_modules/vitest/vitest.mjs run --maxWorkers=2
+node node_modules/vue-tsc/bin/vue-tsc.js --noEmit -p tsconfig.json
+node node_modules/eslint/bin/eslint.js .
+```
+
+本次 463 个测试通过。默认高并发首轮出现一个路由初始化超时，降低并发后全量通过，没有放宽超时断言。
+
+### 6.4 本机环境注意事项
+
+- 本机 Qdrant 的 localhost 请求实测约 10 秒，127.0.0.1 约 0.08 秒；验证命令显式使用 IPv4，并绕过本机代理。
+- 指定项目内 basetemp，避免系统临时目录权限问题。
+- 前端实际脚本名为 `typecheck`，不是 `type-check`；上面的 Node 直调命令不依赖 pnpm 是否可用。
+- 真实回归会发送测试文档与查询到外部模型服务，并产生调用费用；单元测试与 Qdrant 集成测试使用模型替身。
