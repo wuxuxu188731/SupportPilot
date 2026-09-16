@@ -276,6 +276,16 @@ describe('DocumentContentViewer 目录与请求去重', () => {
     expect(wrapper.find('[data-test="viewer-outline"]').exists()).toBe(false)
   })
 
+  it('关闭目录显示时隐藏标签但保留正文', async () => {
+    // 保护行为：客服侧栏可隐藏目录标签，知识库页面使用的默认显示行为不受影响
+    vi.mocked(getDocumentVersionContent).mockResolvedValue(contentResponse())
+    const wrapper = mountViewer({ showOutline: false })
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="viewer-outline"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="viewer-body"]').text()).toContain('签收后 7 日内可申请退货')
+  })
+
   it('同一 (document_id, version_id) 只请求一次，切回同一版本不再请求', async () => {
     // 保护行为：面板内同一版本只请求一次；切换引用到同一版本只重新定位
     vi.mocked(getDocumentVersionContent).mockResolvedValue(contentResponse())

@@ -34,7 +34,7 @@ import {
 } from '@/utils/markdownRange'
 import { renderMarkdown } from '@/utils/markdown'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   /** 文档标识（与 versionId 一起决定请求哪一个版本的正文字） */
   documentId: string
   /** 版本标识：偏移相对该版本，因此必须显式指定，不能用「当前有效版本」代替 */
@@ -45,7 +45,11 @@ const props = defineProps<{
   endOffset?: number | null
   /** 引用的标题路径：偏移不可用时用它回退到所属章节（来自结构化 citations） */
   headingPath?: string | null
-}>()
+  /** 是否显示正文目录标签；知识库页面默认显示，紧凑型侧栏可关闭 */
+  showOutline?: boolean
+}>(), {
+  showOutline: true,
+})
 
 /** 定位结果：exact=精确高亮，fallback=降级，none=无需定位。 */
 type LocateMode = 'exact' | 'fallback' | 'none'
@@ -103,8 +107,8 @@ async function loadActiveVersionNo(): Promise<void> {
   }
 }
 
-/** 目录是否可用。 */
-const hasOutline = computed(() => (content.value?.outline.length ?? 0) > 0)
+/** 目录是否需要显示；隐藏目录不影响按 headingPath 自动定位。 */
+const hasOutline = computed(() => props.showOutline && (content.value?.outline.length ?? 0) > 0)
 
 /**
  * 加载正文：命中缓存直接使用（同一版本不重复请求）。
