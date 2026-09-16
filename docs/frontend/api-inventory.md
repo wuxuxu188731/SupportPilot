@@ -26,6 +26,11 @@
 >   **22 个路径、27 个操作**；同时 `Citation` 增加 `start_offset`/`end_offset`
 >   两个可空字段（见附录 A.8）。盘点口径与源码核对见
 >   `docs/superpowers/specs/2026-09-09-knowledge-document-content-viewer-design.md`。
+> - **前端落地状态（2026-09-09，同任务阶段 B）**：上述正文接口与 `Citation`
+>   偏移字段**已被前端消费**——对话页引用卡片可跳转正文并高亮引用区间、
+>   知识库详情页可查看正文；实现位置与缓存/降级口径见 4.4.8 末尾的
+>   「前端落地」小节，手工验收清单见 `manual-test-runbook.md` F-14。
+>   本阶段**未新增任何后端接口**，接口计数不变。
 
 ---
 
@@ -731,6 +736,22 @@ A=仅 admin；✅/❌ 同理。P=公开。
   unknown_document_or_version`）；目录偏移单测见 `tests/knowledge/test_outline.py`。
 - 建议页面：对话页右侧正文面板（引用点击 → 面板打开并高亮对应区间）、知识库
   详情页「查看正文」。
+- 前端落地（阶段 B 已完成，供联调与验收对照）：
+  - `frontend/src/api/knowledge.ts` 的 `getDocumentVersionContent(documentId, versionId)`
+    （走默认 60 秒超时，可重试，**不带**上传用的长超时）；
+  - 查看器 `components/knowledge/DocumentContentViewer.vue`：渲染 `text`（安全
+    Markdown 渲染器，`html:false`）、渲染 `outline` 目录并支持点击跳转、
+    按偏移高亮并滚动定位；`word`/`pdf`、历史版本、`disabled`、
+    偏移缺失四类提示均按本节口径**必须上屏**；
+  - 历史版本提示需要「当前有效版本 vM」，而本响应只带本次版本的 `version_no`：
+    查看器在确认是历史版本时**额外调用一次** `GET /knowledge/documents/{id}/`
+    取版本号（按文档缓存，同文档内切换引用不重复请求）；取不到时文案退回
+    「其它版本」，不阻断正文阅读；
+  - 正文缓存为**内存 + 会话内**（`utils/documentContentCache.ts`），键为
+    `documentId/versionId`（偏移相对版本，键必须含版本），**不写 localStorage**，
+    企业切换 / 退出登录经 tenantReset 清空；
+  - 偏移定位纯函数 `utils/markdownRange.ts`（源码偏移 ↔ 渲染 DOM 的对齐、
+    高亮与无损还原），越界 / 对不齐一律降级，不抛异常。
 
 ### 4.5 退款/补偿审批与 Action Run（5 个）
 
