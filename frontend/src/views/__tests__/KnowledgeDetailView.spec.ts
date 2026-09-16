@@ -443,4 +443,45 @@ describe('KnowledgeDetailView 查看正文入口', () => {
     // 历史版本提示必须上屏（引用来自旧版本）
     expect(wrapper.find('[data-test="viewer-history-notice"]').exists()).toBe(true)
   })
+
+  it('正文弹窗底部提供「关闭」按钮：关闭后仍停留在详情页', async () => {
+    // 保护行为：弹窗不能只有右上角一个 ✕，必须有显式出口，否则用户会觉得「打开了关不掉」
+    vi.mocked(knowledgeApi.getKnowledgeDocumentDetail).mockResolvedValue(detail())
+    vi.mocked(knowledgeApi.getDocumentVersionContent).mockResolvedValue(contentResponse())
+    seedLogin('agent')
+    const { wrapper, router } = await mountKnowledgeDetail('/app/knowledge/doc-1')
+    await flushPromises()
+
+    await wrapper.find('[data-test="open-content"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('[data-test="content-viewer-body"]').exists()).toBe(true)
+
+    await wrapper.find('[data-test="close-content-viewer"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="content-viewer-body"]').exists()).toBe(false)
+    expect(router.currentRoute.value.name).toBe('knowledge-detail')
+    // 不是从对话页跳来的：不出现「返回对话」
+    expect(wrapper.find('[data-test="back-to-chat"]').exists()).toBe(false)
+  })
+
+  it('从对话页跳转过来时提供「返回对话」，点击后回到原会话', async () => {
+    // 保护行为：窄屏点引用是整页跳转，用户已经离开对话页，
+    // 必须能一键回到刚才那条会话，而不是退出对话页再重新进入
+    vi.mocked(knowledgeApi.getKnowledgeDocumentDetail).mockResolvedValue(detail())
+    vi.mocked(knowledgeApi.getDocumentVersionContent).mockResolvedValue(contentResponse())
+    seedLogin('agent')
+    const { wrapper, router } = await mountKnowledgeDetail(
+      '/app/knowledge/doc-1?versionId=v-2&start=5&end=17&from=chat&conversationId=conv-9',
+    )
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="content-viewer-body"]').exists()).toBe(true)
+    await wrapper.find('[data-test="back-to-chat"]').trigger('click')
+    await flushNavigation()
+    await flushPromises()
+
+    expect(router.currentRoute.value.name).toBe('chat-detail')
+    expect(router.currentRoute.value.params.conversationId).toBe('conv-9')
+  })
 })

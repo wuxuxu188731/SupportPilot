@@ -474,6 +474,9 @@ describe('ChatView 引用跳转与正文面板', () => {
     expect(router.currentRoute.value.query.versionId).toBe('ver-1')
     expect(router.currentRoute.value.query.start).toBe('5')
     expect(router.currentRoute.value.query.end).toBe(String(5 + '签收后 7 日内可申请退货'.length))
+    // 来源标记：详情页据此给出「返回对话」，回到这条会话
+    expect(router.currentRoute.value.query.from).toBe('chat')
+    expect(router.currentRoute.value.query.conversationId).toBe('conv-1')
   })
 
   it('切换企业时关闭正文面板，不残留旧企业文档', async () => {

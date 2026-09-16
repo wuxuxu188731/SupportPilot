@@ -9,6 +9,8 @@
  *    （复用 DocumentContentViewer）；**下载入口依然不提供**（无原文下载接口）；
  *  - 支持深链参数：?versionId=&start=&end=&heading= —— 对话页窄屏降级跳转过来时，
  *    用它们打开指定版本并定位到引用区间；参数缺失时读当前有效版本；
+ *    同一条深链还会带 ?from=chat&conversationId= ：正文弹窗据此提供
+ *    「返回对话」，关掉弹窗即可回到原会话（不再需要退出对话页重新进入）；
  *  - admin 操作按状态显示：active→停用；disabled→启用；
  *    active/disabled 且类型为 markdown/text→上传新版本；
  *    processing/failed→只展示状态说明；word→不提供上传新版本；
@@ -164,6 +166,34 @@ function readQueryNumber(key: string): number | null {
 function onOpenContent(): void {
   if (!canOpenContent.value) return
   showContentViewer.value = true
+}
+
+/**
+ * 是否从客服对话页跳转而来（窄屏降级跳转会带 from=chat）。
+ *
+ * 为什么需要它：窄屏下点引用是**整页跳转**到本页，用户已经没有对话页了；
+ * 只看一个「关闭」按钮会让人以为只能退出对话再重新进来，因此从对话页来的
+ * 还要给一个「返回对话」出口。
+ */
+const cameFromChat = computed(() => readQueryString('from') === 'chat')
+
+/** 来源会话 id；会话列表页跳转过来时没有该参数（为 null）。 */
+const sourceConversationId = computed(() => readQueryString('conversationId'))
+
+/** 关闭正文弹窗（停留本页）。 */
+function onCloseContentViewer(): void {
+  showContentViewer.value = false
+}
+
+/** 返回对话：先收起弹窗，再回到来源会话；没有会话 id 时回到对话页会话列表。 */
+function onBackToChat(): void {
+  showContentViewer.value = false
+  const conversationId = sourceConversationId.value
+  if (conversationId === null) {
+    void router.push({ name: 'chat' })
+    return
+  }
+  void router.push({ name: 'chat-detail', params: { conversationId } })
 }
 
 // 深链直达（?versionId=&start=&end=）：详情加载完成后自动打开查看器并定位
@@ -379,6 +409,23 @@ function onVisibilityChange(): void {
               :heading-path="contentTarget.headingPath"
             />
           </div>
+
+          <!-- 弹窗出口：右上角 ✕ 之外再给显式按钮，避免「打开后不知道怎么关」 -->
+          <template #footer>
+            <div class="content-modal-actions">
+              <n-button data-test="close-content-viewer" @click="onCloseContentViewer">
+                关闭
+              </n-button>
+              <n-button
+                v-if="cameFromChat"
+                type="primary"
+                data-test="back-to-chat"
+                @click="onBackToChat"
+              >
+                返回对话
+              </n-button>
+            </div>
+          </template>
         </n-modal>
 
         <!-- 版本历史 -->
@@ -589,6 +636,13 @@ function onVisibilityChange(): void {
 .content-modal-body > * {
   flex: 1;
   min-width: 0;
+}
+
+/* 弹窗底部出口：「关闭」停留本页，「返回对话」回到来源会话（仅从对话页跳转时出现） */
+.content-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-space-2);
 }
 
 .confirm-modal {

@@ -148,7 +148,10 @@ function onOpenApproval(approvalId: string): void {
  */
 function onOpenDocument(target: CitationTarget): void {
   if (!canShowDocPanel.value) {
-    // 窄屏：整页跳转，保留版本与偏移，让详情页打开时自动定位
+    // 窄屏：整页跳转，保留版本与偏移，让详情页打开时自动定位。
+    // 额外带上来源标记：详情页据此提供「返回对话」，用户关掉正文弹窗后
+    // 能直接回到刚才这条会话，而不是被迫退出对话页再重新点进来。
+    const conversationId = chatStore.currentConversationId
     void router.push({
       name: 'knowledge-detail',
       params: { documentId: target.documentId },
@@ -157,6 +160,8 @@ function onOpenDocument(target: CitationTarget): void {
         ...(target.startOffset == null ? {} : { start: String(target.startOffset) }),
         ...(target.endOffset == null ? {} : { end: String(target.endOffset) }),
         ...(target.headingPath == null ? {} : { heading: target.headingPath }),
+        from: 'chat',
+        ...(conversationId ? { conversationId } : {}),
       },
     })
     return

@@ -15,6 +15,9 @@ export async function preloadRouteComponents(): Promise<void> {
     import('@/views/RegisterView.vue'),
     import('@/views/OrganizationsView.vue'),
     import('@/views/AppHomeView.vue'),
+    // ChatView：引用跳转的回路（详情页「返回对话」）会导航到 /app/chat/:id，
+    // 不预加载时该次导航会跨事件循环，单次 flushNavigation 后路由仍未落定
+    import('@/views/ChatView.vue'),
     import('@/views/ApprovalListView.vue'),
     import('@/views/ApprovalDetailView.vue'),
     import('@/views/KnowledgeListView.vue'),
