@@ -104,6 +104,35 @@ export function charOffsetToLine(text: string, offset: number): number {
   return line
 }
 
+/**
+ * 把源码偏移定位到渲染后的元素（用于目录跳转：滚动到某个标题）。
+ *
+ * 与 :func:`locateRangeByOffsets` 共用同一套对齐逻辑，但**不**修改 DOM：
+ * 只返回该字符位置所在的元素，调用方自行 `scrollIntoView`。
+ * 偏移越界、对不齐或容器为空时返回 null。
+ */
+export function locateElementByOffset(
+  container: Element,
+  source: string,
+  offset: number,
+): Element | null {
+  if (!Number.isFinite(offset) || offset < 0 || offset > source.length) return null
+  const target = Math.floor(offset)
+  const { nodes, text: renderedText } = collectRenderedText(container)
+  if (nodes.length === 0 || renderedText.length === 0) return null
+
+  const map = buildAlignment(source, renderedText)
+  const rendered = map[target]
+  if (rendered === undefined || rendered < 0) return null
+  const point = locatePoint(nodes, Math.min(rendered, renderedText.length - 1))
+  if (point === null) return null
+
+  // 文本节点本身不可滚动，取它所在的元素
+  const parent = point.node.parentElement
+  if (parent !== null) return parent
+  return point.node.parentNode instanceof Element ? point.node.parentNode : container
+}
+
 /** 收集容器内全部文本节点（文档顺序），并拼出渲染后的可见文本。 */
 function collectRenderedText(container: Element): { nodes: Text[]; text: string } {
   const nodes: Text[] = []
