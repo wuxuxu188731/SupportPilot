@@ -5,7 +5,10 @@
  * 事实与范围说明：
  *  - 展示：基本信息（标题/ID/类型/状态/有效版本/时间）、全部版本历史
  *    （version_no 升序，当前有效版本高亮）、有效版本最近入库任务；
- *  - 响应不含正文/原文/下载地址：**不允许**出现正文预览或下载按钮；
+ *  - **正文查看**：详情/版本响应仍不含 raw_text，正文只从 4.4.8 的正文接口按版本读取
+ *    （复用 DocumentContentViewer）；**下载入口依然不提供**（无原文下载接口）；
+ *  - 支持深链参数：?versionId=&start=&end=&heading= —— 对话页窄屏降级跳转过来时，
+ *    用它们打开指定版本并定位到引用区间；参数缺失时读当前有效版本；
  *  - admin 操作按状态显示：active→停用；disabled→启用；
  *    active/disabled 且类型为 markdown/text→上传新版本；
  *    processing/failed→只展示状态说明；word→不提供上传新版本；
@@ -20,9 +23,11 @@ import { useRoute, useRouter } from 'vue-router'
 import { NAlert, NButton, NCard, NModal, NSpin, NTag } from 'naive-ui'
 
 import MainLayout from '@/layouts/MainLayout.vue'
+import DocumentContentViewer from '@/components/knowledge/DocumentContentViewer.vue'
 import VersionHistoryPanel from '@/components/knowledge/VersionHistoryPanel.vue'
 import IngestionJobPanel from '@/components/knowledge/IngestionJobPanel.vue'
 import VersionUploadDialog from '@/components/knowledge/VersionUploadDialog.vue'
+import type { CitationTarget } from '@/api/types'
 import { useKnowledgeStore } from '@/stores/knowledge'
 import {
   DOCUMENT_SOURCE_TYPE_TEXT,
@@ -105,6 +110,72 @@ async function loadDetail() {
 function onBack(): void {
   void router.push({ name: 'knowledge' })
 }
+
+/** 正文查看器弹窗显隐。 */
+const showContentViewer = ref(false)
+
+/**
+ * 正文查看目标：文档 + 版本 + 可选偏移。
+ *
+ * 为什么带 versionId：知识块偏移相对某一个版本的正文，必须按版本读取；
+ * 深链（来自对话页窄屏降级跳转）会显式给出版本，否则用当前有效版本。
+ */
+const contentTarget = computed<CitationTarget | null>(() => {
+  const current = detail.value
+  if (current === null) return null
+  const versionId = readQueryString('versionId') ?? current.active_version_id
+  // 没有有效版本（processing / failed）时无法读正文，入口禁用并说明原因
+  if (versionId === null || versionId.length === 0) return null
+  return {
+    documentId: current.document_id,
+    versionId,
+    startOffset: readQueryNumber('start'),
+    endOffset: readQueryNumber('end'),
+    headingPath: readQueryString('heading'),
+    title: current.title,
+  }
+})
+
+/** 是否提供「查看正文」入口（有有效版本或深链指定版本时可用）。 */
+const canOpenContent = computed(() => contentTarget.value !== null)
+
+/** 无有效版本时禁用入口的原因文案。 */
+const contentUnavailableReason = computed(() => {
+  if (detail.value?.status === 'processing') return '文档尚未完成入库，暂时无法查看正文。'
+  if (detail.value?.status === 'failed') return '文档入库失败，没有可查看的正文。'
+  return '当前没有可读取的有效版本。'
+})
+
+/** 读取 query 中的字符串参数（缺失/非法返回 null）。 */
+function readQueryString(key: string): string | null {
+  const value = route.query[key]
+  return typeof value === 'string' && value.length > 0 ? value : null
+}
+
+/** 读取 query 中的非负整数偏移（缺失/非法返回 null）。 */
+function readQueryNumber(key: string): number | null {
+  const raw = readQueryString(key)
+  if (raw === null) return null
+  const parsed = Number.parseInt(raw, 10)
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null
+}
+
+/** 打开正文查看器。 */
+function onOpenContent(): void {
+  if (!canOpenContent.value) return
+  showContentViewer.value = true
+}
+
+// 深链直达（?versionId=&start=&end=）：详情加载完成后自动打开查看器并定位
+watch(
+  () => [detail.value?.document_id, route.query.versionId] as const,
+  () => {
+    if (!canOpenContent.value) return
+    if (readQueryString('versionId') === null) return
+    if (readQueryNumber('start') === null) return
+    showContentViewer.value = true
+  },
+)
 
 // 路由参数变化（详情 → 详情）或首次进入
 watch(
@@ -268,11 +339,47 @@ function onVisibilityChange(): void {
             停用或启用文档。
           </p>
 
-          <!-- 不提供删除/正文预览/下载（后端无接口） -->
-          <p class="feature-note">
-            文档正文、预览与下载暂不提供（后端详情接口不含原文）。
-          </p>
+          <!-- 正文查看入口：详情/版本响应仍不含 raw_text，正文按版本单独读取；
+               下载入口依然不提供（无原文下载接口） -->
+          <div class="content-entry" data-test="content-entry">
+            <n-button
+              type="primary"
+              secondary
+              :disabled="!canOpenContent"
+              data-test="open-content"
+              @click="onOpenContent"
+            >
+              查看正文
+            </n-button>
+            <p v-if="!canOpenContent" class="state-note" data-test="content-unavailable">
+              {{ contentUnavailableReason }}
+            </p>
+            <p v-else class="feature-note" data-test="content-note">
+              正文为入库时解析/转换后的 Markdown（PDF/Word 也已转换），与原文排版可能不一致；
+              不提供原文下载。
+            </p>
+          </div>
         </n-card>
+
+        <!-- 正文查看器弹窗：复用对话页同一个查看器组件 -->
+        <n-modal
+          v-model:show="showContentViewer"
+          preset="card"
+          class="content-modal"
+          :title="detail.title"
+          :bordered="false"
+          style="width: min(960px, 92vw)"
+        >
+          <div v-if="contentTarget" class="content-modal-body" data-test="content-viewer-body">
+            <DocumentContentViewer
+              :document-id="contentTarget.documentId"
+              :version-id="contentTarget.versionId"
+              :start-offset="contentTarget.startOffset"
+              :end-offset="contentTarget.endOffset"
+              :heading-path="contentTarget.headingPath"
+            />
+          </div>
+        </n-modal>
 
         <!-- 版本历史 -->
         <VersionHistoryPanel
@@ -453,6 +560,33 @@ function onVisibilityChange(): void {
   margin: var(--sp-space-3) 0 0;
   color: var(--sp-color-text-3);
   font-size: var(--sp-font-size-xs);
+}
+
+/* 正文查看入口：按钮与其说明同块，宽屏并排、窄屏自动换行 */
+.content-entry {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-space-3);
+  margin-top: var(--sp-space-4);
+  padding-top: var(--sp-space-3);
+  border-top: 1px solid var(--sp-color-border);
+}
+
+.content-entry .state-note,
+.content-entry .feature-note {
+  margin: 0;
+}
+
+/* 正文弹窗：给查看器一个固定高度，正文区域内部滚动 */
+.content-modal-body {
+  height: min(70vh, 640px);
+  display: flex;
+}
+
+.content-modal-body > * {
+  flex: 1;
+  min-width: 0;
 }
 
 .confirm-modal {

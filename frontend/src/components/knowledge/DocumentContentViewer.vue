@@ -195,12 +195,20 @@ function scrollToHighlight(): void {
   const container = bodyRef.value
   const highlight = container?.querySelector(`.${RANGE_HIGHLIGHT_CLASS}`)
   if (highlight === null || highlight === undefined) return
-  highlight.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  // 滚动只是体验增强：JSdom 等环境未实现 scrollIntoView，缺失时必须静默跳过，
+  // 不能因为"滚不动"就让整条正文加载路径变成未处理的 Promise 拒绝
+  scrollElementIntoView(highlight, { block: 'center', behavior: 'smooth' })
 }
 
 /** 滚动到顶部（偏移不可用时的兜底）。 */
 function scrollTop(): void {
-  bodyRef.value?.scrollTo({ top: 0, behavior: 'auto' })
+  const container = bodyRef.value
+  if (container === null) return
+  if (typeof container.scrollTo === 'function') {
+    container.scrollTo({ top: 0, behavior: 'auto' })
+    return
+  }
+  container.scrollTop = 0
 }
 
 /** 按引用的 heading_path 在目录里找到对应标题并滚动过去；找不到返回 null。 */
@@ -233,7 +241,15 @@ function scrollToOutlineItem(item: DocumentContentOutlineItem): void {
     scrollTop()
     return
   }
-  element.scrollIntoView({ block: 'start', behavior: 'smooth' })
+  scrollElementIntoView(element, { block: 'start', behavior: 'smooth' })
+}
+
+/** 元素滚动到视口（环境未实现时静默跳过，见 scrollToHighlight 的说明）。 */
+function scrollElementIntoView(element: Element, options: { block: string; behavior: string }): void {
+  const scrollable = element as Element & {
+    scrollIntoView?: (options?: { block: string; behavior: string }) => void
+  }
+  if (typeof scrollable.scrollIntoView === 'function') scrollable.scrollIntoView(options)
 }
 
 /** 重试：绕过缓存强制重新请求。 */

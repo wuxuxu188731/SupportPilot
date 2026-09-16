@@ -33,6 +33,7 @@ vi.mock('@/api/organization', () => ({
 vi.mock('@/api/knowledge', () => ({
   listKnowledgeDocuments: vi.fn(),
   getKnowledgeDocumentDetail: vi.fn(),
+  getDocumentVersionContent: vi.fn(),
   uploadKnowledgeDocument: vi.fn(),
   uploadKnowledgeDocumentVersion: vi.fn(),
   disableKnowledgeDocument: vi.fn(),
@@ -43,6 +44,8 @@ vi.mock('@/api/knowledge', () => ({
 import * as authApi from '@/api/auth'
 import * as knowledgeApi from '@/api/knowledge'
 import * as organizationApi from '@/api/organization'
+import type { DocumentContentResponse } from '@/api/knowledgeTypes'
+import { clearDocumentContentCache } from '@/utils/documentContentCache'
 
 const USER = { user_id: 'u-1', username: 'alice', created_at: '2026-09-01 00:00:00' }
 
@@ -122,6 +125,8 @@ beforeEach(() => {
   window.localStorage.clear()
   setActivePinia(createPinia())
   vi.clearAllMocks()
+  // 正文缓存是模块级：用例之间必须清空，否则会命中上一条用例的数据
+  clearDocumentContentCache()
   vi.mocked(authApi.me).mockResolvedValue(USER)
 })
 
@@ -334,5 +339,108 @@ describe('KnowledgeDetailView 角色与状态操作', () => {
     await flushPromises()
 
     expect(knowledgeApi.disableKnowledgeDocument).toHaveBeenCalledWith('doc-1')
+  })
+})
+
+/** 构造正文响应（详情页查看正文时由查看器组件请求）。 */
+function contentResponse(partial: Partial<DocumentContentResponse> = {}): DocumentContentResponse {
+  const text = '退货政策：签收后 7 日内可申请退货。\n'
+  return {
+    document_id: 'doc-1',
+    version_id: 'v-2',
+    version_no: 2,
+    title: '售后政策',
+    source_type: 'markdown',
+    status: 'active',
+    active_version_id: 'v-2',
+    loader_version: 'loader-v1',
+    chunker_version: 'chunker-v1',
+    content_hash: 'sha256:bbbb',
+    text,
+    text_length: text.length,
+    outline: [],
+    ...partial,
+  }
+}
+
+describe('KnowledgeDetailView 查看正文入口', () => {
+  it('有有效版本时提供「查看正文」并能打开查看器（复用同一组件）', async () => {
+    // 保护行为：正文按版本从正文接口读取，详情响应仍不含 raw_text
+    vi.mocked(knowledgeApi.getKnowledgeDocumentDetail).mockResolvedValue(detail())
+    vi.mocked(knowledgeApi.getDocumentVersionContent).mockResolvedValue(contentResponse())
+    seedLogin('agent')
+    const { wrapper } = await mountKnowledgeDetail('/app/knowledge/doc-1')
+    await flushPromises()
+
+    const entry = wrapper.find('[data-test="open-content"]')
+    expect(entry.exists()).toBe(true)
+    expect(entry.attributes('disabled')).toBeUndefined()
+
+    await entry.trigger('click')
+    await flushPromises()
+
+    // 默认读当前有效版本 v-2
+    expect(knowledgeApi.getDocumentVersionContent).toHaveBeenCalledWith('doc-1', 'v-2')
+    expect(wrapper.find('[data-test="content-viewer-body"]').exists()).toBe(true)
+  })
+
+  it('页面不再出现「正文暂不提供」的表述，且下载入口依然不提供', async () => {
+    // 保护行为：文案修正（设计稿决策 7：正文可看、原文下载不提供）
+    vi.mocked(knowledgeApi.getKnowledgeDocumentDetail).mockResolvedValue(detail())
+    seedLogin('admin')
+    const { wrapper } = await mountKnowledgeDetail('/app/knowledge/doc-1')
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('暂不提供正文')
+    expect(wrapper.text()).not.toContain('文档正文、预览与下载暂不提供')
+    expect(wrapper.find('[data-test="download-document"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="preview-document"]').exists()).toBe(false)
+    // 说明正文是转换后的 Markdown，并明确不提供原文下载
+    expect(wrapper.find('[data-test="content-note"]').text()).toContain('不提供原文下载')
+  })
+
+  it('无有效版本（processing）时入口禁用并说明原因', async () => {
+    // 边界情况：异步入库尚未完成时没有可读正文，入口必须禁用并给出原因
+    vi.mocked(knowledgeApi.getKnowledgeDocumentDetail).mockResolvedValue(
+      detail({ status: 'processing', active_version_id: null }),
+    )
+    seedLogin('admin')
+    const { wrapper } = await mountKnowledgeDetail('/app/knowledge/doc-1')
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="open-content"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.find('[data-test="content-unavailable"]').text()).toContain('尚未完成入库')
+  })
+
+  it('无有效版本（failed）时入口禁用并说明入库失败', async () => {
+    // 边界情况：入库失败的文档没有正文，禁用入口而不是给出可点但必失败的按钮
+    vi.mocked(knowledgeApi.getKnowledgeDocumentDetail).mockResolvedValue(
+      detail({ status: 'failed', active_version_id: null }),
+    )
+    seedLogin('admin')
+    const { wrapper } = await mountKnowledgeDetail('/app/knowledge/doc-1')
+    await flushPromises()
+
+    expect(wrapper.find('[data-test="open-content"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.find('[data-test="content-unavailable"]').text()).toContain('入库失败')
+  })
+
+  it('深链参数指定版本与偏移时自动打开并定位到该版本', async () => {
+    // 保护行为：对话页窄屏降级跳转过来时必须按 query 打开指定版本并定位，
+    // 否则用户点引用后只能看到文档顶部（丢失定位）
+    vi.mocked(knowledgeApi.getKnowledgeDocumentDetail).mockResolvedValue(detail())
+    vi.mocked(knowledgeApi.getDocumentVersionContent).mockResolvedValue(
+      contentResponse({ version_id: 'v-1', version_no: 1, active_version_id: 'v-2' }),
+    )
+    seedLogin('agent')
+    const { wrapper } = await mountKnowledgeDetail(
+      '/app/knowledge/doc-1?versionId=v-1&start=5&end=17&heading=退货政策',
+    )
+    await flushPromises()
+
+    expect(knowledgeApi.getDocumentVersionContent).toHaveBeenCalledWith('doc-1', 'v-1')
+    expect(wrapper.find('[data-test="content-viewer-body"]').exists()).toBe(true)
+    // 历史版本提示必须上屏（引用来自旧版本）
+    expect(wrapper.find('[data-test="viewer-history-notice"]').exists()).toBe(true)
   })
 })
