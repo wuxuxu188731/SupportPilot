@@ -76,7 +76,7 @@ const heading = computed(() => props.target.title)
   display: flex;
   align-items: center;
   gap: var(--sp-space-2);
-  padding: var(--sp-space-3);
+  padding: var(--sp-space-4) var(--sp-space-3) var(--sp-space-2);
   border-bottom: 1px solid var(--sp-color-border);
 }
 
