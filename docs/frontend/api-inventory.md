@@ -704,8 +704,8 @@ A=仅 admin；✅/❌ 同理。P=公开。
   active_version_id, loader_version, chunker_version, content_hash, text,
   text_length, outline[]}`。
   - `text_length` 是**Python 字符数**（不是 utf-8 字节数），前端据此做偏移越界自检；
-  - `source_type ∈ markdown/text/word/pdf`：`word`/`pdf` 时前端应提示
-    「正文为入库时自动转换的 Markdown，与原文排版可能不一致」；
+  - `source_type ∈ markdown/text/word/pdf`：`word`/`pdf` 表示正文是入库阶段由解析
+    服务转换出的 Markdown（**前端不再为此单独上屏提示**，见本节末尾「前端落地」）；
   - `active_version_id != version_id` 表示读的是**历史版本**，前端应提示
     「该引用来自历史版本 vN，当前有效版本为 vM」；
   - `outline[]` 为标题目录（`{level, title, heading_path, char_offset}`），
@@ -741,8 +741,13 @@ A=仅 admin；✅/❌ 同理。P=公开。
     （走默认 60 秒超时，可重试，**不带**上传用的长超时）；
   - 查看器 `components/knowledge/DocumentContentViewer.vue`：渲染 `text`（安全
     Markdown 渲染器，`html:false`）、渲染 `outline` 目录并支持点击跳转、
-    按偏移高亮并滚动定位；`word`/`pdf`、历史版本、`disabled`、
-    偏移缺失四类提示均按本节口径**必须上屏**；
+    按偏移高亮并滚动定位；历史版本、`disabled`、偏移缺失三类提示按本节口径
+    **必须上屏**；
+  - **调整（2026-09-16，产品决定）**：`word`/`pdf` 的「正文为入库时由 PDF/Word
+    自动转换的 Markdown，与原文排版可能不一致」提示**已从查看器移除**，
+    正文本身仍照常按转换后的 Markdown 渲染；`source_type` 字段与接口口径不变
+    （回归测试改为守着「不再出现该提示」，见
+    `frontend/src/components/knowledge/__tests__/DocumentContentViewer.spec.ts`）；
   - 历史版本提示需要「当前有效版本 vM」，而本响应只带本次版本的 `version_no`：
     查看器在确认是历史版本时**额外调用一次** `GET /knowledge/documents/{id}/`
     取版本号（按文档缓存，同文档内切换引用不重复请求）；取不到时文案退回

@@ -154,7 +154,7 @@ export interface DocumentContentResponse {
   version_no: number
   /** 文档标题（服务端可信来源，取自文档表，不采用引用里的标题） */
   title: string
-  /** 来源类型：word/pdf 表示正文是入库时自动转换的 Markdown，需上屏提示 */
+  /** 来源类型：word/pdf 表示正文是入库时自动转换的 Markdown（查看器不再为此单独上屏提示） */
   source_type: DocumentSourceTypeValue
   /** 文档当前状态：disabled 表示已停用（正文仍可读，但不再参与检索） */
   status: DocumentStatusValue

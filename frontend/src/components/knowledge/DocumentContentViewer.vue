@@ -311,16 +311,10 @@ onBeforeUnmount(() => {
         </n-text>
       </header>
 
-      <!-- 必须上屏的提示（设计稿 4.8）：来源转换、历史版本、停用、无法精确定位 -->
+      <!-- 必须上屏的提示（设计稿 4.8）：历史版本、停用、无法精确定位。
+           来源转换提示（PDF/Word → Markdown）已按要求移除：它只在 word/pdf
+           文档上出现，属于用户已知的既有事实，不必每次查看正文都提示。 -->
       <div class="doc-notices">
-        <n-alert
-          v-if="content.source_type === 'word' || content.source_type === 'pdf'"
-          type="info"
-          :show-icon="false"
-          data-test="viewer-converted-notice"
-        >
-          正文为入库时由 PDF/Word 自动转换的 Markdown，与原文排版可能不一致。
-        </n-alert>
         <n-alert
           v-if="isHistorical"
           type="warning"

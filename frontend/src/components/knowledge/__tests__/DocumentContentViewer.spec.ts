@@ -1,5 +1,5 @@
 /*
- * 正文查看器组件测试：加载/错误/空态、安全渲染、四类必须上屏的提示、
+ * 正文查看器组件测试：加载/错误/空态、安全渲染、必须上屏的提示、
  * 偏移高亮与降级、目录跳转、同一版本不重复请求。
  *
  * 通过 mock @/api/knowledge 进行，不触达网络；正文渲染走真实 markdown 渲染器，
@@ -143,28 +143,17 @@ describe('DocumentContentViewer 三态与安全渲染', () => {
 })
 
 describe('DocumentContentViewer 必须上屏的提示', () => {
-  it('source_type 为 pdf/word 时提示正文是自动转换的 Markdown', async () => {
-    // 保护行为：缺失转换提示会让用户"以为看到原文"（设计稿 4.8 第 1 条）
+  it('pdf/word 文档不再出现「PDF/Word 转换」提示', async () => {
+    // 产品决定（本次调整）：来源转换属于用户已知事实，不再每次查看正文都上屏。
+    // 该用例防止提示被无意加回，同时保护正文本身仍按转换后的 Markdown 正常渲染。
     vi.mocked(getDocumentVersionContent).mockResolvedValue(
       contentResponse({ source_type: 'pdf' }),
     )
     const wrapper = mountViewer()
     await flushPromises()
 
-    const notice = wrapper.find('[data-test="viewer-converted-notice"]')
-    expect(notice.exists()).toBe(true)
-    expect(notice.text()).toContain('PDF/Word')
-  })
-
-  it('markdown/text 文档不出现转换提示', async () => {
-    // 边界情况：本地解码的正文与原文一致，不需要转换提示
-    vi.mocked(getDocumentVersionContent).mockResolvedValue(
-      contentResponse({ source_type: 'markdown' }),
-    )
-    const wrapper = mountViewer()
-    await flushPromises()
-
     expect(wrapper.find('[data-test="viewer-converted-notice"]').exists()).toBe(false)
+    expect(wrapper.find('[data-test="viewer-body"]').text()).toContain('签收后 7 日内可申请退货')
   })
 
   it('引用版本不是当前有效版本时提示两个版本号', async () => {

@@ -217,6 +217,8 @@ token 成本可忽略，但要在提示词层面确认不会诱导模型在回�
   「该引用来自历史版本 vN，当前有效版本为 vM」，而不是报错或悄悄显示新版本正文。
 - **引用是 `word/pdf` 来源**：界面上必须写清「正文为入库时由 PDF/Word 转换的 Markdown，
   与原文排版可能不一致」，这是你方案里最关键的一条产品事实，不能省略。
+  > 后续调整（2026-09-16，产品决定）：查看器不再上屏这条提示（用户已知该事实，
+  > 每次查看正文都提示过于打扰）；PDF/Word 正文仍按转换后的 Markdown 渲染。
 
 ## 5. 改动范围清单
 
@@ -243,7 +245,7 @@ token 成本可忽略，但要在提示词层面确认不会诱导模型在回�
 | `src/api/knowledge.ts` | 新增 `getDocumentVersionContent()` |
 | `src/api/types.ts` | `Citation` 增加 `start_offset/end_offset`（可空） |
 | `src/utils/markdown.ts` | 新增"按字符区间高亮"能力（或独立 `markdownRange.ts` + 测试） |
-| `src/components/knowledge/DocumentContentViewer.vue` | 新组件：加载正文、Markdown 渲染、跳转+高亮、转换提示、目录 |
+| `src/components/knowledge/DocumentContentViewer.vue` | 新组件：加载正文、Markdown 渲染、跳转+高亮、历史版本/停用/降级提示、目录（来源转换提示已于 2026-09-16 移除） |
 | `src/components/chat/CitationList.vue` | 引用卡片新增「查看原文位置」入口，emit/路由到查看器 |
 | `src/views/KnowledgeDetailView.vue` | 嵌入查看器入口，删掉"暂不提供正文"的说明（:271-274） |
 | `src/views/ChatView.vue` | 承载抽屉（或路由）与"引用 → 正文"的联动 |
@@ -286,6 +288,8 @@ token 成本可忽略，但要在提示词层面确认不会诱导模型在回�
    表格内 chunk、代码块内 chunk、重复文本（不能用 `find()`）。
 4. **历史引用**（刷新后消失、旧版本引用）是产品体验上的已知缺口，需要先明确"不承诺"。
 5. **PDF/Word 正文的"转换事实"**必须在 UI 上说清，否则用户会以为看到了原文并据此追责排版差异。
+   > 后续调整（2026-09-16，产品决定）：查看器内该提示已**移除**，只在知识库详情页
+   > 「查看正文」按钮下保留一句常驻说明（`KnowledgeDetailView.vue` 的 `.content-note`）。
 6. 本文档所有源码位置基于当前工作区快照；若期间有改动，实施前需复核行号与字段。
 7. **完全无法跳转的情形要提前想好文案**：文档处于 `processing`（尚未解析，`raw_text` 为 NULL）、
    引用所属版本已被清理、或正文与偏移自检不通过时，入口应给出「该引用暂时无法定位到正文」
