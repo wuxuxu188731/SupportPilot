@@ -14,13 +14,18 @@
 >   `app/api/dependencies.py` / `tests/api/*`，并在导入阶段用临时环境变量
 >   在内存中生成 OpenAPI（`app.openapi()`，未启动服务器、未修改任何配置、
 >   DB 指向临时目录）交叉核对；两种口径结果一致。
-> - 统计结果：**21 个路径、26 个 HTTP 操作**（不含 FastAPI 自带的
+> - 统计结果：**22 个路径、27 个 HTTP 操作**（不含 FastAPI 自带的
 >   `/docs`、`/openapi.json` 等）。
 > - **勘误（2026-09-11 手工测试 DEF-04）**：本节此前写「23 个路径」有误，
 >   实际为 **21 个路径**。`42b83d9` 的 **23** 是**操作数**（由 git 历史核对：
 >   当时会话 5 + 认证 3 + 知识库 7 + 审批 5 + 组织 3 = 23 个操作、20 个路径），
->   被误写进路径统计。`app.openapi()` 实测：21 路径 / 26 操作，与本节
->   4.x 各小节逐条列出的数量一致。
+>   被误写进路径统计。`app.openapi()` 实测（新增正文接口前）：21 路径 / 26 操作，
+>   与本节 4.x 各小节逐条列出的数量一致。
+> - **正文接口增量（2026-09-09，知识库正文查看与引用跳转任务 A3）**：新增
+>   4.4.8 `GET /knowledge/documents/{id}/versions/{id}/content/`，接口面变为
+>   **22 个路径、27 个操作**；同时 `Citation` 增加 `start_offset`/`end_offset`
+>   两个可空字段（见附录 A.8）。盘点口径与源码核对见
+>   `docs/superpowers/specs/2026-09-09-knowledge-document-content-viewer-design.md`。
 
 ---
 
@@ -38,7 +43,7 @@
 | 认证 authentication | `/auth` | 3 | 注册、登录、查询当前用户（登录态恢复） |
 | 组织 organizations | `/organizations` | 6 | 创建企业、列出我的企业、添加成员、成员列表、修改成员角色、移除成员 |
 | 会话与聊天 conversations | `/conversations` | 5 | 会话列表/新建、单轮聊天、历史读取、更新会话系统提示词 |
-| 知识库 knowledge | `/knowledge` | 7 | 文档上传/新版本、列表/详情、停用/启用、入库任务查询 |
+| 知识库 knowledge | `/knowledge` | 8 | 文档上传/新版本、列表/详情、正文读取、停用/启用、入库任务查询 |
 | 退款/补偿审批与 Run | `/approvals`、`/action-runs` | 5 | 审批列表/详情/决定、Run 状态/恢复 |
 
 角色与权限矩阵（详见各接口小节）：
@@ -52,7 +57,7 @@
 | 查看企业成员列表 | ❌ | ✅ | ✅ |
 | 修改成员角色 / 移除成员 | ❌ | ❌ | ✅（不能作用于自己） |
 | 会话列表/创建/聊天/历史读取/改提示词（限自己所属企业+自己创建的会话） | ❌ | ✅ | ✅ |
-| 知识库读接口（列表/详情/任务） | ❌ | ✅ | ✅ |
+| 知识库读接口（列表/详情/任务/正文） | ❌ | ✅ | ✅ |
 | 知识库写接口（上传/新版本/停用/启用） | ❌ | ❌ | ✅ |
 | 审批列表/详情、Run 状态（本企业范围） | ❌ | ✅ | ✅ |
 | 审批决定、显式恢复 Run | ❌ | ❌ | ✅ |
@@ -188,14 +193,15 @@ A=仅 admin；✅/❌ 同理。P=公开。
 | 16 | 知识库 | POST | `/knowledge/documents/{document_id}/disable/` | 停用文档 | ✅ | ✅ | A | 200 | 列表/详情停用按钮 |
 | 17 | 知识库 | POST | `/knowledge/documents/{document_id}/enable/` | 重新启用文档 | ✅ | ✅ | A | 200 | 列表/详情启用按钮 |
 | 18 | 知识库 | GET | `/knowledge/ingestion-jobs/{job_id}/` | 查询入库任务状态/错误 | ✅ | ✅ | G | 200 | 上传失败后的任务详情/重试提示 |
-| 19 | 审批 | GET | `/approvals/` | 审批列表（可筛选状态、分页） | ✅ | ✅ | G | 200 | 审批列表页（待办/全部 Tab） |
-| 20 | 审批 | GET | `/approvals/{approval_id}/` | 审批详情（版本、Run、决定） | ✅ | ✅ | G | 200 | 审批详情页 |
-| 21 | 审批 | POST | `/approvals/{approval_id}/decisions/` | 批准/修改后批准/拒绝 | ✅ | ✅ | A | 201/202/200 | 审批详情页决定表单 |
-| 22 | Run | GET | `/action-runs/{run_id}/` | Action Run 状态查询 | ✅ | ✅ | G | 200 | Run 状态面板/失败恢复页 |
-| 23 | Run | POST | `/action-runs/{run_id}/resume/` | 显式恢复 Run | ✅ | ✅ | A | 200 | Run 状态面板“恢复”按钮 |
-| 24 | 组织 | GET | `/organizations/{organization_id}/members/` | 企业成员列表 | ✅ | ❌ | G（成员均可读） | 200 | 成员管理页列表 |
-| 25 | 组织 | PATCH | `/organizations/{organization_id}/members/{user_id}/` | 修改成员角色 | ✅ | ❌ | A（不能改自己） | 200 | 成员管理页角色下拉 |
-| 26 | 组织 | DELETE | `/organizations/{organization_id}/members/{user_id}/` | 移除成员 | ✅ | ❌ | A（不能移除自己） | 204 | 成员管理页“移除”按钮 |
+| 19 | 知识库 | GET | `/knowledge/documents/{document_id}/versions/{version_id}/content/` | 读取指定版本归一化 Markdown 正文（含目录） | ✅ | ✅ | G | 200 | 引用跳转定位、文档正文查看面板 |
+| 20 | 审批 | GET | `/approvals/` | 审批列表（可筛选状态、分页） | ✅ | ✅ | G | 200 | 审批列表页（待办/全部 Tab） |
+| 21 | 审批 | GET | `/approvals/{approval_id}/` | 审批详情（版本、Run、决定） | ✅ | ✅ | G | 200 | 审批详情页 |
+| 22 | 审批 | POST | `/approvals/{approval_id}/decisions/` | 批准/修改后批准/拒绝 | ✅ | ✅ | A | 201/202/200 | 审批详情页决定表单 |
+| 23 | Run | GET | `/action-runs/{run_id}/` | Action Run 状态查询 | ✅ | ✅ | G | 200 | Run 状态面板/失败恢复页 |
+| 24 | Run | POST | `/action-runs/{run_id}/resume/` | 显式恢复 Run | ✅ | ✅ | A | 200 | Run 状态面板“恢复”按钮 |
+| 25 | 组织 | GET | `/organizations/{organization_id}/members/` | 企业成员列表 | ✅ | ❌ | G（成员均可读） | 200 | 成员管理页列表 |
+| 26 | 组织 | PATCH | `/organizations/{organization_id}/members/{user_id}/` | 修改成员角色 | ✅ | ❌ | A（不能改自己） | 200 | 成员管理页角色下拉 |
+| 27 | 组织 | DELETE | `/organizations/{organization_id}/members/{user_id}/` | 移除成员 | ✅ | ❌ | A（不能移除自己） | 204 | 成员管理页“移除”按钮 |
 
 ---
 
@@ -541,11 +547,12 @@ A=仅 admin；✅/❌ 同理。P=公开。
   `system_prompt` 字段回读（最近一次 PUT 成功后的值以本地最近保存值为准，
   二者一致）；新会话的提示词可在创建时传入。
 
-### 4.4 知识库 `/knowledge`（7 个）
+### 4.4 知识库 `/knowledge`（8 个）
 
 > 错误体统一 `{"code": "...", "message": "..."}`（除 403 外），code→状态码
 > 映射见附录 B.1。403 为 `{"detail": "admin role required"}` 字符串形态。
-> 写接口（上传/新版本/停用/启用）仅 admin；读接口（列表/详情/任务）成员均可。
+> 写接口（上传/新版本/停用/启用）仅 admin；读接口（列表/详情/任务/正文）
+> 成员均可。
 
 #### 4.4.1 POST `/knowledge/documents/` — 上传文档（201，admin，同步入库）
 
@@ -624,8 +631,8 @@ A=仅 admin；✅/❌ 同理。P=公开。
 - 鉴权：Bearer + X-Organization-ID。
 - Path 参数：`document_id`。
 - 成功：`200`，`KnowledgeDocumentDetailResponse`（见附录 A.10）。
-  注意：**响应不含文档正文/原文**（`DocumentVersionResponse` 无 raw_text），
-  “查看文档内容”当前无法通过 API 实现。
+  注意：**响应不含文档正文/原文**（`DocumentVersionResponse` 无 raw_text）——
+  这是刻意的边界，正文只允许从 4.4.8 的正文接口按版本读取（有回归测试守着）。
 - 错误：`404 {"code": "DOCUMENT_NOT_FOUND", "message": "..."}`（跨企业文档与
   不存在文档同响应，不泄露标题）。
 - 源码：`app/api/knowledge_router.py`（`get_document_detail`）、
@@ -675,6 +682,55 @@ A=仅 admin；✅/❌ 同理。P=公开。
 - 测试：`tests/api/test_knowledge_router.py`（`test_list_jobs_returns_current_
   org_job`、`test_list_jobs_cross_tenant_is_404`）。
 - 建议页面：上传结果提示/任务错误详情抽屉。
+
+#### 4.4.8 GET `/knowledge/documents/{document_id}/versions/{version_id}/content/` — 读取版本正文（200，成员）
+
+- 用途：读取**指定版本**的归一化 Markdown 正文，供前端展示文档内容、并从知识
+  引用（`citations[].start_offset/end_offset`）跳转定位到正文对应位置。
+- 关键事实：返回的 `text` 就是入库时解析/转换后的那份正文
+  （`document_versions.raw_text`）——PDF/Word 在入库阶段已由解析服务转成
+  Markdown，**前端不渲染 PDF/Word 原文**；知识块的偏移也相对这份正文，因此
+  跳转天然对齐。按版本读取是硬要求：偏移相对某个版本，换版本即失效。
+- 鉴权：Bearer + X-Organization-ID；**企业成员均可读**（admin 与 agent 同样）。
+- Path 参数：`document_id`、`version_id`（两个独立参数，服务端按
+  「企业 + 文档 + 版本」三重限定校验，混搭 id 一律 404）。
+- 成功：`200`，`DocumentContentResponse`（字段见附录 A.11）：
+  `{document_id, version_id, version_no, title, source_type, status,
+  active_version_id, loader_version, chunker_version, content_hash, text,
+  text_length, outline[]}`。
+  - `text_length` 是**Python 字符数**（不是 utf-8 字节数），前端据此做偏移越界自检；
+  - `source_type ∈ markdown/text/word/pdf`：`word`/`pdf` 时前端应提示
+    「正文为入库时自动转换的 Markdown，与原文排版可能不一致」；
+  - `active_version_id != version_id` 表示读的是**历史版本**，前端应提示
+    「该引用来自历史版本 vN，当前有效版本为 vM」；
+  - `outline[]` 为标题目录（`{level, title, heading_path, char_offset}`），
+    `char_offset` 是标题行首的字符偏移，用于目录导航，以及在引用缺少精确偏移时
+    降级为「跳到所属章节」。
+- 错误：
+  - `404 DOCUMENT_NOT_FOUND`——文档不存在 / 属于其它企业 / `version_id` 不属于
+    该 `document_id` / 版本已预留但正文尚未解析（`raw_text` 为 NULL，异步入库
+    中间态）。四种情形口径完全一致，不区分原因，也不返回空正文冒充成功。
+- 行为要点：
+  - 文档被**停用**（`status=disabled`）时正文**仍可读**（历史引用可能指向它），
+    响应里 `status` 如实返回 `disabled`；
+  - 历史（非 active）版本同样可读；
+  - 与详情/版本接口的边界：`GET /knowledge/documents/{id}/` 及其 `versions[]`
+    **仍然不含** `raw_text`（有回归测试守着），正文只从这个接口取。
+- 源码：`app/api/knowledge_router.py`（`get_document_version_content`）、
+  `app/schemas/knowledge.py`（`DocumentContentResponse`）、
+  `app/knowledge/outline.py`（`extract_outline`）。
+- 测试：`tests/api/test_knowledge_router.py`（`test_content_endpoint_returns_
+  markdown_and_outline_for_member`、`test_content_endpoint_converted_pdf_reports_
+  source_type_and_text`、`test_content_endpoint_is_404_for_other_organization_
+  document`、`test_content_endpoint_is_404_for_other_organization_version_id`、
+  `test_content_endpoint_is_404_for_version_of_another_document`、
+  `test_content_endpoint_is_404_when_version_has_no_parsed_text`、
+  `test_content_endpoint_reads_disabled_document`、`test_content_endpoint_reads_
+  historical_version_with_active_version_id`、`test_content_endpoint_does_not_
+  leak_other_versions_of_same_document`、`test_content_endpoint_is_404_for_
+  unknown_document_or_version`）；目录偏移单测见 `tests/knowledge/test_outline.py`。
+- 建议页面：对话页右侧正文面板（引用点击 → 面板打开并高亮对应区间）、知识库
+  详情页「查看正文」。
 
 ### 4.5 退款/补偿审批与 Action Run（5 个）
 
@@ -925,9 +981,9 @@ A=仅 admin；✅/❌ 同理。P=公开。
 8. **Run 列表接口**：没有 `/action-runs` 列表；Run 只能从聊天
    `pending_approvals`、审批详情（`run.run_id`）进入查询。审批详情与决定
    响应都带 run_id，够用但入口有限。
-9. **知识库**：无文档删除（只能 disable）、无正文预览（detail 不含
-   raw_text）、无列表分页/搜索、无文档下载；“立即重新入库”只能靠重传同
-   内容文件。
+9. **知识库**：无文档删除（只能 disable）、无列表分页/搜索、无文档**原始文件**
+   下载（正文查看已由 4.4.8 提供：读的是入库时转换后的 Markdown，不是 PDF/Word
+   原件）；“立即重新入库”只能靠重传同内容文件。
 10. **待办角标/汇总**：无“待我审批数量”汇总接口（可本地用
     `GET /approvals/?status=pending&limit=1` 近似，但拿不到总数）。
 11. **角色/成员异动通知**：无推送；只能靠用户手动刷新或进入页面时重新拉取。
@@ -1074,7 +1130,14 @@ A=仅 admin；✅/❌ 同理。P=公开。
 ### A.8 Citation / RetrievalSummary / PendingApproval
 
 - `Citation`：`citation_id`(C1..Cn 标签), `document_id`, `version_id`,
-  `chunk_id`, `title`, `heading_path|null`, `content`(可信片段正文)
+  `chunk_id`, `title`, `heading_path|null`, `content`(可信片段正文),
+  `start_offset|null`, `end_offset|null`
+  - 两个偏移是**该片段在所属版本文正中的字符区间**（满足
+    `text[start_offset:end_offset] == content`），供前端跳转定位到正文；
+  - 取 `null` 表示无法精确定位（历史/降级载荷），前端应降级为「只打开来源
+    文档」；判断请用 `== null`，**不要用 `!start_offset`**（偏移 0 合法）；
+  - 定位时用 `document_id + version_id + start_offset/end_offset` 调 4.4.8
+    取正文，详见 `docs/superpowers/specs/2026-09-09-knowledge-document-content-viewer-design.md`。
 - `RetrievalSummary`：`strategy`(string), `round_count`(int),
   `evidence_status`("SUFFICIENT"/"INSUFFICIENT", **大写**), `latency_ms`(int)
 - `PendingApproval`：`run_id`, `proposal_id`, `approval_id`, `action_type`
@@ -1100,23 +1163,34 @@ A=仅 admin；✅/❌ 同理。P=公开。
 - Detail = Summary 字段 + `versions: DocumentVersionResponse[]` +
   `latest_job: IngestionJobResponse|null`
 
-### A.11 DecisionRequest / DecisionChanges
+### A.11 DocumentContentResponse（正文读取接口，见 4.4.8）
+
+- `document_id, version_id, version_no, title, source_type, status,
+  active_version_id|null, loader_version, chunker_version, content_hash|null,
+  text, text_length, outline[]`
+- `text`：归一化 Markdown 正文（PDF/Word 已在入库阶段转换完成）；
+  `text_length` 为 Python 字符数；
+  `outline[]`：`{level(1-6), title, heading_path, char_offset}`，
+  `heading_path` 与知识块的口径一致（含标题自身、以 `/` 连接），
+  `char_offset` 为标题行首的字符偏移
+
+### A.12 DecisionRequest / DecisionChanges
 
 见 4.5.3 表；`changes` 仅在 `approved_with_changes` 时出现且必填。
 
-### A.12 ApprovalListItemResponse
+### A.13 ApprovalListItemResponse
 
 `approval_id, proposal_id, order_id, action_type, approval_status,
 run_status, current_version: VersionView|null, version_count: int,
 decision: DecisionView|null, created_at`
 
-### A.13 ApprovalDetailResponse
+### A.14 ApprovalDetailResponse
 
 `approval_id, proposal_id, order_id, action_type, approval_status,
 run: RunView, requested_version: VersionView, current_version|null,
 versions: VersionView[], decision|null, self_approved: bool, created_at`
 
-### A.14 RunView / ProposalView / ApprovalView / DecisionView / VersionView / ExecutionView
+### A.15 RunView / ProposalView / ApprovalView / DecisionView / VersionView / ExecutionView
 
 - `RunView`：`run_id, workflow_type(refund/compensation), status, created_by_
   user_id, last_error_code|null, last_error_retryable, created_at, updated_at,

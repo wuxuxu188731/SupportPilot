@@ -92,10 +92,13 @@ class FakeIngestionService:
 
 
 class FakeKnowledgeStore:
-    """In-memory tenant-scoped store mirroring the read surface the router
-    needs: list_documents, get_document, list_versions, latest-job lookup and
-    set_document_status. ``DocumentNotFoundError`` is raised for ids missing or
-    owned by another organization, exactly like the real SQLite store."""
+    """内存版、按租户隔离的知识库 store，镜像路由实际用到的那部分读接口：
+    ``list_documents``、``get_document``、``list_versions``、``get_version_by_id``、
+    最近任务查询与 ``set_document_status``。
+
+    隔离口径与真实 SQLite store 一致：id 不存在、或属于其它企业时统一抛
+    ``DocumentNotFoundError``，测试因此能验证"跨租户读不到"而不是"恰好没数据"。
+    """
 
     def __init__(self) -> None:
         self._documents: dict[str, KnowledgeDocument] = {}
@@ -127,6 +130,29 @@ class FakeKnowledgeStore:
         if doc is None or doc.organization_id != organization_id:
             raise DocumentNotFoundError(organization_id, document_id)
         return doc
+
+    def get_version_by_id(
+        self,
+        *,
+        organization_id: str,
+        document_id: str,
+        version_id: str,
+    ):
+        """按 (企业, 文档, 版本) 三重限定取版本，与真实 store 的 WHERE 条件一一对应。
+
+        这三重校验缺一不可：``version_id`` 与 ``document_id`` 是 URL 上两个独立的
+        路径参数，客户端可以把它们自由组合（拿 A 企业的版本 id 配 B 企业的文档 id，
+        或配同企业另一个文档的 id）。少了 ``organization_id``/``document_id`` 任一
+        条件，测试就会在"跨租户/跨文档读取"上假通过。
+        """
+        version = self._versions.get(version_id)
+        if (
+            version is None
+            or version.organization_id != organization_id
+            or version.document_id != document_id
+        ):
+            raise DocumentNotFoundError(organization_id, document_id)
+        return version
 
     def list_versions(self, *, organization_id: str, document_id: str):
         self.get_document(organization_id=organization_id, document_id=document_id)
@@ -229,6 +255,7 @@ def make_version(
     *,
     version_no: int,
     content_hash: str,
+    raw_text: str | None = "secret body must never appear in a response",
 ) -> DocumentVersion:
     return DocumentVersion(
         version_id=version_id,
@@ -237,7 +264,10 @@ def make_version(
         version_no=version_no,
         content_hash=content_hash,
         source_hash=None,
-        raw_text="secret body must never appear in a response",
+        # 默认值是"绝不允许出现在响应里的哨兵正文"：详情/版本接口的防泄漏断言
+        # 依赖它。只有正文接口的用例才显式传入真实正文。
+        # 显式传 None 用来模拟"版本已预留但尚未解析"（异步入库中间态）。
+        raw_text=raw_text,
         loader_version="loader-v1",
         chunker_version="chunker-v1",
         embedding_model="text-embedding-v4",
@@ -631,3 +661,278 @@ def test_extra_organization_id_field_is_rejected(client_and_service):
 
     assert response.status_code == 422
     assert service.new_document_calls == []
+
+
+# ------------------------------------------- 正文读取接口（content endpoint）
+
+# 详情/版本接口必须继续隐藏正文，这里用哨兵值断言"没有泄漏"。
+SENTINEL_RAW_TEXT = "secret body must never appear in a response"
+
+# 真实感正文：既覆盖中文多字节，也覆盖两级标题（用于目录偏移断言）。
+CONTENT_TEXT = "# 退货总则\n\n本店支持七天无理由退货。\n\n## 3.2 退货流程\n\n签收后 7 日内可申请退货。"
+
+
+def _seed_content_document(
+    service,
+    *,
+    document_id: str = "doc-a",
+    version_id: str = "version-1",
+    org_id: str = ORG_A,
+    user_id: str = USER_A,
+    title: str = "企业A政策",
+    source_type: DocumentSourceType = DocumentSourceType.MARKDOWN,
+    status: DocumentStatus = DocumentStatus.ACTIVE,
+    active_version_id: str | None = "version-1",
+    raw_text: str | None = CONTENT_TEXT,
+) -> None:
+    """播撒"一个文档 + 一个版本"，供正文接口用例复用。
+
+    ``raw_text`` 显式传 None 用来模拟异步入库的中间态（版本已预留、正文未回填）。
+    """
+    service.store.add_document(
+        make_document(
+            document_id,
+            org_id,
+            user_id,
+            title=title,
+            source_type=source_type,
+            status=status,
+            active_version_id=active_version_id,
+        )
+    )
+    service.store.add_version(
+        make_version(
+            version_id,
+            org_id,
+            document_id,
+            version_no=1,
+            content_hash="sha256:content",
+            raw_text=raw_text,
+        )
+    )
+
+
+def test_content_endpoint_returns_markdown_and_outline_for_member(client_and_service):
+    # 保护行为：普通成员（agent）可读正文；响应含归一化 Markdown、字符长度与
+    # 标题目录（含每个标题的行首字符偏移），且 offset 按 Python 字符计数
+    # ——中文一个字算 1（不是 utf-8 的 3 字节），前端据此做偏移越界自检。
+    client, service = client_and_service(role=MembershipRole.AGENT)
+    _seed_content_document(service)
+
+    response = client.get("/knowledge/documents/doc-a/versions/version-1/content/")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["document_id"] == "doc-a"
+    assert body["version_id"] == "version-1"
+    assert body["version_no"] == 1
+    assert body["title"] == "企业A政策"
+    assert body["source_type"] == "markdown"
+    assert body["status"] == "active"
+    assert body["active_version_id"] == "version-1"
+    assert body["loader_version"] == "loader-v1"
+    assert body["chunker_version"] == "chunker-v1"
+    assert body["content_hash"] == "sha256:content"
+    assert body["text"] == CONTENT_TEXT
+    assert body["text_length"] == len(CONTENT_TEXT)
+    assert body["outline"] == [
+        {
+            "level": 1,
+            "title": "退货总则",
+            "heading_path": "退货总则",
+            "char_offset": 0,
+        },
+        {
+            "level": 2,
+            "title": "3.2 退货流程",
+            "heading_path": "退货总则/3.2 退货流程",
+            "char_offset": CONTENT_TEXT.index("## 3.2 退货流程"),
+        },
+    ]
+
+
+def test_content_endpoint_converted_pdf_reports_source_type_and_text(client_and_service):
+    # 保护行为：PDF/Word 文档的"正文"就是入库时转换出的 Markdown，
+    # 来源类型如实上报，前端据此提示"与原文排版可能不一致"。
+    client, service = client_and_service(role=MembershipRole.AGENT)
+    _seed_content_document(
+        service,
+        source_type=DocumentSourceType.PDF,
+        title="售后服务总则",
+    )
+
+    response = client.get("/knowledge/documents/doc-a/versions/version-1/content/")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["source_type"] == "pdf"
+    assert body["text"] == CONTENT_TEXT
+
+
+def test_content_endpoint_is_404_for_other_organization_document(client_and_service):
+    # 边界情况（跨租户）：企业 B 的文档正文不能被企业 A 的成员读到，
+    # 且 404 响应里不得出现 B 企业的标题或正文——与"不存在"完全同一口径。
+    client, service = client_and_service(role=MembershipRole.AGENT)
+    _seed_content_document(
+        service,
+        document_id="doc-b",
+        version_id="version-b",
+        org_id=ORG_B,
+        user_id=USER_B,
+        title="企业B机密标题",
+        raw_text="# 企业B机密正文",
+    )
+
+    response = client.get("/knowledge/documents/doc-b/versions/version-b/content/")
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "DOCUMENT_NOT_FOUND"
+    assert "企业B机密标题" not in response.text
+    assert "企业B机密正文" not in response.text
+
+
+def test_content_endpoint_is_404_for_other_organization_version_id(client_and_service):
+    # 边界情况（跨租户 + 混搭 id）：用本企业自己的 document_id 配其它企业的
+    # version_id。document_id 与 version_id 是 URL 上两个独立参数，客户端可以
+    # 自由组合，因此版本查询必须同时限定企业与文档。
+    client, service = client_and_service(role=MembershipRole.AGENT)
+    _seed_content_document(service, document_id="doc-a", version_id="version-a")
+    _seed_content_document(
+        service,
+        document_id="doc-b",
+        version_id="version-b",
+        org_id=ORG_B,
+        user_id=USER_B,
+        title="企业B政策",
+        raw_text="# 企业B正文",
+    )
+
+    response = client.get("/knowledge/documents/doc-a/versions/version-b/content/")
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "DOCUMENT_NOT_FOUND"
+    assert "企业B正文" not in response.text
+
+
+def test_content_endpoint_is_404_for_version_of_another_document(client_and_service):
+    # 边界情况（跨文档）：同企业内，用 doc-a 的 document_id 去读 doc-b 的版本，
+    # 同样必须 404——否则四层 id 校验形同虚设。
+    client, service = client_and_service(role=MembershipRole.AGENT)
+    _seed_content_document(service, document_id="doc-a", version_id="version-a")
+    _seed_content_document(
+        service,
+        document_id="doc-b",
+        version_id="version-b",
+        title="另一个文档",
+        raw_text="# 另一个文档的正文",
+    )
+
+    response = client.get("/knowledge/documents/doc-a/versions/version-b/content/")
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "DOCUMENT_NOT_FOUND"
+
+
+def test_content_endpoint_is_404_when_version_has_no_parsed_text(client_and_service):
+    # 边界情况（异步入库中间态）：版本行已预留但正文尚未回填（raw_text 为 NULL）。
+    # 必须 404，绝不能返回空正文冒充成功——那会让用户以为文档本来就是空的。
+    client, service = client_and_service(role=MembershipRole.AGENT)
+    _seed_content_document(service, raw_text=None)
+
+    response = client.get("/knowledge/documents/doc-a/versions/version-1/content/")
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "DOCUMENT_NOT_FOUND"
+    # 连带要求：正文缺失时既不能返回空正文，也不能把元数据里的正文带出来。
+    assert SENTINEL_RAW_TEXT not in response.text
+
+
+def test_content_endpoint_reads_disabled_document(client_and_service):
+    # 保护行为：文档被停用只影响"新的知识检索"，不影响查看正文——
+    # 历史引用可能正指向这份已停用文档。
+    client, service = client_and_service(role=MembershipRole.AGENT)
+    _seed_content_document(service, status=DocumentStatus.DISABLED)
+
+    response = client.get("/knowledge/documents/doc-a/versions/version-1/content/")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "disabled"
+    assert response.json()["text"] == CONTENT_TEXT
+
+
+def test_content_endpoint_reads_historical_version_with_active_version_id(
+    client_and_service,
+):
+    # 保护行为：引用可能来自历史版本，因此正文接口必须能按 version_id 读非
+    # 有效版本，并在响应里同时给出 active_version_id，供前端提示
+    # "该引用来自历史版本 vN，当前有效版本为 vM"。
+    client, service = client_and_service(role=MembershipRole.AGENT)
+    _seed_content_document(service, document_id="doc-a", version_id="version-old")
+    service.store.add_document(
+        make_document(
+            "doc-a",
+            ORG_A,
+            USER_A,
+            title="企业A政策",
+            active_version_id="version-new",
+        )
+    )
+    service.store.add_version(
+        make_version(
+            "version-new",
+            ORG_A,
+            "doc-a",
+            version_no=2,
+            content_hash="sha256:new",
+            raw_text="# 新版本正文",
+        )
+    )
+
+    response = client.get("/knowledge/documents/doc-a/versions/version-old/content/")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["version_id"] == "version-old"
+    assert body["version_no"] == 1
+    assert body["active_version_id"] == "version-new"
+    assert body["text"] == CONTENT_TEXT
+    # 当前有效版本的新正文不得出现在历史版本的响应里。
+    assert "新版本正文" not in response.text
+
+
+def test_content_endpoint_does_not_leak_other_versions_of_same_document(
+    client_and_service,
+):
+    # 边界情况：同一文档的其它版本正文（默认哨兵值）不得被顺带带出。
+    client, service = client_and_service(role=MembershipRole.AGENT)
+    _seed_content_document(service, document_id="doc-a", version_id="version-1")
+    service.store.add_version(
+        make_version(
+            "version-2", ORG_A, "doc-a", version_no=2, content_hash="sha256:two"
+        )
+    )
+
+    response = client.get("/knowledge/documents/doc-a/versions/version-1/content/")
+
+    assert response.status_code == 200
+    assert response.json()["text"] == CONTENT_TEXT
+    assert SENTINEL_RAW_TEXT not in response.text
+
+
+def test_content_endpoint_is_404_for_unknown_document_or_version(client_and_service):
+    # 边界情况：文档或版本完全不存在时都是 404（与跨租户同一口径，
+    # 不区分"不存在"和"不属于你"）。
+    client, service = client_and_service(role=MembershipRole.AGENT)
+    _seed_content_document(service, document_id="doc-a", version_id="version-1")
+
+    missing_document = client.get(
+        "/knowledge/documents/doc-missing/versions/version-1/content/"
+    )
+    missing_version = client.get(
+        "/knowledge/documents/doc-a/versions/version-missing/content/"
+    )
+
+    assert missing_document.status_code == 404
+    assert missing_version.status_code == 404
+    assert missing_document.json()["detail"]["code"] == "DOCUMENT_NOT_FOUND"
+    assert missing_version.json()["detail"]["code"] == "DOCUMENT_NOT_FOUND"

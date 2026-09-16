@@ -90,8 +90,8 @@ def load_app(monkeypatch, tmp_path):
 
 
 def test_knowledge_routes_registered_without_network(monkeypatch, tmp_path):
-    """知识库路由注册与导入不触网：7 条管理路径已注册，且导入带不可解析
-    QDRANT_URL 的 main 不会发起连接：集合初始化被推迟，导入期无 DNS/连接。"""
+    """知识库路由注册与导入不触网：7 条管理路径（含正文读取）已注册，且导入带
+    不可解析 QDRANT_URL 的 main 不会发起连接：集合初始化被推迟，导入期无 DNS/连接。"""
     database_path = tmp_path / "knowledge-app.db"
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-only-key")
     monkeypatch.setenv(
@@ -110,19 +110,20 @@ def test_knowledge_routes_registered_without_network(monkeypatch, tmp_path):
     assert "/knowledge/documents/" in paths
     assert "/knowledge/documents/{document_id}/" in paths
     assert "/knowledge/documents/{document_id}/versions/" in paths
+    assert "/knowledge/documents/{document_id}/versions/{version_id}/content/" in paths
     assert "/knowledge/documents/{document_id}/disable/" in paths
     assert "/knowledge/documents/{document_id}/enable/" in paths
     assert "/knowledge/ingestion-jobs/{job_id}/" in paths
-    # 6 条管理路径共 7 个操作：/knowledge/documents/ 同时有 POST 与 GET
+    # 7 条管理路径共 8 个操作：/knowledge/documents/ 同时有 POST 与 GET
     http_methods = {"get", "post", "put", "patch", "delete"}
     knowledge_paths = [path for path in paths if path.startswith("/knowledge/")]
-    assert len(knowledge_paths) == 6
+    assert len(knowledge_paths) == 7
     assert (
         sum(
             len([method for method in paths[path] if method in http_methods])
             for path in knowledge_paths
         )
-        == 7
+        == 8
     )
     assert sorted(method for method in paths["/knowledge/documents/"] if method in http_methods) == [
         "get",
@@ -541,7 +542,8 @@ def test_cors_headers_present_on_real_app_response(monkeypatch, tmp_path):
 
 
 def test_member_paths_registered_in_openapi(monkeypatch, tmp_path):
-    """成员管理三条路径已注册，且合计 26 个 HTTP 操作（第四阶段盘点口径）。"""
+    """成员管理三条路径已注册，且合计 27 个 HTTP 操作（在第四阶段盘点口径的
+    26 个之上，新增知识库正文读取接口 1 个）。"""
     app = load_app(monkeypatch, tmp_path)
     paths = app.openapi()["paths"]
     http_methods = {"get", "post", "put", "patch", "delete"}
@@ -561,4 +563,4 @@ def test_member_paths_registered_in_openapi(monkeypatch, tmp_path):
         len([method for method in methods if method in http_methods])
         for methods in paths.values()
     )
-    assert total_operations == 26
+    assert total_operations == 27

@@ -32,8 +32,10 @@ from app.knowledge.base import (
 )
 from app.knowledge.document_loader import MAX_DOCUMENT_BYTES
 from app.knowledge.ingestion import KnowledgeIngestionService
+from app.knowledge.outline import extract_outline
 from app.organizations.base import MembershipRole
 from app.schemas.knowledge import (
+    DocumentContentResponse,
     IngestionJobResponse,
     IngestionReceiptResponse,
     KnowledgeDocumentDetailResponse,
@@ -252,6 +254,62 @@ def create_knowledge_router(
             document=document,
             versions=versions,
             latest_job=latest_job,
+        )
+
+    @router.get(
+        "/documents/{document_id}/versions/{version_id}/content/",
+        response_model=DocumentContentResponse,
+    )
+    def get_document_version_content(
+        document_id: str,
+        version_id: str,
+        tenant: TenantContext = Depends(get_current_tenant),
+    ) -> DocumentContentResponse:
+        """读取指定版本归一化 Markdown 正文（成员可读，含历史版本）。
+
+        为什么必须显式带 ``version_id``：知识块的 ``start_offset``/``end_offset``
+        是相对**某一个版本**正文的字符偏移，版本一换偏移就失效，因此跳转必须绑定
+        版本，不能隐式用"当前有效版本"。
+
+        为什么不需要重新解析：``raw_text`` 就是入库时解析/归一化的那份 Markdown
+        （PDF/Word 已在入库阶段转换完成），切块与引用跳转都以它为准。
+
+        错误口径与其它读接口一致：文档不存在、跨租户、版本不属于该文档、
+        以及版本尚未解析出正文（``raw_text`` 为 NULL）一律 404，不区分原因，
+        也不返回空正文冒充成功。文档被停用（disabled）时正文仍可读——
+        历史引用可能正指向它。
+        """
+        try:
+            document = knowledge_store.get_document(
+                organization_id=tenant.organization_id,
+                document_id=document_id,
+            )
+            version = knowledge_store.get_version_by_id(
+                organization_id=tenant.organization_id,
+                document_id=document_id,
+                version_id=version_id,
+            )
+        except DocumentNotFoundError as exc:
+            raise HTTPException(
+                status_code=404,
+                detail=_error_payload(exc.code, exc.safe_message),
+            ) from exc
+        if version.raw_text is None:
+            # 异步入库的版本会先落库、后回填正文；此时没有可展示的内容。
+            # 用与"不存在"相同的 404 口径，避免暴露"该 id 存在但还没解析"。
+            raise HTTPException(
+                status_code=404,
+                detail=_error_payload(
+                    "DOCUMENT_NOT_FOUND",
+                    f"document {document_id} not found for organization "
+                    f"{tenant.organization_id}",
+                ),
+            )
+        return DocumentContentResponse.from_version_components(
+            document=document,
+            version=version,
+            text=version.raw_text,
+            outline=extract_outline(version.raw_text),
         )
 
     @router.post(
