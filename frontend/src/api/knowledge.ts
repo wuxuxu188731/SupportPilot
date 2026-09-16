@@ -1,6 +1,6 @@
 /*
- * 知识库 API 封装：/knowledge/ 的文档列表、详情、上传、新版本、停用/启用
- * 与入库任务查询。
+ * 知识库 API 封装：/knowledge/ 的文档列表、详情、正文读取、上传、新版本、
+ * 停用/启用与入库任务查询。
  *
  * 关键约定（与后端契约一致）：
  *  - 所有上传请求使用浏览器 FormData，字段**必须恰好**为 title + file：
@@ -18,6 +18,7 @@
 
 import { httpClient } from './http'
 import type {
+  DocumentContentResponse,
   IngestionJobInfo,
   IngestionReceipt,
   KnowledgeDocumentDetail,
@@ -121,6 +122,27 @@ export async function enableKnowledgeDocument(
 ): Promise<KnowledgeDocumentSummary> {
   const response = await httpClient.post<KnowledgeDocumentSummary>(
     `/knowledge/documents/${encodeURIComponent(documentId)}/enable/`,
+  )
+  return response.data
+}
+
+/**
+ * 读取指定版本的归一化 Markdown 正文（成员均可读，含历史版本）。
+ *
+ * 契约要点：
+ *  - **必须显式带 version_id**：知识块的 start_offset/end_offset 相对某一个版本的
+ *    正文，版本一换偏移即失效，因此不能用「当前有效版本」隐式替代；
+ *  - 可读操作，走 httpClient 默认超时（60 秒），不需要上传用的长超时；
+ *  - 404 的四种情形（文档不存在 / 跨企业 / 版本不属于该文档 / 版本尚未解析出正文）
+ *    口径一致，前端统一按「来源文档不存在或已不可访问」提示；
+ *  - 文档被停用（disabled）时正文仍可读：历史引用可能正指向它。
+ */
+export async function getDocumentVersionContent(
+  documentId: string,
+  versionId: string,
+): Promise<DocumentContentResponse> {
+  const response = await httpClient.get<DocumentContentResponse>(
+    `/knowledge/documents/${encodeURIComponent(documentId)}/versions/${encodeURIComponent(versionId)}/content/`,
   )
   return response.data
 }

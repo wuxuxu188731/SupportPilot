@@ -237,6 +237,19 @@ export interface Citation {
   heading_path: string | null
   /** 可信片段正文（来自知识库，服务端已校验） */
   content: string
+  /**
+   * 引用片段在**该版本文正**中的起始字符偏移；null 表示无法精确定位（后端降级口径）。
+   *
+   * 为什么标可选：旧会话中已产生的引用结构不含这两个字段，读出来就是 undefined；
+   * 因此前端一律用 `== null` 判断降级（同时覆盖 null 与 undefined），
+   * **禁止**用 `!start_offset`——偏移 0 是合法值（片段恰好在正文开头）。
+   */
+  start_offset?: number | null
+  /**
+   * 结束字符偏移（不含），满足 text.slice(start_offset, end_offset) === content；
+   * 与 start_offset 同生同灭：两者要么都可信，要么都为 null/缺失。
+   */
+  end_offset?: number | null
 }
 
 /** 检索摘要（后端 RetrievalSummary）：本轮知识检索的紧凑状态信息。 */

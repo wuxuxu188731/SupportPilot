@@ -16,7 +16,8 @@ vi.mock('@/api/http', () => ({
 
 import * as knowledgeApi from '@/api/knowledge'
 import { httpClient } from '@/api/http'
-import type { IngestionReceipt } from '@/api/knowledgeTypes'
+import type { Citation } from '@/api/types'
+import type { DocumentContentResponse, IngestionReceipt } from '@/api/knowledgeTypes'
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -48,6 +49,28 @@ function receipt(partial: Partial<IngestionReceipt> = {}): IngestionReceipt {
     job_id: 'job-1',
     status: 'succeeded',
     deduplicated: false,
+    ...partial,
+  }
+}
+
+/** 构造正文响应（字段与后端 DocumentContentResponse 一一对应）。 */
+function contentResponse(
+  partial: Partial<DocumentContentResponse> = {},
+): DocumentContentResponse {
+  return {
+    document_id: 'doc-1',
+    version_id: 'ver-3',
+    version_no: 3,
+    title: '退货与换货政策',
+    source_type: 'pdf',
+    status: 'active',
+    active_version_id: 'ver-4',
+    loader_version: 'loader-v2',
+    chunker_version: 'chunker-v1',
+    content_hash: 'sha256:abc',
+    text: '# 退货总则\n\n签收后 7 日内可申请退货。',
+    text_length: 22,
+    outline: [{ level: 1, title: '退货总则', heading_path: '退货总则', char_offset: 0 }],
     ...partial,
   }
 }
@@ -214,5 +237,123 @@ describe('停用 / 启用 / 入库任务查询 API', () => {
 
     expect(result.job_id).toBe('job-1')
     expect(httpClient.get).toHaveBeenCalledWith('/knowledge/ingestion-jobs/job-1/')
+  })
+})
+
+describe('正文读取 API（文档正文查看与引用跳转）', () => {
+  it('GET /knowledge/documents/{id}/versions/{id}/content/ 读取指定版本文正', async () => {
+    // 保护行为：正文路径必须同时带文档 id 与版本 id——知识块偏移相对某一个版本，
+    // 版本一换偏移即失效，因此不允许隐式读取「当前有效版本」
+    vi.mocked(httpClient.get).mockResolvedValue({ data: contentResponse() })
+
+    const result = await knowledgeApi.getDocumentVersionContent('doc-1', 'ver-3')
+
+    expect(httpClient.get).toHaveBeenCalledWith(
+      '/knowledge/documents/doc-1/versions/ver-3/content/',
+    )
+    expect(result.version_id).toBe('ver-3')
+  })
+
+  it('正文读取按默认超时（不带上传用的长超时配置）', async () => {
+    // 保护行为：正文读取是可读操作，走 httpClient 默认 60 秒超时；
+    // 只有上传/新版本才使用 getKnowledgeUploadTimeoutMs 的长超时
+    vi.mocked(httpClient.get).mockResolvedValue({ data: contentResponse() })
+
+    await knowledgeApi.getDocumentVersionContent('doc-1', 'ver-3')
+
+    expect(vi.mocked(httpClient.get).mock.calls[0]).toHaveLength(1)
+  })
+
+  it('正文接口的 id 中的特殊字符会被 URL 编码', async () => {
+    // 边界情况：文档/版本 id 可能含特殊字符，两段路径都必须编码
+    vi.mocked(httpClient.get).mockResolvedValue({ data: contentResponse() })
+
+    await knowledgeApi.getDocumentVersionContent('doc/1', 'ver#3')
+
+    expect(httpClient.get).toHaveBeenCalledWith(
+      '/knowledge/documents/doc%2F1/versions/ver%233/content/',
+    )
+  })
+
+  it('正文响应字段原样透传（正文/字符数/目录/版本信息）', async () => {
+    // 保护行为：正文、text_length 与 outline 必须原样透出给查看器；
+    // active_version_id 与 version_id 不同即历史版本提示的依据
+    const payload = contentResponse()
+    vi.mocked(httpClient.get).mockResolvedValue({ data: payload })
+
+    const result = await knowledgeApi.getDocumentVersionContent('doc-1', 'ver-3')
+
+    expect(result).toEqual(payload)
+    expect(result.text).toContain('签收后 7 日内可申请退货。')
+    expect(result.text_length).toBe(22)
+    expect(result.outline).toEqual([
+      { level: 1, title: '退货总则', heading_path: '退货总则', char_offset: 0 },
+    ])
+    expect(result.active_version_id).not.toBe(result.version_id)
+  })
+
+  it('正文读取失败时错误向上抛给调用方（由面板展示重试）', async () => {
+    // 边界情况：404/503 由调用方处理，API 层不吞异常也不返回空正文冒充成功
+    vi.mocked(httpClient.get).mockRejectedValueOnce(new Error('404 not found'))
+
+    await expect(knowledgeApi.getDocumentVersionContent('doc-1', 'ver-3')).rejects.toThrow(
+      '404 not found',
+    )
+  })
+})
+
+describe('Citation 偏移字段（引用跳转定位依据）', () => {
+  it('偏移为 null 时表示无法精确定位（降级路径）', () => {
+    // 边界情况：后端允许偏移为空，前端按「只定位到文档」降级
+    const citation: Citation = {
+      citation_id: 'C1',
+      document_id: 'doc-1',
+      version_id: 'ver-3',
+      chunk_id: 'chunk-9',
+      title: '退货政策',
+      heading_path: null,
+      content: '签收后 7 日内可申请退货。',
+      start_offset: null,
+      end_offset: null,
+    }
+
+    expect(citation.start_offset == null).toBe(true)
+  })
+
+  it('偏移为 0 是合法值，不得用取反判断（!start_offset 会误判）', () => {
+    // 边界情况：片段恰好在正文开头时 start_offset === 0；
+    // 降级判断必须用 == null，用 !start_offset 会把合法定位当成缺失
+    const citation: Citation = {
+      citation_id: 'C1',
+      document_id: 'doc-1',
+      version_id: 'ver-3',
+      chunk_id: 'chunk-1',
+      title: '退货政策',
+      heading_path: null,
+      content: '签收后 7 日内可申请退货。',
+      start_offset: 0,
+      end_offset: 12,
+    }
+
+    expect(citation.start_offset == null).toBe(false)
+    expect(citation.start_offset).toBe(0)
+  })
+
+  it('旧会话载荷缺少偏移字段时读出来是 undefined，同样按降级处理', () => {
+    // 边界情况：历史载荷不含两个字段（后端不做向后兼容填充），
+    // `== null` 同时覆盖 null 与 undefined，因此两种都能安全降级；
+    // 这里用类型断言模拟"字段确实不存在"的旧结构
+    const legacy = {
+      citation_id: 'C1',
+      document_id: 'doc-1',
+      version_id: 'ver-1',
+      chunk_id: 'chunk-1',
+      title: '退货政策',
+      heading_path: null,
+      content: '签收后 7 日内可申请退货。',
+    } as Citation
+
+    expect(legacy.start_offset == null).toBe(true)
+    expect(legacy.end_offset == null).toBe(true)
   })
 })

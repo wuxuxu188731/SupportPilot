@@ -7,8 +7,10 @@
  * 所有属性均带中文注释；字段可空时显式标注 null（与后端 JSON 一致）。
  *
  * 事实说明：
- *  - 文档详情与版本响应**不包含正文/原始文件/下载地址**，前端不得伪造
- *    正文预览或下载入口；
+ *  - 文档**详情与版本响应不包含正文/原始文件/下载地址**，前端不得从这两个
+ *    响应伪造正文预览或下载入口；
+ *  - 正文只允许从正文接口（`DocumentContentResponse`，按版本读取）获取，
+ *    见 docs/frontend/api-inventory.md 4.4.8；
  *  - 未知枚举值由展示层安全降级为原始字符串（见 utils/knowledgeDisplay.ts）。
  */
 
@@ -114,4 +116,60 @@ export interface KnowledgeDocumentDetail extends KnowledgeDocumentSummary {
   versions: DocumentVersionInfo[]
   /** 有效版本最近一次入库任务；无有效版本或从未成功入库为 null */
   latest_job: IngestionJobInfo | null
+}
+
+/**
+ * 正文目录项（后端 DocumentOutlineItemResponse）：正文中的一个标题及其字符偏移。
+ *
+ * 事实：目录由服务端按与切块同一套标题规则提取，前端**不得**再自行解析正文标题，
+ * 否则目录偏移与知识块的 heading_path 会不一致。
+ */
+export interface DocumentContentOutlineItem {
+  /** 标题层级：1-6，对应 Markdown 中 '#' 的个数 */
+  level: number
+  /** 标题文本（已去掉行首 '#' 与首尾空白） */
+  title: string
+  /** 完整标题路径（各级标题以 '/' 连接且含本标题自身），与引用 heading_path 同一口径 */
+  heading_path: string
+  /** 该标题行首在正文中的绝对字符偏移（Python 字符计数，非字节、非行号） */
+  char_offset: number
+}
+
+/**
+ * 指定版本的归一化 Markdown 正文（后端 DocumentContentResponse）。
+ *
+ * 这是知识库接口中**唯一**携带正文的响应（详情/版本接口永不含 raw_text）。
+ * `text` 就是入库时解析/转换后的那份 Markdown：PDF/Word 也已在入库阶段转换完成，
+ * 因此前端渲染的是它，而不是 PDF/Word 原文。
+ *
+ * 偏移口径：知识块的 start_offset/end_offset 与目录项的 char_offset 都是相对
+ * **这个版本** `text` 的字符下标；版本一换偏移即失效，所以读取必须显式带 version_id。
+ */
+export interface DocumentContentResponse {
+  /** 文档唯一标识 */
+  document_id: string
+  /** 版本标识（本次返回正文的确切版本） */
+  version_id: string
+  /** 版本序号：用于「该引用来自历史版本 vN，当前有效版本为 vM」提示 */
+  version_no: number
+  /** 文档标题（服务端可信来源，取自文档表，不采用引用里的标题） */
+  title: string
+  /** 来源类型：word/pdf 表示正文是入库时自动转换的 Markdown，需上屏提示 */
+  source_type: DocumentSourceTypeValue
+  /** 文档当前状态：disabled 表示已停用（正文仍可读，但不再参与检索） */
+  status: DocumentStatusValue
+  /** 文档当前有效版本；与 version_id 不同即说明本次读的是历史版本 */
+  active_version_id: string | null
+  /** 入库时使用的解析器版本标识（可追溯性） */
+  loader_version: string
+  /** 入库时使用的分块器版本标识（偏移语义所属版本，可追溯性） */
+  chunker_version: string
+  /** 该版本归一化正文的 sha256（"sha256:<hex>"）；未解析的版本不会走到本响应 */
+  content_hash: string | null
+  /** 归一化 Markdown 正文（UTF-8 解码后、行尾统一为 \n） */
+  text: string
+  /** 正文字符数（Python 字符计数，不是 utf-8 字节数）；前端据此做偏移越界自检 */
+  text_length: number
+  /** 标题目录；没有标题的文档为空数组 */
+  outline: DocumentContentOutlineItem[]
 }
