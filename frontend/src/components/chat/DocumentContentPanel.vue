@@ -39,6 +39,7 @@ const heading = computed(() => props.target.title)
       <n-button
         quaternary
         size="small"
+        class="doc-panel-close"
         aria-label="关闭正文面板"
         data-test="close-document-panel"
         @click="emit('close')"
@@ -96,6 +97,10 @@ const heading = computed(() => props.target.title)
 
 .doc-panel-sub {
   font-size: var(--sp-font-size-xs);
+}
+
+.doc-panel-close {
+  margin-top: var(--sp-space-2);
 }
 
 .doc-panel-body {
