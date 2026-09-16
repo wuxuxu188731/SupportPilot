@@ -34,7 +34,6 @@ const heading = computed(() => props.target.title)
     <header class="doc-panel-header">
       <div class="doc-panel-titles">
         <n-text strong class="doc-panel-title" :title="heading">{{ heading }}</n-text>
-        <n-text depth="3" class="doc-panel-sub">来源文档正文</n-text>
       </div>
       <n-button
         quaternary
@@ -95,12 +94,8 @@ const heading = computed(() => props.target.title)
   white-space: nowrap;
 }
 
-.doc-panel-sub {
-  font-size: var(--sp-font-size-xs);
-}
-
 .doc-panel-close {
-  margin-top: var(--sp-space-2);
+  margin-top: var(--sp-space-3);
 }
 
 .doc-panel-body {
