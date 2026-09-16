@@ -94,7 +94,7 @@ def test_query_uses_query_mode_instruction_and_timeout():
             "Given an ecommerce after-sales policy question, "
             "retrieve the most relevant enterprise policy passages"
         ),
-        "timeout": 5,
+        "timeout": 10,
     }]
 
 

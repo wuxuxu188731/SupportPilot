@@ -25,12 +25,18 @@ import dashscope
 import requests
 
 from app.knowledge.base import EmbeddingUnavailableError
-from app.knowledge.embeddings import EmbeddingVector, SparseValue, count_tokens
+from app.knowledge.embeddings import (
+    EmbeddingVector,
+    QUERY_TIMEOUT_SECONDS,
+    SparseValue,
+    count_tokens,
+)
 
 MODEL_NAME = "text-embedding-v4"
 TEXT_EMBEDDING_DIMENSION = 1024
 OUTPUT_TYPE = "dense&sparse"
-QUERY_TIMEOUT_SECONDS = 5
+# 查询侧超时预算的唯一取值来源在 app/knowledge/embeddings.py（检索链路共用），
+# 这里重新导出同名常量，保持本模块对外接口不变。
 RETRIES_PER_CALL = 1
 RETRY_SLEEP_SECONDS = 0.5
 QUERY_INSTRUCT = (

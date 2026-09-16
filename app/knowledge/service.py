@@ -23,6 +23,7 @@ from app.knowledge.base import (
     SearchInternalError,
     VectorStoreUnavailableError,
 )
+from app.knowledge.embeddings import QUERY_TIMEOUT_SECONDS
 from app.knowledge.evidence import (
     ASSESSOR_PROMPT_VERSION,
     EvidenceAssessor,
@@ -225,7 +226,12 @@ class AdaptiveKnowledgeSearchService:
                     retrieval = self._retriever.retrieve(
                         organization_id=organization_id,
                         query=query,
-                        timeout_provider=budget.external_timeout_seconds,
+                        # 查询 embedding 单独用 QUERY_TIMEOUT_SECONDS 作为上限：
+                        # 它比 Planner/Assessor/Rerank 更容易在服务端抖动时耗尽 5 秒，
+                        # 实际下发值仍是 min(该上限, 本次检索剩余预算)。
+                        timeout_provider=lambda: budget.external_timeout_seconds(
+                            max_seconds=QUERY_TIMEOUT_SECONDS
+                        ),
                     )
                     budget.ensure_time()
                     estimated_tokens += retrieval.query_tokens

@@ -201,6 +201,29 @@ def test_none_records_zero_rounds_and_never_retrieves(adaptive_scope):
     assert len(adaptive_scope.store.events) == 1
 
 
+# 保护行为：查询侧 embedding 的上限是 QUERY_TIMEOUT_SECONDS（10 秒），且仍受本次检索
+# 剩余预算约束。旧的 5 秒上限在 DashScope 抖动时会直接吃光预算、重试不足 1 秒，
+# 把整条检索判死为 EMBEDDING_UNAVAILABLE（2026-09-16 由 5 秒调整为 10 秒）。
+def test_query_embedding_timeout_caps_at_ten_seconds(adaptive_scope):
+    adaptive_scope.planner.next_plan = _plan(
+        SearchStrategy.SINGLE,
+        ("return window",),
+        SearchReasonCode.SIMPLE_POLICY,
+    )
+    adaptive_scope.retriever.results["return window"] = (
+        _scored("c1", 0.9),
+    )
+    adaptive_scope.assessor.decisions = [
+        _assessment(EvidenceStatus.SUFFICIENT)
+    ]
+
+    adaptive_scope.service.search(organization_id="org-a", question="returns")
+
+    # 检索器拿到的是可调用的 provider（不是固定值），剩余预算充足时取上限 10 秒
+    timeout_provider = adaptive_scope.retriever.calls[0].timeout_provider
+    assert timeout_provider() == 10
+
+
 def test_single_runs_one_query_and_returns_grounded_citation(adaptive_scope):
     adaptive_scope.planner.next_plan = _plan(
         SearchStrategy.SINGLE,

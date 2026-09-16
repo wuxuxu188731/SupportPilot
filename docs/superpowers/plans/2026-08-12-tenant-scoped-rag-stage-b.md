@@ -676,6 +676,11 @@ SINGLE 不足不得开第二轮；MULTI 第二轮不足不得开第三轮；任�
 
 增加动态超时测试：可注入单调时钟依次留下 14.9、9.2、4.8 秒时，Planner/Assessor 分别收到整数剩余 timeout，Retriever 每次调用收到 `min(5, floor(remaining))`；当剩余 `<1` 秒时不启动下一次 embedding/Qdrant/模型调用并返回 `SEARCH_BUDGET_EXCEEDED`。该测试必须覆盖调用后的 deadline 检查，证明一次超时返回不能继续开启下一外部调用。
 
+> 后续变更（2026-09-16）：Retriever 的查询侧上限由 5 秒改为 10 秒
+> （`app/knowledge/embeddings.py: QUERY_TIMEOUT_SECONDS`），即现在的口径是
+> `min(10, floor(remaining))`；Planner/Assessor/Rerank 仍为 `min(5, floor(remaining))`。
+> 对应断言见 `tests/knowledge/test_retrieval.py`（基线默认 10 秒）。
+
 - [ ] **Step 4: 写单事件/安全 trace 失败测试**
 
 每个 search 无论成功、不足、NONE、Planner 前失败或已映射基础设施失败，都只记录一条 event。Planner 前失败的 strategy 固定为 `unplanned`，其余为 `none/single/multi`。Adaptive `candidate_json` 使用 schema version 3：

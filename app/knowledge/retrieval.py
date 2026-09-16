@@ -38,7 +38,7 @@ from app.knowledge.base import (
     RetrievalEvent,
     VectorStoreUnavailableError,
 )
-from app.knowledge.embeddings import EmbeddingClient
+from app.knowledge.embeddings import EmbeddingClient, QUERY_TIMEOUT_SECONDS
 from app.knowledge.results import (
     BaselineSearchResult,
     Citation,
@@ -98,7 +98,9 @@ class HybridRetriever:
                 query_tokens=0,
             )
 
-        get_timeout = timeout_provider or (lambda: 5)
+        # 未注入 provider（基线检索）时用统一预算：查询 embedding 与 Qdrant 检索
+        # 都按它下发超时；Adaptive Search 会注入带剩余预算的 provider 覆盖它。
+        get_timeout = timeout_provider or (lambda: QUERY_TIMEOUT_SECONDS)
         query_embedding = self._embedding.embed_query(
             clean_query,
             timeout_seconds=get_timeout(),

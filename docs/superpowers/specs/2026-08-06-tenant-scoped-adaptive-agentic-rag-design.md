@@ -396,6 +396,12 @@ retrieval_summary: RetrievalSummary | None
 - 最终知识片段：最多 6 个、合计最多 3,000 tokens。
 - 工具总超时：15 秒；单次嵌入查询超时：5 秒。
 
+> 后续变更（2026-09-16）：单次嵌入查询超时由 **5 秒放宽到 10 秒**
+> （`app/knowledge/embeddings.py` 的 `QUERY_TIMEOUT_SECONDS`，基线检索与 Adaptive
+> Search 共用；实测 DashScope 单次查询向量约 3.6 秒，5 秒预算在抖动时会直接判死为
+> `EMBEDDING_UNAVAILABLE`）。工具总超时仍由 `KNOWLEDGE_SEARCH_TIMEOUT_SECONDS`
+> （默认 30 秒）约束。
+
 超时、模型失败或索引异常不触发无限重试。只对明确的临时嵌入服务错误执行一次短重试。预算用尽返回 `SEARCH_BUDGET_EXCEEDED` 或 `INSUFFICIENT_EVIDENCE`，由顶层 Agent 生成诚实的降级回复。
 
 ## 12. 错误语义

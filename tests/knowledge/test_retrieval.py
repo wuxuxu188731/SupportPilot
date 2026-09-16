@@ -211,8 +211,10 @@ def test_baseline_using_shared_retriever_still_records_exactly_one_event(
     assert [item.chunk_id for item in result.citations] == ["chunk-a0"]
     assert len(retrieval_scope.store.events) == 1
     assert retrieval_scope.store.events[0].strategy == "baseline"
-    assert retrieval_scope.embedding.query_timeouts == [5]
-    assert retrieval_scope.vector.search_calls[0]["timeout_seconds"] == 5
+    # 基线检索未注入 provider 时用统一预算 QUERY_TIMEOUT_SECONDS（10 秒）：
+    # 查询 embedding 与 Qdrant 检索拿到同一个整数秒超时
+    assert retrieval_scope.embedding.query_timeouts == [10]
+    assert retrieval_scope.vector.search_calls[0]["timeout_seconds"] == 10
 
 
 # ------------------------------------------------------------------ Step 1
