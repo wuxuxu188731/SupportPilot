@@ -75,6 +75,17 @@ def test_knowledge_settings_have_fixed_vector_contract(monkeypatch):
     assert settings.qdrant_url == "http://qdrant.test:6333"
 
 
+# 保护行为：本地 Qdrant 默认使用 IPv4 回环地址，避免 localhost 的
+# IPv6 连接失败后等待请求超时才回退到 IPv4。
+def test_knowledge_settings_default_qdrant_to_ipv4_loopback(monkeypatch):
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "test-key")
+    monkeypatch.delenv("QDRANT_URL", raising=False)
+
+    settings = get_knowledge_settings()
+
+    assert settings.qdrant_url == "http://127.0.0.1:6333"
+
+
 def test_stage_b_settings_are_server_owned(monkeypatch):
     monkeypatch.setenv("DASHSCOPE_API_KEY", "key")
     monkeypatch.setenv("KNOWLEDGE_MIN_FUSED_SCORE", "0.25")

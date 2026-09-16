@@ -153,7 +153,7 @@ def get_knowledge_settings() -> KnowledgeSettings:
             "https://dashscope.aliyuncs.com/api/v1",
         ).rstrip("/"),
         qdrant_url=os.getenv(
-            "QDRANT_URL", "http://localhost:6333"
+            "QDRANT_URL", "http://127.0.0.1:6333"
         ).rstrip("/"),
         min_fused_score=min_fused_score,
         search_timeout_seconds=search_timeout_seconds,
