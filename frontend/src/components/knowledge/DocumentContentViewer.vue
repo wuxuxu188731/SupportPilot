@@ -474,7 +474,16 @@ onBeforeUnmount(() => {
 .doc-body-wrap {
   flex: 1;
   min-height: 0;
-  overflow: auto;
+  /* 纵向可滚、横向不滚：正文按宽度换行，宽表格由表格自己内部横向滚动 */
+  overflow-y: auto;
+  overflow-x: hidden;
+  /*
+   * 必须固定预留纵向滚动条槽位：正文很长时纵向滚动条会占掉约 17px 宽度，
+   * 若此时才收窄内容盒，正文块仍按收窄前的宽度排版，就会凭空多出一条
+   * 几乎占满整行、还压住正文的横向滚动条（用户反馈的「下拉条太长」）。
+   * 预留槽位后内容盒宽度恒定，横向滚动条不会再出现，长度也不会跳变。
+   */
+  scrollbar-gutter: stable;
   /* 底部留白：避免高亮落在视口最底部 */
   padding: var(--sp-space-3) var(--sp-space-3) 45vh;
 }
@@ -538,7 +547,15 @@ onBeforeUnmount(() => {
 }
 
 .doc-body :deep(table) {
-  width: 100%;
+  /*
+   * 宽表格（多列 / 长单元格）不参与面板宽度的竞争：表格自身成为可横向滚动的块，
+   * 这样既不会把正文区撑宽而触发面板级横向滚动条，也不会让列被裁掉。
+   * max-width:100% 保证窄表格仍然按内容宽度渲染、宽表格最多占满面板宽度。
+   */
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
   margin-bottom: var(--sp-space-2);
   border-collapse: collapse;
   font-size: var(--sp-font-size-xs);

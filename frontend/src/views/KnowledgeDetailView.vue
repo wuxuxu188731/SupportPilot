@@ -578,9 +578,11 @@ function onVisibilityChange(): void {
   margin: 0;
 }
 
-/* 正文弹窗：给查看器一个固定高度，正文区域内部滚动 */
+/* 正文弹窗：给查看器一个固定高度，正文区域内部滚动。
+ * 高度在视口允许范围内尽量放大（原先 min(70vh,640px) 一屏只能看几行，
+ * 正文要频繁滚动）；上限 860px 并留出弹窗标题与页面边距，不会超出视口。 */
 .content-modal-body {
-  height: min(70vh, 640px);
+  height: min(80vh, 860px);
   display: flex;
 }
 
