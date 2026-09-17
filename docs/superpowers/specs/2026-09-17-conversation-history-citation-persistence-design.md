@@ -3,17 +3,22 @@
 > 来源：`docs/superpowers/specs/2026-09-09-knowledge-document-content-viewer-design.md`
 > §6「后续待完成」第 1 项「**引用在会话历史中持久化**（刷新后仍能跳转）」。
 >
-> 本文档只做**改动范围与方向的界定**，不含代码实现；实施前请先确认第 9 节的
-> 决策点（存储形态已拍板，见下）。
+> 本文档只做**改动范围与方向的界定**，不含代码实现。
 >
-> **决策记录（2026-09-17，项目负责人）**：存储形态采用**独立表** `message_citations`
-> （本文档 3.2 方案 B），不再采用"给 `messages` 加一个大 JSON 列"的最小改动方案——
-> 引用是结构化的领域对象，一条一行、列名与字段一一对应，后续维护者读表即懂，
-> 也天然支持"按文档反查引用"。
+> **决策记录（2026-09-17，项目负责人）**：
+>
+> | # | 决策 | 结论 |
+> | --- | --- | --- |
+> | 0 | 存储形态 | **独立表** `message_citations`（3.2 方案 B）：一条引用一行、列名与字段一一对应，后续维护者读表即懂 |
+> | 1 | 是否连 `retrieval_summary` 一起存 | **不存**：它是 Agentic Search 的产物，当前生产走传统 RAG（3.4），先不管 |
+> | 2 | 写入接口形态 | **`append_messages(..., display=[...])` 显式参数**（4.2、9.2 详解） |
+> | 3 | 引用片段正文 `content` 是否入库 | **不入库**：实时回答照旧显示片段；刷新后引用卡片只显示标签与来源信息，点「查看原文位置」由正文查看器按版本 + 偏移高亮；偏移缺失则降级为只打开文档（3.1 末段） |
+> | 4 | 引用锚点作用域修复 | **并入本次**（5.4） |
+> | 5 | `(document_id, version_id)` 反查索引 | **暂不建**：本次只用会话读路径，将来做反查时再加 |
 
 | 项 | 内容 |
 | --- | --- |
-| 状态 | 改动范围与方向已核实，待拍板（第 9 节）后按第 8 节拆分实施 |
+| 状态 | 决策点已由项目负责人拍板（2026-09-17，见第 9.1 节），可按第 8 节拆分实施 |
 | 目标 | 刷新页面 / 重新进入会话后，历史回答仍带**结构化引用**，可继续「查看原文位置」 |
 | 涉及模块 | `migrations`、`app/sessions`、`app/application`、`app/schemas`、`frontend/src`（api / stores / components） |
 | 数据库 | **新增 1 张表 `message_citations`**（一条引用一行）+ `messages` 新增一列 `answer_incomplete`；迁移 `0014` |
@@ -24,9 +29,9 @@
 
 | 问题 | 结论 |
 | --- | --- |
-| 是否要新增数据库表？ | **要，新增 1 张表 `message_citations`**：一条引用一行，业务列与 `Citation` 字段一一对应，另加 `conversation_id` / `seq` / `ordinal` / `created_at`。引用是结构化领域对象而非"一坨展示 JSON"，建表后**列即文档**，维护者读表结构就能懂；同时天然支持"按 `document_id` 反查哪些回答引用过这份文档"（见 3.2 方案 B）。 |
+| 是否要新增数据库表？ | **要，新增 1 张表 `message_citations`**：一条引用一行，列名与引用的定位字段一一对应（**不含片段正文**，见决策 3），另加 `conversation_id` / `seq` / `ordinal` / `created_at`。引用是结构化领域对象而非"一坨展示 JSON"，建表后**列即文档**，维护者读表结构就能懂。 |
 | 是否需要迁移？ | **需要。** 迁移 `0014_message_citations`：`CREATE TABLE message_citations`（外键 + 唯一约束 + 读路径索引）**并且** `ALTER TABLE messages ADD COLUMN answer_incomplete INTEGER NULL`（回答级属性，不属于任何一条引用，见 3.2 末段）。升级前的历史回答没有任何引用行，读取时按「无引用」处理，**无需回填**。 |
-| 改动方向一句话 | 回答生成时，在**消息落库的同一事务**里把该回答的引用逐条写入 `message_citations`（与 `payload_json` 这条模型上下文路径**完全不相干**），历史接口把它们作为新字段返回，前端在历史回答下渲染同一套 `CitationList` 与「查看原文位置」入口。 |
+| 改动方向一句话 | 回答生成时，在**消息落库的同一事务**里把该回答的引用（标识 + 定位字段，不含正文）逐条写入 `message_citations`；历史接口把它们作为新字段返回，前端在历史回答下渲染引用卡片——卡片只显示标签与来源，点「查看原文位置」由正文查看器按版本与偏移把正文高亮出来。 |
 
 预期改动规模：后端 **9 个文件**（含 1 个迁移与 4 个测试文件）、前端 **6 个文件**（含 3 个测试文件）、文档 **5 个文件**。完整清单见第 6 节。
 
@@ -112,12 +117,14 @@
 
 | 数据 | 是否持久化 | 理由 |
 | --- | --- | --- |
-| `citations`（`citation_id` / `document_id` / `version_id` / `chunk_id` / `title` / `heading_path` / `content` / `start_offset` / `end_offset`） | **是** | 就是"可跳转"所需的最小集合；全部字段当时已经返回给同一用户，不新增数据暴露面 |
+| 引用的**定位与标识字段**：`citation_id` / `document_id` / `version_id` / `chunk_id` / `title` / `heading_path` / `start_offset` / `end_offset` | **是** | 就是"可跳转、可标号"所需的最小集合；全部字段当时已经返回给同一用户，不新增数据暴露面 |
+| 引用的**片段正文** `content` | **否**（决策 3） | 见下方专门说明：实时照旧显示，刷新后由正文查看器按偏移高亮 |
 | `answer_incomplete` | **是** | 服务端确定性判定的安全提示。**漏引场景下 `citations` 可能为空而该标记为 `true`**——不持久化就会让刷新后的回答"看起来一切正常" |
-| `retrieval_summary` / `events` / `pending_approvals` | 否 | 见第 11 节 |
+| `retrieval_summary` | 否（决策 1） | Agentic Search 的产物，当前生产走传统 RAG：`strategy`/`round_count` 是常量、`latency_ms` 是过程指标（3.4） |
+| `events` / `pending_approvals` | 否 | 见第 11 节 |
 | `raw_text`、完整 chunk 正文、向量载荷、检索 trace | **绝不** | 现有红线不变 |
 
-存储形态：**一条引用一行**，写入新表 `message_citations`（列名与上表字段一一对应）：
+存储形态：**一条引用一行**，写入新表 `message_citations`：
 
 | 列 | 类型 | 含义 |
 | --- | --- | --- |
@@ -128,10 +135,9 @@
 | `citation_id` | TEXT NOT NULL | `C1..Cn` 标签，与回答正文里的 `[C#]` 角标对应 |
 | `document_id` | TEXT NOT NULL | 来源文档标识 |
 | `version_id` | TEXT NOT NULL | **生成时冻结**的版本标识（读取历史引用时按它取正文，见 3.3） |
-| `chunk_id` | TEXT NOT NULL | 命中的知识块标识 |
-| `title` | TEXT NOT NULL | 文档标题 |
-| `heading_path` | TEXT NULL | 标题路径；无则为 `NULL` |
-| `content` | TEXT NOT NULL | 可信片段正文（来自知识库，非模型生成） |
+| `chunk_id` | TEXT NOT NULL | 命中的知识块标识（将来要回填片段正文时按它取，见下） |
+| `title` | TEXT NOT NULL | 文档标题（刷新后卡片要显示，属于"来源信息"） |
+| `heading_path` | TEXT NULL | 标题路径；无则为 `NULL`（偏移缺失时用于回退到章节） |
 | `start_offset` / `end_offset` | INTEGER NULL | 片段在所属版本文正中的字符区间；两者同生同灭 |
 | `created_at` | TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP | 写入时间（UTC 文本） |
 
@@ -143,9 +149,33 @@
   「没有记录」：非最终回答行（带 `tool_calls` 的中间助手消息、`system` / `tool`）与升级前的
   历史行。读取时 `NULL` 与 `0` 一律当 `false`。
 
-> 备选（不推荐）：只存引用元数据、不存 `content`，让用户打开正文后从
-> `raw_text[start:end]` 现场截取。可省约一半体积，但刷新后引用卡片**看不到证据原文**，
-> 与 E-07 的验收口径冲突，收益不抵体验损失。
+#### 关于片段正文 `content` 不入库（决策 3）
+
+| 场景 | 行为 |
+| --- | --- |
+| 实时回答（本次改动**不影响**） | 本轮响应里的 `citations[].content` 由前端直接渲染 —— 回答下方的引用卡片照旧显示证据原文 |
+| 刷新 / 重新进入会话 | 引用卡片显示**标签与来源信息**（`[C1]` + 文档标题 + 章节路径 + 文档/版本/知识块标识）与跳转入口，**不显示片段原文** |
+| 用户点「查看原文位置」 | 打开正文面板/整页，按 **`version_id` + `start_offset/end_offset`** 读取正文并高亮对应区间（能力已具备） |
+| 偏移为 `null` | 现有降级路径：只打开文档（有 `heading_path` 时滚到对应章节），并提示「该引用未记录精确位置」 |
+
+实现上的连带要求：
+
+- 历史接口的引用**没有 `content` 字段**（用 `ConversationCitation` 模型，见 4.4），
+  而不是给 `content` 塞空字符串——避免前端把空串误读成"有片段但内容为空"；
+- 前端 `CitationList` 需要能接受"没有 `content`"的引用：无片段时**不渲染引用块**，
+  其余（标题、章节、元信息、按钮）照常（5.3）；建议同时加一句解释性文案，
+  说明刷新后片段原文需在正文里查看（文案口径待定，见 9.6）。
+
+代价与可逆性：
+
+- **代价**：刷新后不能在卡片里直接核对证据原文，必须点开正文。这是本次明确接受的体验差异，
+  手工验收清单 E-07 / F-14 的口径要同步改写（7.3、6.3）。
+- **可逆**：`chunk_id` 与偏移都留在库里，将来若要在卡片里恢复片段，有两条路——
+  (a) 读路径按 `(organization_id, chunk_id)` 从 `document_chunks.content` 回填
+  （该表有 `organization_id` / `content`，见迁移 `0009:127-145`；**不加列、不加迁移**，
+  只是历史读路径多一次查询、且多一个对知识库的依赖）；
+  (b) 给本表加一列存片段快照（一次迁移，证据与当时版本严格一致）。
+  也就是说这个决策不会锁死后续演进。
 
 ### 3.2 存在哪里（本题的"要不要建新表"）
 
@@ -155,7 +185,7 @@
 
 | 方案 | 做法 | 结论 |
 | --- | --- | --- |
-| **B（采纳）** | 新表 `message_citations`，一条引用一行；`answer_incomplete` 作 `messages` 新列 | 列名与 `Citation` 字段一一对应，**读表结构即懂**，维护成本最低；引用与消息**同事务**写入，不会出现"有消息没引用"的半截状态；可按 `document_id` 反查"哪些回答引用过这份文档"；`Citation` 将来增字段时"加列 + 迁移"是显式、可评审的动作，不会悄悄藏进一个 JSON blob。代价：多一条写路径、多一组读方法与测试 |
+| **B（采纳）** | 新表 `message_citations`，一条引用一行；`answer_incomplete` 作 `messages` 新列 | 列名与引用的定位字段一一对应（正文不入库，决策 3），**读表结构即懂**，维护成本最低；引用与消息**同事务**写入，不会出现"有消息没引用"的半截状态；将来若要按文档/版本反查引用，加条索引即可；字段演进时"加列 + 迁移"是显式、可评审的动作，不会悄悄藏进一个 JSON blob。代价：多一条写路径、多一组读方法与测试 |
 | A（放弃） | `messages` 加一列 `structured_json`，存 `{citations, answer_incomplete}` | 改动最小（一条 `ADD COLUMN`），但列里是不透明 JSON：字段演进不进迁移、出问题只能翻 JSON 排查，也无法按文档反查。本轮明确不采用 |
 | C（否决） | 写进现有 `payload_json` | **会进入模型上下文**（2.2）：引用片段会成为助手历史消息的一部分被回灌给模型，既污染上下文，又可能被网关拒绝；且破坏 `load_messages` 与 `payload_json` 的一一对等关系。**不做** |
 
@@ -178,9 +208,9 @@
 - **两个唯一约束**：`UNIQUE (conversation_id, seq, citation_id)` 防同一回答重复写同一引用
   （重试幂等），`UNIQUE (conversation_id, seq, ordinal)` 保证展示顺序唯一。
 - **分层不反向**：`app/sessions` **不 import** `app/knowledge`（保持现状：sessions 只依赖
-  `app.db.migrations`）。写路径由应用层把 `Citation` 转成与 `Citation.public_dict()` 同形的
-  dict，读路径由应用层把 dict 转回 `Citation`；两个方向的映射各只有一处，并用一条测试把
-  **`Citation` 的公开字段与表的业务列钉死**（见 7.1 第 12 条）。
+  `app.db.migrations`）。写路径由应用层按列白名单把 `Citation` 投影成 dict（**剔除 `content`**，
+  决策 3），读路径由应用层把 dict 转回历史响应模型；两个方向的映射各只有一处，并用一条测试
+  把 **`Citation.public_dict()` 的字段与表的业务列钉死**（见 7.1 第 12 条）。
 
 ### 3.3 历史引用与"当时版本"的关系（设计稿点名要拍板的问题）
 
@@ -291,9 +321,8 @@
      - `UniqueConstraint("conversation_id", "seq", "ordinal",
        name="uq_message_citations_answer_ordinal")`；
      - 索引：`idx_message_citations_conversation_seq`（`conversation_id, seq`）——
-       本次读路径唯一需要的索引；
-     - 可选索引：`idx_message_citations_document_version`（`document_id, version_id`）——
-       只有将来做"按文档反查引用"才用得上，加了不改任何接口，实施时可一并决定。
+       本次读路径唯一需要的索引；`(document_id, version_id)` 反查索引**本次不建**（决策 5），
+       将来做"哪些回答引用了这份文档"时再加一条 `CREATE INDEX` 即可。
   2. `op.add_column("messages", sa.Column("answer_incomplete", sa.Integer(), nullable=True))`
      （可空、无默认 → SQLite 直接 `ADD COLUMN`，无需 `batch_alter_table`）。
 - CHECK 约束（沿用仓库习惯，把"不可能的状态"挡在库外）：
@@ -301,13 +330,13 @@
   | 约束名 | 表达式 | 挡住的错误 |
   | --- | --- | --- |
   | `ck_message_citations_citation_id_not_blank` | `length(trim(citation_id)) > 0` | 空标签写进库；正文 `[C#]` 将无法对应 |
-  | `ck_message_citations_content_not_blank` | `length(trim(content)) > 0` | 空证据片段 |
   | `ck_message_citations_ordinal_positive` | `ordinal >= 1` | 展示顺序从 0 开始等口径漂移 |
   | `ck_message_citations_offsets_paired` | `(start_offset IS NULL) = (end_offset IS NULL)` | 只写一个偏移（"同生同灭"库级不变量） |
   | `ck_message_citations_offsets_ordered` | `start_offset IS NULL OR end_offset > start_offset` | 反向/零长区间 |
   | `ck_message_citations_offsets_non_negative` | `start_offset IS NULL OR start_offset >= 0` | 负偏移 |
 
-  `heading_path` 允许 `NULL`（引用可以没有章节路径），不加约束。
+  `heading_path` 允许 `NULL`（引用可以没有章节路径），不加约束。**没有"正文非空"约束**——
+  正文不入库（决策 3）。
 - `downgrade()`：`op.drop_column("messages", "answer_incomplete")` →
   `op.drop_index("idx_message_citations_conversation_seq")`（及可选索引）→
   `op.drop_table("message_citations")`。**降级会丢弃已持久化的引用数据**
@@ -324,15 +353,15 @@
 
 | 位置 | 改动 |
 | --- | --- |
-| `base.py` 新增 `MessageDisplay` | 冻结 dataclass：`citations : tuple[dict, ...] = ()`（每项键与 `Citation.public_dict()` 一致，也就是 `message_citations` 的业务列）、`answer_incomplete : bool = False`；每个属性带中文注释，并写明「仅供展示与历史读取使用，**绝不进入模型上下文**」 |
+| `base.py` 新增 `MessageDisplay` | 冻结 dataclass：`citations : tuple[dict, ...] = ()`（每项键 = `MESSAGE_CITATION_COLUMNS`，**不含 `content`**）、`answer_incomplete : bool = False`；每个属性带中文注释，并写明「仅供展示与历史读取使用，**绝不进入模型上下文**」 |
 | `base.py` `MessageRecord` | 新增 `citations : tuple[dict, ...] = ()` 与 `answer_incomplete : bool = False`（带中文注释）。带默认值 → 唯一构造点在 `sqlite_store.py:180`，安全 |
 | `base.py` `SessionStore` 协议 | `append_messages` 增可选 `display` 形参，并写明「与 `messages` 等长、与消息同事务写入、不进入 `payload_json`」 |
 | `sqlite_store.py` `append_messages` | 新增关键字参数 `display : list[MessageDisplay \| None] \| None = None`；长度必须与 `messages` 相等，否则 `ValueError`。在**同一事务**内：插消息 → 按本地算出的 `seq` 插引用行 → 写入 `messages.answer_incomplete`（并入消息 `INSERT` 的列值即可） |
 | `sqlite_store.py` `load_message_records` | 先查消息行，再 `SELECT ... FROM message_citations WHERE conversation_id = ? ORDER BY seq ASC, ordinal ASC`，按 `seq` 分组填进各 `MessageRecord`（升级前/无引用的消息得到空元组） |
 | `sqlite_store.py` `load_messages` | **不改**（模型上下文路径一行不动） |
-| `sqlite_store.py` 模块常量 | 新增 `MESSAGE_CITATION_COLUMNS`（业务列白名单）：写入前用它校验 dict 的键（**缺列 → `ValueError`**，多余键忽略，避免静默写入半截数据）；7.1 第 12 条的"列 ↔ 字段"钉子测试也复用它 |
+| `sqlite_store.py` 模块常量 | 新增 `MESSAGE_CITATION_COLUMNS`（业务列白名单，10 项，**不含 `content`**）：写入前用它校验 dict 的键（**缺列 → `ValueError`**，多余键忽略，避免静默写入半截数据）；7.1 第 12 条的"列 ↔ 字段"钉子测试也复用它 |
 
-写入接口形态（第 9 节决策点 2）——推荐**显式可选参数** `display`：
+写入接口形态（第 9 节决策点 2，已拍板为**显式可选参数** `display`）：
 
 ```python
 new_messages = messages[new_messages_start:]
@@ -340,7 +369,7 @@ display: list[MessageDisplay | None] = [None] * len(new_messages)
 index = _final_answer_index(new_messages)          # 末尾向前找无 tool_calls 的 assistant
 if index is not None:
     display[index] = MessageDisplay(
-        citations=tuple(item.public_dict() for item in response.citations),
+        citations=tuple(_citation_row(item) for item in response.citations),  # 按列白名单投影，剔除 content
         answer_incomplete=response.answer_incomplete,
     )
 self._store.append_messages(..., messages=new_messages, display=display)
@@ -363,27 +392,43 @@ self._store.append_messages(..., messages=new_messages, display=display)
    时全部传 `None`，**不报错**。
 2. `_to_visible_message()`：新增 `citations` / `answer_incomplete` 两个返回字段。
    - `user` 消息恒为 `[]` / `False`；
-   - assistant 最终回答把 `stored.citations` 里的 dict **逐条**转成 `Citation`，非法/缺字段
-     的条目丢弃并留诊断日志（3.6 第 5 条）；
+   - assistant 最终回答把 `stored.citations` 里的 dict **逐条**转成 `ConversationCitation`
+     （历史响应模型，无 `content`），非法/缺字段的条目丢弃并留诊断日志（3.6 第 5 条）；
    - 升级前的历史记录没有引用行 → 与今天的输出完全一致。
-3. 映射只写一遍：`Citation → dict` 直接复用现成的 `Citation.public_dict()`；
-   `dict → Citation` 用一个模块级小函数（中文 docstring），两个方向都要有测试。
+3. 两个方向的映射各只写一遍（模块级小函数 + 中文 docstring）：
+   `_citation_row(citation) -> dict`（按 `MESSAGE_CITATION_COLUMNS` 投影，**剔除 `content`**）与
+   `_history_citation(row) -> ConversationCitation`；两个方向都要有测试。
 4. 不改动：`get_history()` 的归属校验与顺序、`load_messages` 的调用、锁与幂等逻辑。
 
 ### 4.4 响应契约（`app/schemas/chat.py`）
 
 ```python
+class ConversationCitation(BaseModel):
+  """会话历史中的引用快照（**不含片段正文**；正文由正文查看器按版本 + 偏移读取）。"""
+  citation_id : str          # C1..Cn 标签，与回答正文里的 [C#] 角标对应
+  document_id : str          # 来源文档标识
+  version_id : str           # 生成时冻结的版本标识（读取正文时按它取，见 3.3）
+  chunk_id : str             # 命中的知识块标识
+  title : str                # 文档标题
+  heading_path : str | None  # 章节路径；无则为 null（偏移缺失时用于回退定位）
+  start_offset : int | None  # 片段起始字符偏移；null 表示无法精确定位（降级为只打开文档）
+  end_offset : int | None    # 片段结束偏移（不含）；与 start_offset 同生同灭
+
+
 class ConversationHistoryMessage(BaseModel):
   # ……现有字段不变……
-  citations : list[Citation] = Field(default_factory=list)  # 该回答的知识引用（保持 C1..Cn 原序）；用户消息与无引用回答为空数组
+  citations : list[ConversationCitation] = Field(default_factory=list)  # 该回答的知识引用（保持 C1..Cn 原序）；用户消息与无引用回答为空数组
   answer_incomplete : bool = False  # 该回答生成时的引用完整性标记；为 True 时界面须给出「谨慎采用」提示
 ```
 
-- 复用 `app/knowledge/results.py` 的 `Citation`（不再定义第二套引用模型），
-  字段含义与附录 A.8 完全一致；Pydantic v2 默认忽略未知字段，
-  未来 `Citation` 增字段时旧数据不会被判为非法。
-- 默认值保证：历史接口对任何"没有展示数据"的消息都返回 `[]` / `false`，
-  前端无需处理字段缺失。
+- **为什么要独立模型**：历史引用没有 `content`（决策 3），而 `app/knowledge/results.py` 的
+  `Citation.content` 是必填的可信片段正文。**不要**为了复用把 `Citation.content` 改成可空——
+  那会削弱检索链路自身的契约（正文接口、评测都依赖它）；也**不要**塞空字符串，
+  空串无法区分"没有片段"和"片段为空"。
+- 其余字段名与 `Citation` 完全一致，前端可复用同一个渲染组件（5.3）。
+- 默认值保证：历史接口对任何"没有引用行"的消息都返回 `[]` / `false`，前端无需处理字段缺失。
+- 若将来按 3.1 末段方案 (a)/(b) 恢复片段正文，只需把 `content` 加进本模型与前端类型，
+  属于**纯增量**改动。
 
 ### 4.5 明确不改的文件（防止顺手扩大改动面）
 
@@ -399,17 +444,45 @@ class ConversationHistoryMessage(BaseModel):
 ### 5.1 类型与 API（`frontend/src/api/types.ts`）
 
 ```ts
+/** 历史回答中的引用快照（后端 ConversationCitation）：**不含片段正文**。
+ *  正文不在历史接口里返回，由「查看原文位置」打开正文查看器按版本 + 偏移读取并高亮。 */
+export interface ConversationCitation {
+  /** C1..Cn 标签，与回答正文里的 [C#] 角标对应 */
+  citation_id: string
+  /** 来源文档标识 */
+  document_id: string
+  /** 生成时冻结的版本标识 */
+  version_id: string
+  /** 命中的知识块标识 */
+  chunk_id: string
+  /** 文档标题 */
+  title: string
+  /** 章节路径；无则为 null */
+  heading_path: string | null
+  /** 片段起始字符偏移；null 表示无法精确定位（降级为只打开文档） */
+  start_offset: number | null
+  /** 片段结束偏移（不含）；与 start_offset 同生同灭 */
+  end_offset: number | null
+}
+
+/** 引用卡片的渲染入参：实时引用带片段正文（Citation），历史引用不带（ConversationCitation）。 */
+export type CitationDisplay = Omit<Citation, 'content'> & { content?: string }
+
 export interface ConversationHistoryMessage {
   // ……现有字段不变……
   /** 该回答的知识引用（结构化字段，禁止从回答文本解析）；无引用时为空数组 */
-  citations: Citation[]
+  citations: ConversationCitation[]
   /** 该回答生成时的引用完整性标记；true 时回答上方显示「谨慎采用」提示 */
   answer_incomplete: boolean
 }
 ```
 
-`fetchDocumentContent`（正文接口）与 `Citation` 类型**无需改动**：历史引用复用的就是
-`CitationTarget` 跳转载荷（`frontend/src/api/types.ts:267-284`）。
+- 历史引用不是 `Citation`（缺 `content`），所以新增 `ConversationCitation`；
+  `CitationDisplay` 是两者的公共渲染形状——**卡片组件只依赖它**，
+  有 `content` 就渲染引用块，没有就不渲染（5.3）。
+- `Citation`（实时引用）与 `CitationTarget`（跳转载荷）**类型不变**：
+  历史引用 emit 的仍然是同一个 `CitationTarget` 结构（`content` 本来就不在载荷里，
+  `frontend/src/api/types.ts:267-284`），所以 `ChatView.onOpenDocument` 一行都不用改。
 
 ### 5.2 状态层（`frontend/src/stores/chat.ts`）
 
@@ -418,7 +491,7 @@ export interface ConversationHistoryMessage {
 
   ```ts
   /** 回答随附的结构化展示信息：实时来自本轮响应，历史来自服务端持久化结果 */
-  structuredAnswer: { citations: Citation[]; answerIncomplete: boolean } | null
+  structuredAnswer: { citations: CitationDisplay[]; answerIncomplete: boolean } | null
   ```
 
   - 历史消息：由历史响应填充（无引用时也填 `{ citations: [], answerIncomplete: false }`，
@@ -439,8 +512,15 @@ export interface ConversationHistoryMessage {
   - 非空时在其后渲染 `CitationList`，沿用**已有的** `@open-document` 上抛（`:165-169`）；
   - 建议把「回答正文 + 引用列表」抽成一个小组件或模板片段，避免实时/历史两个分支各写一遍
     导致后续再次漂移。
-- 实时分支保持不变（`structured` 仍负责处理过程、检索摘要、待审批）。
-- `CitationList` 与 `ChatView.onOpenDocument` 无需逻辑改动。
+- **`CitationList` 要能接受"没有片段正文"的引用**（决策 3 的直接后果）：
+  props 类型由 `Citation[]` 放宽为 `CitationDisplay[]`；
+  `blockquote.citation-content` 改为 `v-if="citation.content"`——历史引用不渲染引用块，
+  标题、章节路径、文档/版本/知识块标识与「查看原文位置」按钮照旧；
+  建议在无片段时补一句解释性文案（例如「片段原文请在正文中查看」），
+  让用户明白"不是丢了引用，而是正文不在卡片里"。
+- 实时分支保持不变（`structured` 仍负责处理过程、检索摘要、待审批；
+  引用块因为有 `content` 而照旧渲染）。
+- `ChatView.onOpenDocument` 无需改动（跳转载荷不含 `content`，两个来源完全同形）。
 
 ### 5.4 配套修复：引用锚点必须按回答作用域（**必须与本次一起做**）
 
@@ -477,8 +557,8 @@ export interface ConversationHistoryMessage {
 | `migrations/versions/0014_message_citations.py` | **新增**：建表 `message_citations`（外键/唯一约束/CHECK/索引）+ `messages.answer_incomplete` 列（含中文迁移说明与降级） |
 | `app/sessions/base.py` | 新增 `MessageDisplay` dataclass；`MessageRecord` 增 `citations` / `answer_incomplete`；`append_messages` 协议增 `display` 形参（属性与形参均带中文注释） |
 | `app/sessions/sqlite_store.py` | 写入侧：同事务插引用行 + 写 `answer_incomplete`；读取侧 `load_message_records` 增查引用表并按 `seq` 分组；新增 `MESSAGE_CITATION_COLUMNS` |
-| `app/application/chat_service.py` | 写入侧：构造 `display`（`Citation.public_dict()`）；读取侧：`_to_visible_message` 输出引用与完整性标记 + `dict → Citation` 映射函数 |
-| `app/schemas/chat.py` | `ConversationHistoryMessage` 增 `citations` / `answer_incomplete` |
+| `app/application/chat_service.py` | 写入侧：构造 `display`（按 `MESSAGE_CITATION_COLUMNS` 投影，剔除 `content`）；读取侧：`_to_visible_message` 输出引用与完整性标记 + 两个方向的映射函数 |
+| `app/schemas/chat.py` | 新增 `ConversationCitation`（无 `content`）；`ConversationHistoryMessage` 增 `citations` / `answer_incomplete` |
 | `tests/db/test_migrations.py` | **新增** 0014 迁移用例（表/列/索引存在、约束生效、降级删表删列、往返升级、旧数据不受影响） |
 | `tests/sessions/test_sqlite_store.py` | 引用行写入与读回（含顺序）、`payload_json` 不含引用、`load_messages` 零变化、无引用为默认值、`display` 长度不符报错 |
 | `tests/application/test_chat_service.py` | 历史带引用（真实 SQLite 走一遍 chat → 历史）、用户/中间消息不带引用、坏数据丢弃 |
@@ -490,19 +570,19 @@ export interface ConversationHistoryMessage {
 
 | 文件 | 改动 |
 | --- | --- |
-| `src/api/types.ts` | `ConversationHistoryMessage` 增 `citations` / `answer_incomplete` |
-| `src/stores/chat.ts` | `ChatMessageView` 增 `structuredAnswer`；`historyToView` / `sendMessage` 填充；更新头部注释 |
+| `src/api/types.ts` | 新增 `ConversationCitation`（无 `content`）与 `CitationDisplay`（渲染形状）；`ConversationHistoryMessage` 增 `citations` / `answer_incomplete` |
+| `src/stores/chat.ts` | `ChatMessageView` 增 `structuredAnswer`（`CitationDisplay[]`）；`historyToView` / `sendMessage` 填充；更新头部注释 |
 | `src/components/chat/MessageList.vue` | 历史回答渲染引用卡片与完整性提示；传入引用锚点前缀 |
-| `src/components/chat/CitationList.vue` | 新增 `anchorPrefix` prop，卡片 id 加作用域前缀 |
+| `src/components/chat/CitationList.vue` | props 放宽为 `CitationDisplay[]`（无 `content` 时**不渲染引用块**）；新增 `anchorPrefix` prop，卡片 id 加作用域前缀 |
 | `src/components/common/MarkdownContent.vue` + `src/components/chat/AssistantAnswer.vue` | `[C1]` 定位使用同一作用域前缀（透传 prop） |
-| `src/stores/__tests__/chat.spec.ts`、`src/components/chat/__tests__/MessageList.spec.ts`、`src/components/common/__tests__/MarkdownContent.spec.ts`、`src/components/chat/__tests__/CitationList.spec.ts` | 历史引用映射与渲染、旧响应兜底、"两条回答的 [C1] 各自归位" |
+| `src/stores/__tests__/chat.spec.ts`、`src/components/chat/__tests__/MessageList.spec.ts`、`src/components/chat/__tests__/CitationList.spec.ts`、`src/components/common/__tests__/MarkdownContent.spec.ts` | 历史引用映射与渲染、无 `content` 不渲染引用块、旧响应兜底、"两条回答的 [C1] 各自归位" |
 
 ### 6.3 文档（5 个文件）
 
 | 文件 | 改动 |
 | --- | --- |
-| `docs/frontend/api-inventory.md` | 4.3.4（`:505-533`）改写：历史接口现在返回 `citations` 与 `answer_incomplete`，并说明 events/审批仍不保存；附录 A.5（`:1119-1130`）字段表补两行；§5.3（`:965-983`）"刷新后只恢复问答文本"的口径更新；头部增量记录加一条 |
-| `docs/frontend/manual-test-runbook.md` | E-09（`:525-531`）改为"刷新后引用卡片仍在、可继续跳转"；F-14-9（`:785-791`）改写为"升级前的历史回答仍无引用"；第 15 条已知限制（`:1067`）同步；新增"历史引用跳转 + 停用文档 + 跨租户"验收项 |
+| `docs/frontend/api-inventory.md` | 4.3.4（`:505-533`）改写：历史接口现在返回 `citations` 与 `answer_incomplete`，并说明 events/审批仍不保存；附录 A.5（`:1119-1130`）字段表补两行、**新增 `ConversationCitation` 字段表并写明不含 `content`**；§5.3（`:965-983`）"刷新后只恢复问答文本"的口径更新；头部增量记录加一条 |
+| `docs/frontend/manual-test-runbook.md` | E-09（`:525-531`）改为"刷新后引用卡片仍在、可继续跳转"；E-07（`:496-503`，要求引用卡片显示片段正文）补一句"刷新后的历史引用不显示片段原文，属预期的决策 3"；F-14-9（`:785-791`）改写为"升级前的历史回答仍无引用"；第 15 条已知限制（`:1067`）同步；新增"历史引用跳转 + 停用文档 + 跨租户"验收项 |
 | `README.md` | 能力清单（`:60-64`）补"引用随回答持久化，刷新后仍可核对来源"；已知限制（`:77-78`）移除该项 |
 | `docs/superpowers/specs/2026-09-09-knowledge-document-content-viewer-design.md` | §6 第 1 项标记"已实施（见本文档）"；§3 决策 6 的口径更新 |
 | `docs/database-migrations.md` | 第 7 节验收命令补 `tests/db/test_migrations.py` 相关说明（如无变化则仅确认） |
@@ -521,12 +601,12 @@ export interface ConversationHistoryMessage {
 | 4 | `load_messages()` 返回值与调用方传入的模型载荷**逐字相等**（模型上下文零变化） | `tests/sessions/test_sqlite_store.py` |
 | 5 | `load_message_records()` 把引用按 `seq` 分组带回且顺序正确；没有引用的消息得到空元组、`answer_incomplete=false` | `tests/sessions/test_sqlite_store.py` |
 | 6 | `display` 长度与 `messages` 不一致 → `ValueError`（不静默错位写入） | `tests/sessions/test_sqlite_store.py` |
-| 7 | 走完 `chat()`（真实 SQLite + 假 runner 返回带引用回答）后，`get_history()` 的对应 assistant 消息带**完整引用**与偏移 | `tests/application/test_chat_service.py` |
+| 7 | 走完 `chat()`（真实 SQLite + 假 runner 返回带引用回答）后，`get_history()` 的对应 assistant 消息带**引用标签与偏移**，且 **`content` 不在历史引用的字段里**（模型层面就没有这个字段，决策 3） | `tests/application/test_chat_service.py` |
 | 8 | 用户消息恒为空引用；带 `tool_calls` 的中间助手消息、`system`/`tool` 消息即使库里有引用行也**不返回** | `tests/application/test_chat_service.py` |
 | 9 | 引用行字段非法（空 `citation_id`、只有一个偏移）时：历史接口仍 200，坏行被丢弃（不炸接口） | `tests/application/test_chat_service.py` |
-| 10 | 真实 SQLite 迷你应用：`GET /conversations/{id}/messages/` 响应含新字段且值与落库一致 | `tests/api/test_router.py` |
+| 10 | 真实 SQLite 迷你应用：`GET /conversations/{id}/messages/` 响应含新字段且值与落库一致；响应体里**不出现** `content` 字段 | `tests/api/test_router.py` |
 | 11 | **防泄漏回归**：历史响应不得出现 `reasoning_content` / `tool_calls` / 工具参数与结果 / `raw_text` | `tests/api/test_router.py` |
-| 12 | **契约钉子**：`set(Citation.public_dict().keys())` 与 `MESSAGE_CITATION_COLUMNS` 一致——将来给 `Citation` 加字段却不加迁移时，这条测试会立刻失败 | `tests/knowledge/test_results.py` 或 `tests/sessions/test_sqlite_store.py` |
+| 12 | **契约钉子**：`set(MESSAGE_CITATION_COLUMNS) == set(Citation.public_dict().keys()) - {"content"}`——将来给 `Citation` 加字段却不加列（或反过来）时，这条测试立刻失败 | `tests/knowledge/test_results.py` 或 `tests/sessions/test_sqlite_store.py` |
 | 13 | OpenAPI 字段集合与真实响应一致（现有用例自动覆盖新字段，不得放宽） | `tests/api/test_router.py:273-292` |
 | 14 | 跨租户/跨用户读历史仍 404（不回归） | `tests/api/test_router.py:206-212` |
 
@@ -544,9 +624,10 @@ python -m pytest -q
 | 1 | 历史响应带 `citations` → 视图消息带引用，且 `structured` 仍为 `null`（不伪造 events/审批） |
 | 2 | 历史响应**没有** `citations` 字段（老后端/升级前数据）→ 空数组、不报错、不渲染卡片 |
 | 3 | 历史回答渲染引用卡片，点击「查看原文位置」emit 结构化载荷（`documentId/versionId/startOffset/endOffset/headingPath/title`） |
-| 4 | 历史回答 `answer_incomplete=true` → 显示「谨慎采用」提示；`false` → 不显示 |
-| 5 | 同一页面两条回答都含 `C1`：点击各自正文里的 `[C1]` 只滚动到**自己**的引用卡片（锚点作用域） |
-| 6 | 现有历史消息安全用例按新语义更新（"没有结构化数据就不渲染"，而不是"永不渲染"），**不得**留下跳过或删除的用例 |
+| 4 | **历史引用没有 `content` → 卡片不渲染引用块**（`blockquote` 不存在），但标签/标题/章节/按钮都在；实时引用带 `content` 时引用块照旧渲染 |
+| 5 | 历史回答 `answer_incomplete=true` → 显示「谨慎采用」提示；`false` → 不显示 |
+| 6 | 同一页面两条回答都含 `C1`：点击各自正文里的 `[C1]` 只滚动到**自己**的引用卡片（锚点作用域） |
+| 7 | 现有历史消息安全用例按新语义更新（"没有结构化数据就不渲染"，而不是"永不渲染"），**不得**留下跳过或删除的用例 |
 
 命令：
 
@@ -558,12 +639,16 @@ npm test
 
 ### 7.3 手工验收（写进 `manual-test-runbook.md`）
 
-1. 拿一条带引用的回答 → **F5 刷新** → 引用卡片与「查看原文位置」入口仍在，点击可高亮定位；
+1. 拿一条带引用的回答 → **F5 刷新** → 引用卡片（标签 `[C1]` + 文档标题 + 章节路径）
+   与「查看原文位置」入口仍在；**卡片里不再显示片段原文**（决策 3，属预期）；
+   点击后正文面板打开并高亮到对应区间；
 2. 用旧版本引用刷新 → 仍提示「该引用来自历史版本 vN，当前有效版本为 vM」；
 3. 停用来源文档后刷新 → 引用仍可核对来源，界面提示文档已停用；
 4. 用企业 B 的账号读企业 A 的会话 → 404（会话不可见）；即便手工拿到引用，正文接口仍 404；
 5. 升级**之前**产生的历史回答 → 仍无引用卡片（预期行为，不是 Bug）；
-6. 断网/后端不可用时点历史引用 → 面板内报错并可重试，对话区不受影响。
+6. 断网/后端不可用时点历史引用 → 面板内报错并可重试，对话区不受影响；
+7. 带偏移缺失的引用刷新后点击 → 降级为"只打开文档"（有章节路径则滚到该章节），
+   不上屏错误。
 
 ---
 
@@ -577,7 +662,7 @@ npm test
 | 阶段 | 任务 | 内容 | 依赖 |
 | --- | --- | --- | --- |
 | A | A1 迁移与会话存储 | 迁移 0014（建 `message_citations` + `messages.answer_incomplete`）+ `sessions` 读写 + 存储层/迁移测试 | 无 |
-| A | A2 应用层与响应契约 | `chat_service` 写入（构造 `display`）与读取（`dict → Citation`）+ `schemas.chat` + 服务层与接口测试（含防泄漏、契约钉子） | A1 |
+| A | A2 应用层与响应契约 | `chat_service` 写入（构造 `display`，剔除 `content`）与读取（`dict → ConversationCitation`）+ `schemas.chat` + 服务层与接口测试（含防泄漏、契约钉子） | A1 |
 | A | A3 接口文档同步 | `api-inventory.md` 4.3.4 / A.5 / §5.3 + 头部增量 | A2（契约冻结） |
 | B | B1 类型与 store | `api/types.ts`、`stores/chat.ts` + store 测试 | A2 |
 | B | B2 渲染与锚点修复 | `MessageList`、`CitationList`、`MarkdownContent`、`AssistantAnswer` + 组件测试 | B1 |
@@ -587,17 +672,25 @@ npm test
 
 ---
 
-## 9. 待拍板决策点
+## 9. 决策点
 
-> 决策点 0（存储形态）已由项目负责人于 2026-09-17 拍板：**采用独立表 `message_citations`**（3.2 方案 B）。
+### 9.1 已拍板（2026-09-17，项目负责人）
 
-| # | 决策 | 备选 | 建议 |
+| # | 决策 | 结论 |
+| --- | --- | --- |
+| 0 | 存储形态 | **独立表** `message_citations`（3.2 方案 B） |
+| 1 | 是否连检索摘要一起存 | **不存**。`retrieval_summary` 是 Agentic Search 的产物，当前生产走传统 RAG（来源与承重关系见 3.4），暂不处理；将来要"刷新后仍显示检索那一行"时，再显式加列/加表即可 |
+| 2 | 写入接口形态 | **`append_messages(..., display=[...])` 显式可选参数**（4.2 有完整代码示例）。对比：消息 dict 塞保留键 `_citations` 的写法把两类数据混进同一个 dict，安全依赖"每个写入点都记得剔除"，且需要额外文档与测试才能让后来者知道这条隐式规则；显式参数让"模型上下文载荷"和"展示数据"从一开始就是两个参数 |
+| 3 | 引用片段正文 `content` 是否入库 | **不入库**。实时回答照旧显示片段；刷新后卡片只显示标签与来源信息，正文由「查看原文位置」按 `version_id` + 偏移高亮（偏移缺失走现有降级）；历史响应用 `ConversationCitation`（无 `content` 字段）。代价与可逆性见 3.1 末段 |
+| 4 | 引用锚点作用域修复 | **并入本次**（5.4） |
+| 5 | `(document_id, version_id)` 反查索引 | **暂不建**。本次只用会话读路径；将来做"哪些回答引用了这份文档"时再加索引与查询 |
+
+### 9.2 仍需确认（实施前给个口径即可）
+
+| # | 事项 | 备选 | 建议 |
 | --- | --- | --- | --- |
-| 1 | 是否只持久化引用，还是连检索摘要一起 | 只存 `citations + answer_incomplete` / 再加 `retrieval_summary` | **只存前两项**（传统 RAG 下的摘要来源与信息量见 3.4：`strategy`/`round_count` 是常量、`latency_ms` 是过程指标，安全信号已由 `answer_incomplete` 承载；若产品要求刷新后仍显示检索那一行，再给 `messages` 加三列或建一张同级表即可，同样是显式增量改动） |
-| 2 | 写入接口形态 | `append_messages(..., display=[...])` 显式可选参数 / 消息 dict 保留键 `_citations`（写入时剔除） | **显式参数**：让"模型上下文载荷"和"展示数据"从一开始就是两件事，不需要靠"下划线键会被剔除"这种隐式规则兜底；长度不一致直接 `ValueError`，不会静默错位 |
-| 3 | 引用正文片段是否入库 | 存 `content` / 只存元数据 | **存 `content`**：刷新后仍要能直接核对证据原文（与 E-07 口径一致）；体积影响见第 10 节第 2 条 |
-| 4 | 引用锚点作用域修复是否并入本次 | 并入 / 另开任务 | **并入**：不做就会产生"点 [C1] 跳到别的回答"的可复现错误，属于本改动的直接后果 |
-| 5 | 是否顺带建 `(document_id, version_id)` 反查索引 | 现在建 / 用到再建 | 二者皆可：现在建的成本是一条 `CREATE INDEX`，且不改接口；只用会话读路径的话不建也不影响性能（见 4.1） |
+| 6 | 历史引用卡片"没有片段原文"时是否给解释性文案 | 加一句（如「片段原文请在正文中查看」）/ 什么都不加 | **加一句**：不加的话用户会以为引用内容丢了；文案措辞可在实现时定 |
+| 7 | 是否现在就按 3.1 末段方案 (a) 在读路径回填片段 | 不回填（本次方案）/ 回填（历史卡片与实时一致，代价是历史读路径多一次知识库查询 + 多一个依赖） | **不回填**：本次按决策 3 的最小范围交付，保留 `chunk_id` 与偏移即可随时补上 |
 
 ---
 
@@ -607,11 +700,11 @@ npm test
    在结构上就是两条路径（不像"往载荷里加键"那样依赖约定）。回归证据：
    `load_messages()` 相等断言（`tests/sessions/test_sqlite_store.py:169`、`:457`）与
    `tests/application/test_chat_service.py:184-210` 必须原样通过。
-2. **历史响应体积**：每条引用含 `content`（chunk 上限 `MAX_CHUNK_TOKENS = 700`，
-   `app/knowledge/chunking.py:47`）。一条回答 3–5 条引用 ≈ 2–4 千字；25 轮问答的会话
-   约增加 5–10 万字符。本次接受（历史本来就一次返回全部消息正文），
-   但实施后要**实测一次**；若不可接受，备选是历史只返回引用元数据、正文按需再取
-   （属降级方案，需重新评估 E-07 口径）。
+2. **刷新后卡片没有片段原文**（决策 3 的代价）：历史引用只带标签与来源信息，
+   用户必须点开正文才能核对证据原文。缓解：卡片保留标题/章节路径 + 按钮 + 一句解释文案
+   （9.2 第 6 条）；验收清单同步改写，避免被当成缺陷（6.3、7.3）。
+   反过来，**体积风险因此消失**：历史响应里的引用只有元数据，实测应确认响应大小与今天接近
+   （对照：chunk 上限 `MAX_CHUNK_TOKENS = 700`，`app/knowledge/chunking.py:47`）。
 3. **接口范围扩张**：历史接口从"纯文本"变成"文本 + 结构化引用"。守住 3.6 的五条；
    特别禁止把 `payload_json` 原样暴露（今天不是，未来也不能是）。
 4. **旧数据行为不一致**：升级前的回答刷新后仍无引用。必须写进 runbook 与已知限制，
@@ -636,7 +729,8 @@ npm test
 | --- | --- |
 | `events` 持久化 | 事件里含工具参数与工具结果（内部载荷），回放等于把内部数据纳入安全历史，需单独的安全评审 |
 | `pending_approvals` 持久化 | 审批有独立耐久记录与专门接口（审批中心）；刷新后审批卡片消失是既有已知限制，改动它属于另一个产品决策 |
-| `retrieval_summary` 持久化 | 过程指标，刷新后缺失不影响"核对来源"这一目标；另注：它的字段来源与承重关系见 3.4，`retrieval_events` 因 `conversation_id=None` 无法回补 |
+| `retrieval_summary` 持久化 | Agentic Search 的产物，当前生产走传统 RAG；字段来源与承重关系见 3.4（`strategy`/`round_count` 是常量、`latency_ms` 是过程指标，安全信号已由 `answer_incomplete` 承载）。`retrieval_events` 因 `conversation_id=None` 无法回补 |
+| 在历史卡片里显示引用片段原文 | 决策 3：不入库、也不回填。将来若要恢复，`chunk_id` 与偏移都在库里，两条路可选（读路径回填 / 加一列快照），见 3.1 末段（可逆，不锁死） |
 | 历史引用回填 | 无法可靠反推 `document_id` / `version_id` / 偏移，猜测回填会产生错误定位 |
 | 引用写 localStorage | 服务端是唯一可信来源；本地缓存会引入跨企业/跨用户泄漏与陈旧数据风险 |
 | "旧引用对齐到最新版本" | 偏移只对生成时的版本文本有效，对齐必然失真；"政策现在怎么说"是版本对照功能 |
