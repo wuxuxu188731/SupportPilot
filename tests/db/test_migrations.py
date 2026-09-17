@@ -790,3 +790,279 @@ def test_action_workflow_downgrade_rejects_business_data_loss(tmp_path):
         assert connection.execute(
             "SELECT id FROM action_runs"
         ).fetchone() == ("run-a",)
+
+
+# —— 0014 引用随回答持久化 ——
+
+MESSAGE_CITATION_COLUMNS = {
+    "id",
+    "conversation_id",
+    "seq",
+    "ordinal",
+    "citation_id",
+    "document_id",
+    "version_id",
+    "chunk_id",
+    "title",
+    "heading_path",
+    "content",
+    "start_offset",
+    "end_offset",
+    "created_at",
+}
+
+
+def seed_conversation_with_message(database_path, conversation_id="conversation-a"):
+    """插入一条会话与一条 assistant 消息，作为引用行的父行。
+
+    前提：调用方已执行 ``upgrade_database``（外键指向 conversations/messages，
+    且 SQLite 连接需开启 ``PRAGMA foreign_keys``）。
+    """
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute(
+            """
+            INSERT INTO users(id, username, password_hash)
+            VALUES ('user-a', 'user-a', 'hash')
+            """
+        )
+        connection.execute(
+            "INSERT INTO organizations(id, name) VALUES ('org-a', '企业 A')"
+        )
+        connection.execute(
+            """
+            INSERT INTO memberships(organization_id, user_id, role)
+            VALUES ('org-a', 'user-a', 'admin')
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO conversations(id, organization_id, user_id)
+            VALUES (?, 'org-a', 'user-a')
+            """,
+            (conversation_id,),
+        )
+        connection.execute(
+            """
+            INSERT INTO messages(conversation_id, seq, role, payload_json)
+            VALUES (?, 1, 'assistant', '{"role":"assistant","content":"答"}')
+            """,
+            (conversation_id,),
+        )
+
+
+def insert_citation(connection, **overrides):
+    """插入一条最小合法引用行，允许用关键字参数覆盖任意列（制造非法组合）。"""
+    values = {
+        "conversation_id": "conversation-a",
+        "seq": 1,
+        "ordinal": 1,
+        "citation_id": "C1",
+        "document_id": "doc-a",
+        "version_id": "version-a",
+        "chunk_id": "chunk-a",
+        "title": "退货政策",
+        "heading_path": None,
+        "content": "七天无理由退货",
+        "start_offset": 3,
+        "end_offset": 8,
+    }
+    values.update(overrides)
+    connection.execute(
+        """
+        INSERT INTO message_citations(
+            conversation_id, seq, ordinal, citation_id, document_id,
+            version_id, chunk_id, title, heading_path, content,
+            start_offset, end_offset
+        ) VALUES (
+            :conversation_id, :seq, :ordinal, :citation_id, :document_id,
+            :version_id, :chunk_id, :title, :heading_path, :content,
+            :start_offset, :end_offset
+        )
+        """,
+        values,
+    )
+
+
+def test_citation_migration_adds_table_column_and_index(tmp_path):
+    # 保护行为：0014 之后必须存在 message_citations 表（列与设计稿 3.1 一致）、
+    # messages.answer_incomplete 列，以及读路径唯一需要的复合索引。
+    database_path = tmp_path / "citations.db"
+    upgrade_database(database_path)
+
+    assert "message_citations" in table_names(database_path)
+    with sqlite3.connect(database_path) as connection:
+        citation_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(message_citations)"
+            ).fetchall()
+        }
+        message_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(messages)"
+            ).fetchall()
+        }
+        indexes = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA index_list(message_citations)"
+            ).fetchall()
+        }
+
+    assert citation_columns == MESSAGE_CITATION_COLUMNS
+    assert "answer_incomplete" in message_columns
+    assert "idx_message_citations_conversation_seq" in indexes
+
+
+def test_citation_migration_leaves_upgraded_history_without_record(tmp_path):
+    # 边界情况：升级前产生的历史回答没有任何引用行、answer_incomplete 为 NULL，
+    # 读侧据此统一按「无引用 + false」处理，无需回填。
+    database_path = tmp_path / "legacy-history.db"
+    upgrade_database(database_path)
+    seed_conversation_with_message(database_path)
+
+    with sqlite3.connect(database_path) as connection:
+        citation_count = connection.execute(
+            "SELECT COUNT(*) FROM message_citations"
+        ).fetchone()[0]
+        answer_incomplete = connection.execute(
+            "SELECT answer_incomplete FROM messages WHERE seq = 1"
+        ).fetchone()[0]
+
+    assert citation_count == 0
+    assert answer_incomplete is None
+
+
+def test_citation_table_rejects_duplicate_and_illegal_rows(tmp_path):
+    # 边界情况：唯一约束与 CHECK 必须真的生效——同一回答重复写同一编号、
+    # 只写一个偏移、ordinal=0、空片段正文都要在库级被拒绝。
+    database_path = tmp_path / "citation-constraints.db"
+    upgrade_database(database_path)
+    seed_conversation_with_message(database_path)
+
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        insert_citation(connection)
+
+        with pytest.raises(sqlite3.IntegrityError):
+            insert_citation(connection, ordinal=2)
+
+        with pytest.raises(sqlite3.IntegrityError):
+            insert_citation(connection, citation_id="C2", start_offset=3, end_offset=None)
+
+        with pytest.raises(sqlite3.IntegrityError):
+            insert_citation(connection, citation_id="C3", ordinal=0)
+
+        with pytest.raises(sqlite3.IntegrityError):
+            insert_citation(connection, citation_id="C4", content="   ")
+
+        with pytest.raises(sqlite3.IntegrityError):
+            insert_citation(connection, citation_id="C5", start_offset=9, end_offset=3)
+
+
+def test_citation_table_rejects_orphan_rows(tmp_path):
+    # 边界情况：引用行不得成为孤儿——不存在的会话或消息都必须被外键拦下。
+    database_path = tmp_path / "citation-orphans.db"
+    upgrade_database(database_path)
+    seed_conversation_with_message(database_path)
+
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        with pytest.raises(sqlite3.IntegrityError):
+            insert_citation(connection, conversation_id="missing-conversation")
+        with pytest.raises(sqlite3.IntegrityError):
+            insert_citation(connection, seq=99)
+
+
+def test_messages_answer_incomplete_rejects_values_outside_zero_one(tmp_path):
+    # 边界情况：answer_incomplete 只允许 NULL / 0 / 1，
+    # 2 或 -1 之类会让读侧语义漂移，必须在库级被拒绝。
+    database_path = tmp_path / "answer-incomplete.db"
+    upgrade_database(database_path)
+    seed_conversation_with_message(database_path)
+
+    with sqlite3.connect(database_path) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE messages SET answer_incomplete = 2 WHERE seq = 1"
+            )
+        connection.execute(
+            "UPDATE messages SET answer_incomplete = 1 WHERE seq = 1"
+        )
+        assert connection.execute(
+            "SELECT answer_incomplete FROM messages WHERE seq = 1"
+        ).fetchone() == (1,)
+
+
+def test_citation_migration_downgrade_removes_table_and_column(tmp_path):
+    # 保护行为：没有任何引用数据时，0014 可以对称降级——引用表与
+    # messages.answer_incomplete 列都消失，消息本体与既有约束/索引保留。
+    database_path = tmp_path / "citation-rollback.db"
+    config = alembic_config(database_path)
+    upgrade_database(database_path)
+    seed_conversation_with_message(database_path)
+
+    command.downgrade(config, "0013_document_versions_async_ingestion")
+
+    assert "message_citations" not in table_names(database_path)
+    with sqlite3.connect(database_path) as connection:
+        message_columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(messages)"
+            ).fetchall()
+        }
+        indexes = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA index_list(messages)"
+            ).fetchall()
+        }
+        payload = connection.execute(
+            "SELECT payload_json FROM messages WHERE seq = 1"
+        ).fetchone()[0]
+
+    assert "answer_incomplete" not in message_columns
+    assert "idx_messages_conversation_seq" in indexes
+    assert payload
+
+
+def test_citation_migration_downgrade_refuses_data_loss(tmp_path):
+    # 边界情况：库里已经存在引用行时降级会永久丢弃持久化的证据，
+    # 必须拒绝降级并保留数据，而不是静默删表。
+    database_path = tmp_path / "citation-protected-downgrade.db"
+    config = alembic_config(database_path)
+    upgrade_database(database_path)
+    seed_conversation_with_message(database_path)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        insert_citation(connection)
+
+    with pytest.raises(RuntimeError, match="拒绝降级"):
+        command.downgrade(config, "0013_document_versions_async_ingestion")
+
+    assert "message_citations" in table_names(database_path)
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT citation_id FROM message_citations"
+        ).fetchone() == ("C1",)
+
+
+def test_citation_migration_upgrade_from_0013_keeps_existing_messages(tmp_path):
+    # 保护行为：已有 0013 数据库可以原地升级到 0014，既有消息数据不受影响。
+    database_path = tmp_path / "citation-from-0013.db"
+    config = alembic_config(database_path)
+    command.upgrade(config, "0013_document_versions_async_ingestion")
+    seed_conversation_with_message(database_path)
+
+    command.upgrade(config, "0014_message_citations")
+
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT version_num FROM alembic_version"
+        ).fetchone() == ("0014_message_citations",)
+        assert connection.execute(
+            "SELECT payload_json FROM messages WHERE seq = 1"
+        ).fetchone() == ('{"role":"assistant","content":"答"}',)

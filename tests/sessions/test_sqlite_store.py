@@ -1,9 +1,12 @@
+import sqlite3
+
 import pytest
 
+from app.knowledge.results import Citation
 from app.organizations.base import MembershipRole
 from app.organizations.sqlite_store import SQLiteOrganizationStore
-from app.sessions.base import ConversationNotFoundError, MessageRecord
-from app.sessions.sqlite_store import SQLiteSessionStore
+from app.sessions.base import ConversationNotFoundError, MessageDisplay, MessageRecord
+from app.sessions.sqlite_store import MESSAGE_CITATION_COLUMNS, SQLiteSessionStore
 from app.users.sqlite_store import SQLiteUserStore
 
 
@@ -473,3 +476,275 @@ def test_load_message_records_enforces_ownership(tmp_path):
             user_id=bob.user_id,
             conversation_id=conversation.conversation_id,
         )
+
+
+# —— 引用随回答持久化 ——
+
+def _citation_dict(citation_id="C1", **overrides):
+    """构造一条与 Citation.public_dict() 同形的引用 dict（可直接入库）。"""
+    values = {
+        "citation_id": citation_id,
+        "document_id": "doc-1",
+        "version_id": "ver-1",
+        "chunk_id": "chunk-1",
+        "title": "退货政策",
+        "heading_path": "3.2 退货流程",
+        "content": "七天无理由退货",
+        "start_offset": 3,
+        "end_offset": 11,
+    }
+    values.update(overrides)
+    return values
+
+
+def _append_answer_with_citations(
+    store,
+    *,
+    alice,
+    org_a,
+    conversation,
+    citations,
+    answer_incomplete=False,
+):
+    """追加「用户问题 + 最终回答」两条消息，并给回答挂上引用展示数据。"""
+    store.append_messages(
+        organization_id=org_a.organization_id,
+        user_id=alice.user_id,
+        conversation_id=conversation.conversation_id,
+        messages=[
+            {"role": "user", "content": "退货怎么算？"},
+            {"role": "assistant", "content": "七天无理由 [C1]"},
+        ],
+        display=[
+            None,
+            MessageDisplay(
+                citations=tuple(citations),
+                answer_incomplete=answer_incomplete,
+            ),
+        ],
+    )
+
+
+def test_append_messages_persists_citations_in_ordinal_order(tmp_path):
+    # 保护行为：引用行必须按 ordinal 落库，读回时顺序与传入顺序一致；
+    # answer_incomplete 写在回答消息上（True → 1）。
+    store, alice, _, org_a, _ = build_scope(tmp_path)
+    conversation = store.create_conversation(
+        organization_id=org_a.organization_id, user_id=alice.user_id,
+    )
+    # 故意让编号乱序（C3 先出现）：ordinal 记录的是展示次序，不是编号顺序。
+    _append_answer_with_citations(
+        store,
+        alice=alice,
+        org_a=org_a,
+        conversation=conversation,
+        citations=[_citation_dict("C3"), _citation_dict("C1")],
+        answer_incomplete=True,
+    )
+
+    records = store.load_message_records(
+        organization_id=org_a.organization_id,
+        user_id=alice.user_id,
+        conversation_id=conversation.conversation_id,
+    )
+
+    assert [record.citations for record in records][0] == ()
+    assert [item["citation_id"] for item in records[1].citations] == ["C3", "C1"]
+    assert records[1].citations[0] == _citation_dict("C3")
+    assert records[0].answer_incomplete is False
+    assert records[1].answer_incomplete is True
+
+
+def test_append_messages_keeps_model_context_free_of_citations(tmp_path):
+    # 安全边界（模型上下文零污染）：display 提供的引用不得出现在
+    # payload_json 或 load_messages() 的返回值里。
+    store, alice, _, org_a, _ = build_scope(tmp_path)
+    conversation = store.create_conversation(
+        organization_id=org_a.organization_id, user_id=alice.user_id,
+    )
+    _append_answer_with_citations(
+        store,
+        alice=alice,
+        org_a=org_a,
+        conversation=conversation,
+        citations=[_citation_dict("C1")],
+    )
+
+    loaded = store.load_messages(
+        organization_id=org_a.organization_id,
+        user_id=alice.user_id,
+        conversation_id=conversation.conversation_id,
+    )
+
+    assert loaded == [
+        {"role": "user", "content": "退货怎么算？"},
+        {"role": "assistant", "content": "七天无理由 [C1]"},
+    ]
+    assert "citation" not in str(loaded)
+
+
+def test_append_messages_without_citations_writes_no_rows_but_flags_answer(tmp_path):
+    # 边界情况：纯聊天回答（无引用）不插入任何引用行，但仍写 answer_incomplete=0，
+    # 让 NULL 只剩「没有记录」一个含义。
+    store, alice, _, org_a, _ = build_scope(tmp_path)
+    conversation = store.create_conversation(
+        organization_id=org_a.organization_id, user_id=alice.user_id,
+    )
+    _append_answer_with_citations(
+        store,
+        alice=alice,
+        org_a=org_a,
+        conversation=conversation,
+        citations=[],
+    )
+
+    records = store.load_message_records(
+        organization_id=org_a.organization_id,
+        user_id=alice.user_id,
+        conversation_id=conversation.conversation_id,
+    )
+
+    assert [record.citations for record in records] == [(), ()]
+    assert [record.answer_incomplete for record in records] == [False, False]
+    with sqlite3.connect(tmp_path / "chat.db") as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM message_citations"
+        ).fetchone() == (0,)
+        assert connection.execute(
+            "SELECT answer_incomplete FROM messages ORDER BY seq"
+        ).fetchall() == [(None,), (0,)]
+
+
+def test_append_messages_rejects_display_length_mismatch(tmp_path):
+    # 边界情况：display 与 messages 不等长必须直接报错，不得静默错位写入。
+    store, alice, _, org_a, _ = build_scope(tmp_path)
+    conversation = store.create_conversation(
+        organization_id=org_a.organization_id, user_id=alice.user_id,
+    )
+
+    with pytest.raises(ValueError):
+        store.append_messages(
+            organization_id=org_a.organization_id,
+            user_id=alice.user_id,
+            conversation_id=conversation.conversation_id,
+            messages=[{"role": "user", "content": "问题"}],
+            display=[None, None],
+        )
+
+    with pytest.raises(ValueError):
+        store.append_messages(
+            organization_id=org_a.organization_id,
+            user_id=alice.user_id,
+            conversation_id=conversation.conversation_id,
+            messages=[],
+            display=[MessageDisplay(citations=(_citation_dict(),))],
+        )
+
+
+def test_append_messages_drops_bad_citation_without_losing_the_turn(tmp_path):
+    # 边界情况（降级保护）：库级约束被触发的引用只丢弃自己，
+    # 消息仍然落库、其它合法引用照常写入，绝不把整轮对话一起回滚。
+    store, alice, _, org_a, _ = build_scope(tmp_path)
+    conversation = store.create_conversation(
+        organization_id=org_a.organization_id, user_id=alice.user_id,
+    )
+    broken = _citation_dict("C2", start_offset=9, end_offset=3)  # 反向区间，CHECK 会拒绝
+    _append_answer_with_citations(
+        store,
+        alice=alice,
+        org_a=org_a,
+        conversation=conversation,
+        citations=[broken, _citation_dict("C1")],
+    )
+
+    records = store.load_message_records(
+        organization_id=org_a.organization_id,
+        user_id=alice.user_id,
+        conversation_id=conversation.conversation_id,
+    )
+
+    assert [record.role for record in records] == ["user", "assistant"]
+    assert [item["citation_id"] for item in records[1].citations] == ["C1"]
+
+
+def test_append_messages_drops_citation_with_mismatched_columns(tmp_path):
+    # 边界情况（降级保护）：引用 dict 的键与库列不一致（缺列/多余键）时
+    # 整轮消息仍然落库，只是该条引用被丢弃——展示数据不得拖垮业务事实。
+    store, alice, _, org_a, _ = build_scope(tmp_path)
+    conversation = store.create_conversation(
+        organization_id=org_a.organization_id, user_id=alice.user_id,
+    )
+    extra = dict(_citation_dict("C1"), unexpected_field="多余字段")
+    _append_answer_with_citations(
+        store,
+        alice=alice,
+        org_a=org_a,
+        conversation=conversation,
+        citations=[extra],
+    )
+
+    records = store.load_message_records(
+        organization_id=org_a.organization_id,
+        user_id=alice.user_id,
+        conversation_id=conversation.conversation_id,
+    )
+
+    assert [record.role for record in records] == ["user", "assistant"]
+    assert records[1].citations == ()
+    assert records[1].answer_incomplete is False
+    assert store.load_messages(
+        organization_id=org_a.organization_id,
+        user_id=alice.user_id,
+        conversation_id=conversation.conversation_id,
+    ) == [
+        {"role": "user", "content": "退货怎么算？"},
+        {"role": "assistant", "content": "七天无理由 [C1]"},
+    ]
+
+
+def test_citations_are_isolated_by_conversation(tmp_path):
+    # 安全边界：引用查询必须按会话过滤，不得把别的会话的引用串进来。
+    store, alice, _, org_a, _ = build_scope(tmp_path)
+    first = store.create_conversation(
+        organization_id=org_a.organization_id, user_id=alice.user_id,
+    )
+    second = store.create_conversation(
+        organization_id=org_a.organization_id, user_id=alice.user_id,
+    )
+    _append_answer_with_citations(
+        store, alice=alice, org_a=org_a, conversation=first,
+        citations=[_citation_dict("C1")],
+    )
+    _append_answer_with_citations(
+        store, alice=alice, org_a=org_a, conversation=second,
+        citations=[_citation_dict("C7")],
+    )
+
+    first_records = store.load_message_records(
+        organization_id=org_a.organization_id,
+        user_id=alice.user_id,
+        conversation_id=first.conversation_id,
+    )
+    second_records = store.load_message_records(
+        organization_id=org_a.organization_id,
+        user_id=alice.user_id,
+        conversation_id=second.conversation_id,
+    )
+
+    assert [item["citation_id"] for item in first_records[1].citations] == ["C1"]
+    assert [item["citation_id"] for item in second_records[1].citations] == ["C7"]
+
+
+def test_message_citation_columns_match_citation_public_dict():
+    # 契约钉子：message_citations 的业务列必须与 Citation.public_dict() 的键
+    # **完全相等**——将来给 Citation 加字段却忘了加库列（或反过来）时立刻失败。
+    citation = Citation(
+        citation_id="C1",
+        document_id="doc-1",
+        version_id="ver-1",
+        chunk_id="chunk-1",
+        title="退货政策",
+        heading_path=None,
+        content="七天无理由退货",
+    )
+    assert set(MESSAGE_CITATION_COLUMNS) == set(citation.public_dict().keys())
