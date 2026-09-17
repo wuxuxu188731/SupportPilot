@@ -31,6 +31,15 @@
 >   知识库详情页可查看正文；实现位置与缓存/降级口径见 4.4.8 末尾的
 >   「前端落地」小节，手工验收清单见 `manual-test-runbook.md` F-14。
 >   本阶段**未新增任何后端接口**，接口计数不变。
+> - **引用持久化增量（2026-09-17，引用随回答持久化任务 A3/A4）**：会话历史
+>   响应 4.3.4 的 `messages[]` 元素新增 `citations: Citation[]` 与
+>   `answer_incomplete: boolean` 两个字段（字段表见 A.5，引用模型与实时响应
+>   **同为 `Citation`**，见 A.8）；`citation_id` 的编号口径同步明确为
+>   「一轮内全局唯一」（见 A.8）。**未新增接口，路径/操作计数不变**
+>   （仍为 22 个路径、27 个操作）。`events` / `pending_approvals` /
+>   `retrieval_summary` 仍**不持久化**；`reasoning_content` / `tool_calls` /
+>   工具原始参数与结果 / `payload_json` 仍一律不返回。设计与决策见
+>   `docs/superpowers/specs/2026-09-17-conversation-history-citation-persistence-design.md`。
 
 ---
 
@@ -504,33 +513,51 @@ A=仅 admin；✅/❌ 同理。P=公开。
 
 #### 4.3.4 GET `/conversations/{conversation_id}/messages/` — 会话历史读取（200）
 
-- 用途：读取指定会话的**安全历史**：只包含用户问题与 Agent 最终自然语言
-  回答，供页面刷新后恢复对话。**服务端不保存**上一轮的 `citations`、
-  `events`、`pending_approvals` 等结构化展示信息；history 响应**绝不包含**
-  这些字段，也绝不包含 `reasoning_content` / `tool_calls` / 工具原始参数与
-  结果 / system / tool 消息 / 幂等键等内部内容（`payload_json` 不会原样暴露）。
+- 用途：读取指定会话的**安全历史**：用户问题与 Agent 最终自然语言回答，
+  外加该回答**生成时随回答持久化的知识引用**，供页面刷新后恢复对话与引用卡片。
+  历史响应**包含** `citations` 与 `answer_incomplete`（引用模型与实时响应
+  同为 `Citation`，字段见 A.8）；**仍不包含** `events`、
+  `pending_approvals`、`retrieval_summary`（本次不持久化），也绝不包含
+  `reasoning_content` / `tool_calls` / 工具原始参数与结果 / system / tool
+  消息 / 幂等键等内部内容（`payload_json` 不会原样暴露）。
 - 鉴权：Bearer + X-Organization-ID。
 - Path 参数：`conversation_id`（strip 后为空 → 422）。
 - 成功：`200`，`ConversationHistoryResponse`（字段见附录 A.5）：
   `{conversation_id, system_prompt, created_at, updated_at, messages[]}`；
-  `messages[]` 元素 `{sequence, role, content, created_at}`，按原始
-  `seq ASC` 返回；`role ∈ {user, assistant}`（assistant 一律是无
+  `messages[]` 元素
+  `{sequence, role, content, created_at, citations, answer_incomplete}`，
+  按原始 `seq ASC` 返回；`role ∈ {user, assistant}`（assistant 一律是无
   `tool_calls` 且非空内容的最终回答）；空会话返回空数组。
+  - `citations` 的顺序与实时响应一致（`[C#]` 在回答正文中首次出现的顺序），
+    每条含来源文档/版本/知识块、标题路径、**证据片段正文快照**与偏移；
+  - 用户消息与无引用回答恒为 `[]`；升级前（本能力上线前）的历史回答也是
+    `[]` / `false`，前端无需为老数据写分支；
+  - `answer_incomplete` 为回答级标记，`true` 时界面须给出「谨慎采用」提示；
+    **漏引场景下 `citations` 可能为空而该标记为 `true`**，因此两者都要读。
 - 错误：`404 {"detail": "conversation not found error"}`（会话不存在、
   跨用户、跨企业统一 404，不泄露归属）；`401/400` 同前；`422`（空 id）。
-- 安全过滤实现：`ChatService._to_visible_message`（应用层过滤）+ Store
-  按归属读取；**用于模型上下文的原始消息存储与 `load_messages` 不变**。
+- 安全过滤实现：`ChatService._to_visible_message`（应用层过滤，只有白名单内的
+  assistant 最终回答才带引用；`system` / `tool` / 中间助手消息即使库里有引用行
+  也不返回）+ Store 按归属读取（引用表自身不带 organization_id，归属完全由所属
+  会话决定，查询一律带 `conversation_id`）；**用于模型上下文的原始消息存储与
+  `load_messages` 不变**（引用存在独立表 `message_citations`，与
+  `payload_json` 结构上就是两条路径）。
 - 源码：`app/api/router.py`（`get_conversation_messages`）、
   `app/application/chat_service.py`（`get_history`）、
   `app/sessions/sqlite_store.py`（`get_conversation_record` /
   `load_message_records`）、`app/schemas/chat.py`。
-- 测试：`tests/api/test_router.py`（含 OpenAPI schema 与真实响应一致）、
-  `tests/application/test_chat_service.py`（过滤与顺序）、
-  `tests/sessions/test_sqlite_store.py`（记录读取/归属）、
+- 测试：`tests/api/test_router.py`（含 OpenAPI schema 与真实响应一致、
+  真实响应含新字段且逐字段一致、防泄漏回归）、
+  `tests/application/test_chat_service.py`（过滤、顺序与实时一致、坏行丢弃）、
+  `tests/sessions/test_sqlite_store.py`（记录读取/归属、引用分组）、
   `tests/test_main.py`（真实 app 隔离）。
 - 建议页面：进入会话时加载历史；发送超时/失败后先刷新本接口确认服务端
-  实际状态再决定是否重发；刷新页面后以本接口为准恢复（禁止 localStorage
-  伪造完整历史）。
+  实际状态再决定是否重发；刷新页面后以本接口为准恢复（含引用卡片，
+  禁止 localStorage 伪造完整历史）。
+- 迁移与降级提示：本能力依赖迁移 `0014_message_citations`。**回滚该迁移会删除
+  全部引用行与 `messages.answer_incomplete` 列**（消息本体保留），回滚后历史
+  响应回到「只有问答文本」；升级**之前**产生的历史回答永远没有引用行
+  （数据当时就没存，无法回填），这是预期行为而不是缺陷。
 
 #### 4.3.5 PUT `/conversations/{conversation_id}/system-prompt/` — 更新系统提示词（200）
 
@@ -972,15 +999,18 @@ A=仅 admin；✅/❌ 同理。P=公开。
 - **知识引用**：`citations[]`（`citation_id` 即模型回答中引用的 C1..Cn 标签）
   与 `retrieval_summary.evidence_status`、`answer_incomplete`。回答中的
   “[C1]”样式角标应以结构化数组为准，不要在文本里正则提取正文。
+  **历史回答同样有 `citations`**（4.3.4，生成时随回答持久化，与实时响应同形），
+  因此刷新前后都读结构化数组、走同一套引用卡片与跳转逻辑。
 - **工具过程**：`events[]`（type/tool_call_name/参数/结果/耗时）用于步骤
   展示与失败定位，不要在答案文本里解析。
 - **决定与恢复结果**：`DecisionResponse.resume_required`、
   `ResumeResponse.resume_ok`、`RunStatusResponse.run.status /
   run.last_error_retryable / result`——用布尔/枚举驱动 UI 分支，不猜文案。
 - 聊天接口**只返回本轮结果**；会话列表（4.3.2）与安全历史（4.3.4）是
-  刷新后恢复对话的**唯一可信来源**——聊天响应里的 citations/events/
-  pending_approvals 是“本页新收到”的展示数据，**历史接口不会保存它们**，
-  刷新后只恢复安全的问答文本（前端不得伪造历史引用或审批卡片）。
+  刷新后恢复对话的**唯一可信来源**。分工是：`citations` /
+  `answer_incomplete` 由历史接口**持久化并返回**（刷新后引用卡片与实时一致），
+  而 `events` / `pending_approvals` / `retrieval_summary` **仍然不保存**，
+  刷新后消失——前端不得伪造历史处理过程、检索摘要或审批卡片。
 
 ### 5.4 当前后端缺少、但前端可能需要（或会受影响的）接口
 
@@ -1127,6 +1157,8 @@ A=仅 admin；✅/❌ 同理。P=公开。
 | role | enum | `user` / `assistant`（仅这两种；assistant 为无工具调用的最终回答） |
 | content | string | 消息正文（原文保留，保证非空；不含内部字段） |
 | created_at | string | 消息写入时间（UTC 文本） |
+| citations | Citation[] | 该回答的知识引用（生成时随回答持久化；字段与实时响应完全同形，见 A.8）；顺序为 `[C#]` 在回答正文中首次出现的顺序。`user` 消息与无引用回答恒为 `[]` |
+| answer_incomplete | bool | 该回答生成时的引用完整性标记；`true` 时界面须给出「谨慎采用」提示。漏引场景下 `citations` 可能为空而该值为 `true`；升级前的历史回答为 `false`（无记录） |
 
 ### A.6 LLMResponse（聊天成功响应）
 
@@ -1158,6 +1190,13 @@ A=仅 admin；✅/❌ 同理。P=公开。
 - `Citation`：`citation_id`(C1..Cn 标签), `document_id`, `version_id`,
   `chunk_id`, `title`, `heading_path|null`, `content`(可信片段正文),
   `start_offset|null`, `end_offset|null`
+  - `citation_id` 的**编号口径**：一轮（一次提问）内**全局唯一**。一轮里
+    Agent 可以检索多次（复杂问题允许拆分 2-3 次查询），此时各次检索的引用
+    **连续续编**（如第一次 `C1..C2`、第二次 `C3..C4`），**不是**「每次检索
+    各自从 C1 开始」；同一条知识块被两次命中会得到两个编号，不去重。
+    因此回答正文里的 `[C#]` 与历史响应里的编号始终一一对应。
+  - 历史回答的 `citations` 与实时响应**同一形状**（含 `content`），偏移按
+    **生成时冻结的 `version_id`** 解释，读取历史时绝不重新对齐到当前有效版本；
   - 两个偏移是**该片段在所属版本文正中的字符区间**（满足
     `text[start_offset:end_offset] == content`），供前端跳转定位到正文；
   - 取 `null` 表示无法精确定位（历史/降级载荷），前端应降级为「只打开来源
