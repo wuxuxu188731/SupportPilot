@@ -2,10 +2,16 @@ import sqlite3
 
 import pytest
 
-from app.application.chat_service import ChatService, derive_conversation_title
+from app.application.chat_service import (
+  ChatService,
+  citation_to_stored_dict,
+  derive_conversation_title,
+  stored_citation_from_dict,
+)
 from app.application.organization_service import TenantContext
 from app.agent.prompts import SUPPORT_SYSTEM_PROMPT
 from app.concurrency.conversation_locks import ConversationLockRegistry
+from app.knowledge.results import Citation
 from app.organizations.base import MembershipRole
 from app.schemas.chat import LLMResponse
 from app.sessions.base import ConversationNotFoundError
@@ -486,3 +492,307 @@ def test_history_cross_user_or_cross_org_raises_not_found(tmp_path):
       ),
       conversation_id=conversation.conversation_id,
     )
+
+
+# —— 引用随回答持久化（写路径 → 历史读路径） ——
+
+def _citation(
+  citation_id,
+  *,
+  document_id="doc-1",
+  version_id="ver-1",
+  chunk_id=None,
+  title="退货政策",
+  heading_path="3.2 退货流程",
+  content="七天无理由退货",
+  start_offset=5,
+  end_offset=13,
+):
+  """构造一条带偏移的引用（默认值与实时响应同形）。"""
+  return Citation(
+    citation_id=citation_id,
+    document_id=document_id,
+    version_id=version_id,
+    chunk_id=chunk_id or f"chunk-{citation_id}",
+    title=title,
+    heading_path=heading_path,
+    content=content,
+    start_offset=start_offset,
+    end_offset=end_offset,
+  )
+
+
+def build_citation_runner(answer, citations, *, answer_incomplete=False):
+  """构造一个返回固定回答与引用的假 runner（同时写入本轮消息）。"""
+
+  def runner(*, messages : list[dict], context)->LLMResponse:
+    messages.append({"role": "assistant", "content": answer})
+    return LLMResponse(
+      llm_answer=answer,
+      citations=list(citations),
+      answer_incomplete=answer_incomplete,
+    )
+
+  return runner
+
+
+def test_chat_persists_citations_and_history_keeps_live_order(tmp_path):
+  # 保护行为：走完一次 chat() 之后，历史里的 assistant 消息必须带**完整引用**
+  # （含证据片段正文与偏移），且顺序与实时响应一致——构造一个 [C3] 先于 [C1]
+  # 出现的回答，历史顺序必须是 C3、C1，而不是按编号排序。
+  service, store = build_service(
+    tmp_path,
+    build_citation_runner(
+      "先看 [C3] 再看 [C1]",
+      [
+        _citation("C3", document_id="doc-3", title="退款到账"),
+        _citation("C1", document_id="doc-1", title="退货期限"),
+      ],
+    ),
+  )
+  conversation = service.create_conversation(context=CONTEXT)
+
+  live = service.chat(
+    context=CONTEXT,
+    conversation_id=conversation.conversation_id,
+    question="退货与退款",
+  )
+  history = service.get_history(
+    context=CONTEXT, conversation_id=conversation.conversation_id
+  )
+
+  assert [item.citation_id for item in live.citations] == ["C3", "C1"]
+  user_message, assistant_message = history.messages
+  assert user_message.citations == []
+  assert [item.citation_id for item in assistant_message.citations] == ["C3", "C1"]
+  assert assistant_message.citations[0].document_id == "doc-3"
+  # 证据片段与偏移一起持久化：刷新后卡片与实时完全一致
+  assert assistant_message.citations[0].content == "七天无理由退货"
+  assert assistant_message.citations[0].start_offset == 5
+  assert assistant_message.citations[0].end_offset == 13
+  assert assistant_message.citations[0].heading_path == "3.2 退货流程"
+  assert assistant_message.answer_incomplete is False
+
+
+def test_chat_persists_answer_incomplete_flag_even_without_citations(tmp_path):
+  # 边界情况：漏引场景下 citations 为空但 answer_incomplete=true，
+  # 刷新后仍必须给出「谨慎采用」提示——该标记不能随引用一起丢失。
+  service, _ = build_service(
+    tmp_path,
+    build_citation_runner("没有引用的回答", [], answer_incomplete=True),
+  )
+  conversation = service.create_conversation(context=CONTEXT)
+
+  service.chat(
+    context=CONTEXT, conversation_id=conversation.conversation_id, question="问题"
+  )
+  history = service.get_history(
+    context=CONTEXT, conversation_id=conversation.conversation_id
+  )
+
+  assistant_message = history.messages[1]
+  assert assistant_message.citations == []
+  assert assistant_message.answer_incomplete is True
+
+
+def test_chat_normalizes_single_or_reversed_offsets_before_writing(tmp_path):
+  # 边界情况（写前规整是主防线）：上游给出「只有一个偏移」「start >= end」
+  # 「负偏移」的引用时，写库必须成功，落库的是「两个偏移都为 NULL」，
+  # 而不是抛 IntegrityError 把整轮对话（含已生成的回答）一起带下水。
+  service, store = build_service(
+    tmp_path,
+    build_citation_runner(
+      "看引用 [C1] [C2] [C3]",
+      [
+        Citation(
+          citation_id="C1", document_id="doc-1", version_id="ver-1",
+          chunk_id="chunk-1", title="只有起始偏移", heading_path=None,
+          content="片段一", start_offset=5, end_offset=None,
+        ),
+        Citation(
+          citation_id="C2", document_id="doc-2", version_id="ver-1",
+          chunk_id="chunk-2", title="反向区间", heading_path=None,
+          content="片段二", start_offset=20, end_offset=9,
+        ),
+        Citation(
+          citation_id="C3", document_id="doc-3", version_id="ver-1",
+          chunk_id="chunk-3", title="负偏移", heading_path=None,
+          content="片段三", start_offset=-3, end_offset=10,
+        ),
+      ],
+    ),
+  )
+  conversation = service.create_conversation(context=CONTEXT)
+
+  service.chat(
+    context=CONTEXT, conversation_id=conversation.conversation_id, question="问题"
+  )
+  history = service.get_history(
+    context=CONTEXT, conversation_id=conversation.conversation_id
+  )
+
+  citations = history.messages[1].citations
+  assert [item.citation_id for item in citations] == ["C1", "C2", "C3"]
+  for citation in citations:
+    assert citation.start_offset is None
+    assert citation.end_offset is None
+  # 引用行确实落库了（不是被 CHECK 拒绝后静默丢弃）
+  with sqlite3.connect(tmp_path / "chat.db") as connection:
+    assert connection.execute(
+      "SELECT COUNT(*) FROM message_citations"
+    ).fetchone() == (3,)
+
+
+def test_chat_drops_citation_with_blank_content(tmp_path):
+  # 边界情况：空片段正文会被库级 CHECK 拒绝（document_chunks 有同名约束），
+  # 因此写前直接丢弃该条引用，而不是写一条空证据行或让整轮对话失败。
+  service, _ = build_service(
+    tmp_path,
+    build_citation_runner(
+      "看引用 [C1] [C2]",
+      [
+        _citation("C1", content="   "),
+        _citation("C2", document_id="doc-2", title="退款到账"),
+      ],
+    ),
+  )
+  conversation = service.create_conversation(context=CONTEXT)
+
+  service.chat(
+    context=CONTEXT, conversation_id=conversation.conversation_id, question="问题"
+  )
+  history = service.get_history(
+    context=CONTEXT, conversation_id=conversation.conversation_id
+  )
+
+  assert [item.citation_id for item in history.messages[1].citations] == ["C2"]
+
+
+def test_history_drops_corrupt_citation_rows_without_failing(tmp_path):
+  # 边界情况（坏数据不炸接口）：库里存在非法引用行（空 citation_id、只有一个偏移）
+  # 时历史接口仍正常返回，只丢弃坏行并保留合法行。
+  service, store = build_service(
+    tmp_path,
+    build_citation_runner("看引用 [C1]", [_citation("C1")]),
+  )
+  conversation = service.create_conversation(context=CONTEXT)
+  service.chat(
+    context=CONTEXT, conversation_id=conversation.conversation_id, question="问题"
+  )
+
+  with sqlite3.connect(tmp_path / "chat.db") as connection:
+    # 库级 CHECK 已经挡住了这类脏行；这里模拟「历史遗留 / 人工改库」产生的坏数据，
+    # 因此临时关掉 CHECK 校验再插入，用来验证读侧兜底。
+    connection.execute("PRAGMA ignore_check_constraints = ON")
+    connection.execute(
+      """
+      INSERT INTO message_citations(
+        conversation_id, seq, ordinal, citation_id, document_id,
+        version_id, chunk_id, title, heading_path, content,
+        start_offset, end_offset
+      ) VALUES (?, 2, 2, 'C9', 'doc-9', 'ver-9', 'chunk-9', '坏行', NULL,
+                '片段', NULL, 30)
+      """,
+      (conversation.conversation_id,),
+    )
+    connection.execute("PRAGMA ignore_check_constraints = OFF")
+
+  history = service.get_history(
+    context=CONTEXT, conversation_id=conversation.conversation_id
+  )
+
+  assert [item.citation_id for item in history.messages[1].citations] == ["C1"]
+
+
+def test_history_never_returns_citations_for_invisible_messages(tmp_path):
+  # 安全边界：白名单不变——带 tool_calls 的中间助手消息、system/tool 消息
+  # 即使库里有引用行也一律不返回；用户消息恒为空引用。
+  service, store = build_service(tmp_path, direct_answer_runner)
+  conversation = service.create_conversation(context=CONTEXT)
+
+  with sqlite3.connect(tmp_path / "chat.db") as connection:
+    connection.execute("PRAGMA foreign_keys = ON")
+    connection.execute(
+      """
+      INSERT INTO messages(conversation_id, seq, role, payload_json, answer_incomplete)
+      VALUES (?,
+        1, 'system', '{"role":"system","content":"内部系统提示词"}', NULL),
+        (?,
+        2, 'user', '{"role":"user","content":"可见问题"}', NULL),
+        (?,
+        3, 'assistant',
+        '{"role":"assistant","content":"中间消息","tool_calls":[{"id":"c"}]}', 1),
+        (?,
+        4, 'tool', '{"role":"tool","tool_call_id":"c","content":"工具结果"}', NULL),
+        (?,
+        5, 'assistant', '{"role":"assistant","content":"最终答案"}', 0)
+      """,
+      (
+        conversation.conversation_id,
+        conversation.conversation_id,
+        conversation.conversation_id,
+        conversation.conversation_id,
+        conversation.conversation_id,
+      ),
+    )
+    connection.execute(
+      """
+      INSERT INTO message_citations(
+        conversation_id, seq, ordinal, citation_id, document_id,
+        version_id, chunk_id, title, heading_path, content,
+        start_offset, end_offset
+      ) VALUES
+        (?, 1, 1, 'C1', 'doc-1', 'ver-1', 'chunk-1', '系统行引用', NULL,
+         '片段', 0, 2),
+        (?, 2, 1, 'C2', 'doc-2', 'ver-2', 'chunk-2', '用户行引用', NULL,
+         '片段', 0, 2),
+        (?, 3, 1, 'C3', 'doc-3', 'ver-3', 'chunk-3', '中间消息引用', NULL,
+         '片段', 0, 2),
+        (?, 4, 1, 'C4', 'doc-4', 'ver-4', 'chunk-4', '工具行引用', NULL,
+         '片段', 0, 2)
+      """,
+      (
+        conversation.conversation_id,
+        conversation.conversation_id,
+        conversation.conversation_id,
+        conversation.conversation_id,
+      ),
+    )
+
+  history = service.get_history(
+    context=CONTEXT, conversation_id=conversation.conversation_id
+  )
+
+  assert [(item.sequence, item.role) for item in history.messages] == [
+    (2, "user"),
+    (5, "assistant"),
+  ]
+  assert [item.citations for item in history.messages] == [[], []]
+  assert [item.answer_incomplete for item in history.messages] == [False, False]
+
+
+def test_citation_to_stored_dict_round_trips_through_stored_citation():
+  # 保护行为：写路径（Citation → dict）与读路径（dict → Citation）互为逆运算，
+  # 两个方向的映射各只有一处实现，往返必须逐字段相等。
+  citation = _citation("C1")
+
+  stored = citation_to_stored_dict(citation)
+  restored = stored_citation_from_dict(stored)
+
+  assert restored == citation
+  assert set(stored) == set(citation.public_dict())
+
+
+def test_stored_citation_from_dict_filters_extra_keys_and_rejects_broken_rows():
+  # 边界情况：库里将来多一列时不得整条丢弃（先按字段名过滤再构造）；
+  # 缺必填字段、类型非法或偏移不成对（只有一端）的行返回 None，由调用方丢弃。
+  stored = dict(citation_to_stored_dict(_citation("C1")), future_column="x")
+  assert stored_citation_from_dict(stored) == _citation("C1")
+  assert stored_citation_from_dict({"citation_id": "C1"}) is None
+  assert stored_citation_from_dict("not-a-dict") is None
+  assert stored_citation_from_dict(
+    dict(citation_to_stored_dict(_citation("C1")), start_offset=None)
+  ) is None
+  assert stored_citation_from_dict(
+    dict(citation_to_stored_dict(_citation("C1")), start_offset=9, end_offset=3)
+  ) is None

@@ -74,6 +74,13 @@ class ConversationHistoryMessage(BaseModel):
   role : Literal["user","assistant"]  # 消息角色：用户问题或助手最终回答
   content : str  # 消息正文（原文保留，仅保证非空；不含任何内部字段）
   created_at : str  # 消息写入时间（UTC 文本）
+  citations : list[Citation] = Field(default_factory=list)
+  # 该回答的知识引用（回答生成时随回答持久化）；顺序与实时响应一致
+  # （即 [C#] 在回答正文中首次出现的顺序），字段与实时响应完全同形。
+  # 用户消息与无引用回答恒为空数组。
+  answer_incomplete : bool = False
+  # 该回答生成时的引用完整性标记；True 时界面须给出「谨慎采用」提示。
+  # 升级前的历史回答没有记录，按 False（即不提示）返回。
 
 
 class ConversationHistoryResponse(BaseModel):
