@@ -168,7 +168,59 @@
   真正取不到时由查看器的失败提示兜底（"来源文档不存在或已不可访问"）。
 - 顺带明确：不做"把旧引用升级到最新版本"，也不做"新旧版本对照"——那是另一个功能。
 
-### 3.4 旧数据怎么处理
+### 3.4 `retrieval_summary` 的来源复核（为什么传统 RAG 也有它）
+
+生产链路现在走的是**传统 RAG**（`BaselineKnowledgeSearchService`），所以先澄清一个容易误解的点：
+**`retrieval_summary` 不是传统 RAG 算出来的，而是从 Agentic Search 沿用下来的对外契约字段，
+由 Gateway 适配层补齐。**
+
+| 字段 | 传统 RAG 链路里的真实来源 | 信息量 |
+| --- | --- | --- |
+| `strategy` | 常量 `STRATEGY = "baseline"`（`app/knowledge/retrieval.py:55`） | 仅标识"这条回答走的是传统 RAG 管线" |
+| `round_count` | 常量 `ROUND_COUNT = 1`（`app/knowledge/retrieval.py:56`） | 恒为 1，无信息量 |
+| `evidence_status` | 管线真实结果：`sufficient` / `insufficient` / `failed`（`app/knowledge/retrieval.py:229-247`） | 有真实信息，且是漏引判据 |
+| `latency_ms` | `time.perf_counter()` 实测（`app/knowledge/retrieval.py:249`） | 有真实信息（过程指标） |
+
+存在原因（按时间顺序）：
+
+1. **Stage A（2026-08-07）**：`RetrievalSummary` 与
+   `BaselineSearchResult(..., retrieval_summary, ...)` 一开始就是传统 RAG 的结果契约
+   （`docs/superpowers/plans/2026-08-07-tenant-scoped-rag-stage-a.md:1222-1223`），
+   目的是让 baseline 与后来的 adaptive/agentic **结果同构**：Chat 层只写一套引用校验、
+   Stage C 用同一张报表做 A/B。
+2. **Stage B（2026-08-12）**：Agentic Search 的公开形状定为
+   `{result_code, strategy, evidence_status, citations, retrieval_summary}`，
+   此时 `strategy ∈ single / multi / none / unplanned` 才真正有决策含义。
+3. **2026-09-16 切换（commit `5a023a1`「将智能体知识检索切换为传统RAG」）**：
+   `KnowledgeToolGateway` 的注入从 `AdaptiveKnowledgeSearchService` 换成
+   `BaselineKnowledgeSearchService`；为了**不动协议**，新增
+   `_baseline_tool_payload()`（`app/tools/knowledge_gateway.py:51-72`）
+   把 baseline 结果翻译成上面那套形状。`strategy="baseline"` 由此变成前端与评测
+   识别"走传统 RAG"的标记。
+
+`retrieval_summary` 在链路里是**承重字段**，不能当装饰删掉：
+
+- `app/agent/runner.py:354-361`：**只有** `data.retrieval_summary` 是 dict 时，才把该
+  payload 记为 `knowledge_payload`。没有它 → 引用校验与 `LLMResponse.citations` 全部失效
+  （前端引用卡片、以及本次要持久化的东西会一起消失）。
+- `app/agent/runner.py:91-96`：用它重建响应字段；`data["evidence_status"]` 决定
+  `answer_incomplete` 的"漏引"分支。
+- 前端 `frontend/src/components/chat/MessageList.vue:94-97`（+`:162-164`）：
+  「检索：baseline · 1 轮 · 证据 sufficient · 123 ms」。
+- 评测报表：`app/evals/stage_c/reporting.py:409,446-453`。
+
+与"审计"的关系：每次检索**已经**有一条耐久记录写进 `retrieval_events`
+（`strategy` / `outcome` / `round_count` / `latency_ms` / `selected_chunk_ids_json` 等，
+`app/knowledge/retrieval.py:399-427`）。但工具链路是以 `conversation_id=None` 写入的
+（`app/tools/knowledge_gateway.py:41-45`，该列可空：迁移 `0009:230`），
+**无法关联回会话/消息**——所以"刷新后想看到当时那条检索摘要"补不回来，只能持久化。
+
+→ 结论：第 9 节决策点 1 的建议不变。传统 RAG 下 `strategy`/`round_count` 是常量，
+`latency_ms` 是过程指标，真正有安全意义的 `evidence_status` 已经由 `answer_incomplete`
+（加上 `citations` 是否为空）表达；若产品确实要求"刷新后仍显示检索那一行"，
+再把这四个字段加进同一个 JSON 即可（纯增量、无需再迁移）。
+
+### 3.5 旧数据怎么处理
 
 - 升级前产生的回答**没有可恢复的引用数据**（当时就没写库），`structured_json` 为
   `NULL`，历史接口按空引用返回，前端渲染路径与今天完全一致。
@@ -177,7 +229,7 @@
 - 不做回填脚本：无法从消息正文可靠地反推出 `document_id` / `version_id` / 偏移，
   猜测回填会把"无法定位"变成"错误定位"。
 
-### 3.5 安全边界（本次唯一扩张点，必须逐条守住）
+### 3.6 安全边界（本次唯一扩张点，必须逐条守住）
 
 1. **不新增数据类别**：持久化与返回的字段是"本轮响应里同一用户已经看到过的"；
 2. **白名单不变**：只有 `_to_visible_message` 判定为可见的 assistant 最终回答才带引用；
@@ -467,7 +519,7 @@ npm test
 
 | # | 决策 | 备选 | 建议 |
 | --- | --- | --- | --- |
-| 1 | 是否只持久化引用，还是连检索摘要一起 | 只存 `citations + answer_incomplete` / 再加 `retrieval_summary` | **只存前两项**（安全提示必须保住；检索摘要是过程指标，等有明确诉求再在同一 JSON 里加字段，纯增量、不用再迁移） |
+| 1 | 是否只持久化引用，还是连检索摘要一起 | 只存 `citations + answer_incomplete` / 再加 `retrieval_summary` | **只存前两项**（传统 RAG 下的摘要来源与信息量见 3.4：`strategy`/`round_count` 是常量、`latency_ms` 是过程指标，安全信号已由 `answer_incomplete` 承载；若产品要求刷新后仍显示检索那一行，再往同一 JSON 加字段，纯增量、不用再迁移） |
 | 2 | 写入接口形态 | 消息字典保留键 `_structured`（写入时剔除） / `append_messages` 平行数组参数 | **保留键**：不存在两条列表错位的可能，且"下划线键不进 `payload_json`"是一条可测试的硬规则 |
 | 3 | 引用正文片段是否入库 | 存 `content` / 只存元数据 | **存 `content`**：刷新后仍要能直接核对证据原文（与 E-07 口径一致）；体积影响见第 10 节第 2 条 |
 | 4 | 引用锚点作用域修复是否并入本次 | 并入 / 另开任务 | **并入**：不做就会产生"点 [C1] 跳到别的回答"的可复现错误，属于本改动的直接后果 |
@@ -484,7 +536,7 @@ npm test
    约增加 5–10 万字符。本次接受（历史本来就一次返回全部消息正文），
    但实施后要**实测一次**；若不可接受，备选是历史只返回引用元数据、正文按需再取
    （属降级方案，需重新评估 E-07 口径）。
-3. **接口范围扩张**：历史接口从"纯文本"变成"文本 + 结构化引用"。守住 3.5 的五条；
+3. **接口范围扩张**：历史接口从"纯文本"变成"文本 + 结构化引用"。守住 3.6 的五条；
    特别禁止把 `payload_json` 原样暴露（今天不是，未来也不能是）。
 4. **旧数据行为不一致**：升级前的回答刷新后仍无引用。必须写进 runbook 与已知限制，
    否则会被当作缺陷上报。
@@ -505,7 +557,7 @@ npm test
 | --- | --- |
 | `events` 持久化 | 事件里含工具参数与工具结果（内部载荷），回放等于把内部数据纳入安全历史，需单独的安全评审 |
 | `pending_approvals` 持久化 | 审批有独立耐久记录与专门接口（审批中心）；刷新后审批卡片消失是既有已知限制，改动它属于另一个产品决策 |
-| `retrieval_summary` 持久化 | 过程指标，刷新后缺失不影响"核对来源"这一目标；同一 JSON 可增量扩展 |
+| `retrieval_summary` 持久化 | 过程指标，刷新后缺失不影响"核对来源"这一目标；同一 JSON 可增量扩展；另注：它的字段来源与承重关系见 3.4，`retrieval_events` 因 `conversation_id=None` 无法回补 |
 | 历史引用回填 | 无法可靠反推 `document_id` / `version_id` / 偏移，猜测回填会产生错误定位 |
 | 引用写 localStorage | 服务端是唯一可信来源；本地缓存会引入跨企业/跨用户泄漏与陈旧数据风险 |
 | "旧引用对齐到最新版本" | 偏移只对生成时的版本文本有效，对齐必然失真；"政策现在怎么说"是版本对照功能 |
