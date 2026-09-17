@@ -150,6 +150,20 @@ export interface ConversationHistoryMessage {
   content: string
   /** 消息写入时间：UTC 文本 "%Y-%m-%d %H:%M:%S"（无时区后缀） */
   created_at: string
+  /**
+   * 该回答的知识引用（结构化字段，禁止从回答文本解析）；无引用时为空数组。
+   *
+   * 与实时响应的 `citations` **完全同形**（同样含 content 与偏移），顺序口径也一致：
+   * 按 [C#] 在回答正文中首次出现的顺序，而不是按编号排序。
+   * 用户消息恒为空数组；升级前产生的历史回答同样为空数组（语义相同，无需特殊分支）。
+   */
+  citations: Citation[]
+  /**
+   * 该回答生成时的引用完整性标记；true 时界面展示「谨慎采用」提示。
+   *
+   * 用户消息恒为 false；升级前的历史回答也为 false（当时没有该标记，按「无异常」处理）。
+   */
+  answer_incomplete: boolean
 }
 
 /** 单个会话的安全历史响应（后端 ConversationHistoryResponse）。 */

@@ -4,9 +4,11 @@
  * 事实与安全说明（与后端行为对齐）：
  *  - 会话属于「用户 + 企业」二元组：所有读取只返回当前企业、当前登录
  *    用户自己的会话；无权访问的会话后端统一返回 404；
- *  - 服务端历史接口只保存安全的问答文本；citations / events /
- *    pending_approvals 等结构化展示信息仅存在于「本次页面收到的新响应」
- *    中，刷新后不会恢复——本 Store 不伪造历史引用或审批卡片；
+ *  - 服务端历史接口保存安全的问答文本，以及**回答级**的结构化展示信息
+ *    （citations 引用与 answer_incomplete 完整性标记，来自服务端持久化，
+ *    与实时响应同形）；events / pending_approvals / retrieval_summary
+ *    仍只存在于「本次页面收到的新响应」中，刷新后不会恢复——本 Store
+ *    不伪造历史的处理过程与审批卡片；
  *  - 发送聊天请求使用独立长超时且不自动重试；超时/断网提示
  *    「结果状态可能不确定」，由用户刷新历史后自行决定是否重发；
  *  - 切换企业/退出登录时由 tenantReset 机制清理全部聊天状态；
@@ -17,7 +19,12 @@ import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 
 import * as chatApi from '@/api/chat'
-import type { ConversationHistoryResponse, ConversationListItem, LLMResponse } from '@/api/types'
+import type {
+  Citation,
+  ConversationHistoryResponse,
+  ConversationListItem,
+  LLMResponse,
+} from '@/api/types'
 import { ApiError } from '@/api/errors'
 import { useOrganizationStore } from '@/stores/organization'
 import { registerTenantResetHandler } from '@/stores/tenantReset'
@@ -41,8 +48,21 @@ export interface ChatMessageView {
   sendState: 'sending' | 'error' | 'ok' | null
   /** 失败提示（仅 sendState=error 时非空） */
   errorMessage: string | null
-  /** 结构化聊天结果（仅 live assistant 成功时有；历史消息恒为 null） */
+  /**
+   * 结构化聊天结果（仅 live assistant 成功时有；历史消息恒为 null）：
+   * 处理过程（events）、检索摘要与待审批提案等。服务端历史不保存这些内容，
+   * 本 Store 不伪造历史处理过程或审批卡片。
+   */
   structured: LLMResponse | null
+  /**
+   * 回答随附的结构化展示信息：实时来自本轮响应，历史来自服务端持久化结果。
+   *
+   * citations 与 answerIncomplete 都是「回答级」信息，统一在这里读取，
+   * 渲染层无需区分实时/历史；citations 为空数组时也填
+   * `{ citations: [], answerIncomplete: false }`，便于模板统一判断。
+   * 用户消息、以及发送中/失败的占位助手消息恒为 null（没有回答级信息可填）。
+   */
+  structuredAnswer: { citations: Citation[]; answerIncomplete: boolean } | null
 }
 
 /** 会话操作结果码，供视图决定路由去向与提示。 */
@@ -59,7 +79,15 @@ function nextMessageId(): number {
   return value
 }
 
-/** 把服务端历史消息转换成内存消息视图（不带任何结构化展示信息）。 */
+/** 把服务端历史消息转换成内存消息视图。
+ *
+ *  - assistant 消息：填充回答级结构化信息（引用与完整性标记），它们来自服务端
+ *    持久化结果，与实时响应同形；citations 为空数组时也填
+ *    `{ citations: [], answerIncomplete: false }`，便于渲染层统一判断；
+ *    老后端/升级前的响应缺这两个字段时按空值兜底（不报错、不渲染卡片）；
+ *  - user 消息：structuredAnswer 恒为 null（用户消息没有回答级信息）；
+ *  - 两类消息的 structured 均恒为 null：历史不保存 events / 审批，禁止伪造。
+ */
 function historyToView(history: ConversationHistoryResponse): ChatMessageView[] {
   return history.messages.map((message) => ({
     id: nextMessageId(),
@@ -70,6 +98,13 @@ function historyToView(history: ConversationHistoryResponse): ChatMessageView[] 
     sendState: null,
     errorMessage: null,
     structured: null,
+    structuredAnswer:
+      message.role === 'assistant'
+        ? {
+            citations: message.citations ?? [],
+            answerIncomplete: message.answer_incomplete ?? false,
+          }
+        : null,
   }))
 }
 
@@ -398,6 +433,8 @@ export const useChatStore = defineStore('chat', () => {
       sendState: 'ok',
       errorMessage: null,
       structured: null,
+      // 用户消息没有回答级结构化信息，恒为 null
+      structuredAnswer: null,
     }
     const pendingAssistantId = nextMessageId()
     const assistantMessage: ChatMessageView = {
@@ -409,6 +446,8 @@ export const useChatStore = defineStore('chat', () => {
       sendState: 'sending',
       errorMessage: null,
       structured: null,
+      // 发送中还没有结果：与 structured 一致保持 null（失败时同样保持 null）
+      structuredAnswer: null,
     }
     messages.value.push(userMessage, assistantMessage)
 
@@ -421,6 +460,11 @@ export const useChatStore = defineStore('chat', () => {
         target.sendState = 'ok'
         target.errorMessage = null
         target.structured = response
+        // 回答级结构化信息：引用与完整性标记直接取自本轮响应（与历史同一读取口径）
+        target.structuredAnswer = {
+          citations: response.citations,
+          answerIncomplete: response.answer_incomplete,
+        }
       }
       // 本页收到了结构化结果：随后静默刷新列表以更新标题/排序（不重新加载历史，
       // 避免把内存中的结构化信息替换为纯文本，历史恢复由刷新页面触发）

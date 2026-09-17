@@ -21,7 +21,12 @@ vi.mock('@/api/chat', () => ({
 
 import * as chatApi from '@/api/chat'
 import { useChatStore } from '@/stores/chat'
-import type { ConversationHistoryResponse, ConversationListItem, LLMResponse } from '@/api/types'
+import type {
+  Citation,
+  ConversationHistoryResponse,
+  ConversationListItem,
+  LLMResponse,
+} from '@/api/types'
 
 /** 构造一条会话列表项。 */
 function conversation(id: string, title = '会话标题'): ConversationListItem {
@@ -44,7 +49,7 @@ function emptyHistory(id: string): ConversationHistoryResponse {
   }
 }
 
-/** 构造包含问答文本的历史响应（不含结构化展示信息）。 */
+/** 构造包含问答文本的历史响应（回答级结构化字段为空值，不含 events/审批）。 */
 function textHistory(id: string): ConversationHistoryResponse {
   return {
     conversation_id: id,
@@ -52,10 +57,81 @@ function textHistory(id: string): ConversationHistoryResponse {
     created_at: '2026-09-01 08:00:00',
     updated_at: '2026-09-01 09:00:00',
     messages: [
-      { sequence: 1, role: 'user', content: '第一个问题', created_at: '2026-09-01 08:01:00' },
-      { sequence: 2, role: 'assistant', content: '第一个回答', created_at: '2026-09-01 08:02:00' },
+      {
+        sequence: 1,
+        role: 'user',
+        content: '第一个问题',
+        created_at: '2026-09-01 08:01:00',
+        citations: [],
+        answer_incomplete: false,
+      },
+      {
+        sequence: 2,
+        role: 'assistant',
+        content: '第一个回答',
+        created_at: '2026-09-01 08:02:00',
+        citations: [],
+        answer_incomplete: false,
+      },
     ],
   }
+}
+
+/** 构造一条历史引用（与实时响应同形：含 content 与偏移）。 */
+function historyCitation(citationId: string): Citation {
+  return {
+    citation_id: citationId,
+    document_id: `doc-${citationId}`,
+    version_id: `ver-${citationId}`,
+    chunk_id: `chunk-${citationId}`,
+    title: `引用文档 ${citationId}`,
+    heading_path: null,
+    content: `引用正文 ${citationId}`,
+    start_offset: 0,
+    end_offset: 4,
+  }
+}
+
+/** 构造带引用的历史响应：引用顺序为回答中首次出现的顺序（C2 先于 C1）。 */
+function citedHistory(id: string, answerIncomplete = false): ConversationHistoryResponse {
+  return {
+    conversation_id: id,
+    system_prompt: null,
+    created_at: '2026-09-01 08:00:00',
+    updated_at: '2026-09-01 09:00:00',
+    messages: [
+      {
+        sequence: 1,
+        role: 'user',
+        content: '带引用的问题',
+        created_at: '2026-09-01 08:01:00',
+        citations: [],
+        answer_incomplete: false,
+      },
+      {
+        sequence: 2,
+        role: 'assistant',
+        content: '带引用的回答 [C2] 与 [C1]',
+        created_at: '2026-09-01 08:02:00',
+        citations: [historyCitation('C2'), historyCitation('C1')],
+        answer_incomplete: answerIncomplete,
+      },
+    ],
+  }
+}
+
+/** 构造「老后端/升级前」的历史响应：消息缺少 citations / answer_incomplete 字段。 */
+function legacyHistory(id: string): ConversationHistoryResponse {
+  return {
+    conversation_id: id,
+    system_prompt: null,
+    created_at: '2026-09-01 08:00:00',
+    updated_at: '2026-09-01 09:00:00',
+    messages: [
+      { sequence: 1, role: 'user', content: '旧问题', created_at: '2026-09-01 08:01:00' },
+      { sequence: 2, role: 'assistant', content: '旧回答', created_at: '2026-09-01 08:02:00' },
+    ],
+  } as unknown as ConversationHistoryResponse
 }
 
 /** 构造一个带结构化字段的 LLMResponse。 */
@@ -198,9 +274,9 @@ describe('创建会话', () => {
 })
 
 describe('历史消息加载', () => {
-  it('加载成功：消息按角色转换且不带结构化字段', async () => {
-    // 保护行为：历史恢复只得到安全问答文本——不得伪造 citations/审批
-    // 等结构化信息（服务端历史不保存它们，前端也不能伪造）
+  it('加载成功：消息按角色转换，只带回答级结构化信息', async () => {
+    // 保护行为：历史恢复得到安全问答文本 + 回答级信息（引用与完整性标记），
+    // 但不得伪造 events/pending_approvals（structured 恒为 null，服务端不保存它们）
     vi.mocked(chatApi.getConversationHistory).mockResolvedValue(textHistory('conv-1'))
     const store = useChatStore()
     seedOrganization()
@@ -215,6 +291,7 @@ describe('历史消息加载', () => {
       content: '第一个问题',
       source: 'history',
       structured: null,
+      structuredAnswer: null,
     })
     expect(store.messages[1]).toMatchObject({
       role: 'assistant',
@@ -222,6 +299,8 @@ describe('历史消息加载', () => {
       source: 'history',
       structured: null,
       sendState: null,
+      // 引用为空数组时也填充，便于渲染层统一判断
+      structuredAnswer: { citations: [], answerIncomplete: false },
     })
     expect(store.systemPrompt).toBe('企业偏好')
   })
@@ -237,6 +316,70 @@ describe('历史消息加载', () => {
 
     expect(second).toBe('loaded')
     expect(chatApi.getConversationHistory).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('历史消息的引用与完整性标记', () => {
+  it('历史响应带 citations：视图消息带引用，且不伪造结构化过程与审批', async () => {
+    // 保护行为：历史引用来自服务端持久化结果，必须填进 structuredAnswer；
+    // 同时 structured 仍为 null——不得凭空渲染处理过程与审批卡片（store 不伪造约定）
+    vi.mocked(chatApi.getConversationHistory).mockResolvedValue(citedHistory('conv-1'))
+    const store = useChatStore()
+    seedOrganization()
+
+    await store.openConversation('conv-1')
+
+    const assistant = store.messages[1]
+    expect(assistant.structuredAnswer?.citations.map((item) => item.citation_id)).toEqual(['C2', 'C1'])
+    // 历史引用与实时同形：正文与偏移都要带过来
+    expect(assistant.structuredAnswer?.citations[0].content).toBe('引用正文 C2')
+    expect(assistant.structuredAnswer?.citations[0].start_offset).toBe(0)
+    expect(assistant.structuredAnswer?.answerIncomplete).toBe(false)
+    expect(assistant.structured).toBeNull()
+  })
+
+  it('历史响应缺 citations 字段（老后端/升级前数据）：兜底为空数组且不报错', async () => {
+    // 边界情况：契约要求后端每次都返回新字段，但老后端/升级前的数据可能缺失；
+    // 缺失时必须得到 { citations: [], answerIncomplete: false }，而不是 undefined 或抛错
+    vi.mocked(chatApi.getConversationHistory).mockResolvedValue(legacyHistory('conv-1'))
+    const store = useChatStore()
+    seedOrganization()
+
+    const result = await store.openConversation('conv-1')
+
+    expect(result).toBe('ok')
+    expect(store.messages).toHaveLength(2)
+    expect(store.messages[1].structuredAnswer).toEqual({ citations: [], answerIncomplete: false })
+  })
+
+  it('历史响应 answer_incomplete=true：完整性标记原样带进视图', async () => {
+    // 保护行为：完整性标记是回答级信号，必须原样透出（渲染层据此显示「谨慎采用」）
+    vi.mocked(chatApi.getConversationHistory).mockResolvedValue(citedHistory('conv-1', true))
+    const store = useChatStore()
+    seedOrganization()
+
+    await store.openConversation('conv-1')
+
+    expect(store.messages[1].structuredAnswer?.answerIncomplete).toBe(true)
+    expect(store.messages[1].structuredAnswer?.citations).toHaveLength(2)
+  })
+
+  it('用户消息的 structuredAnswer 恒为 null（历史与实时都不填）', async () => {
+    // 边界情况：引用与完整性标记都是「回答级」信息，用户消息无论来自历史
+    // 还是本页实时发送都不得填充
+    vi.mocked(chatApi.getConversationHistory).mockResolvedValue(citedHistory('conv-1'))
+    vi.mocked(chatApi.sendChatMessage).mockResolvedValue(fullResponse())
+    const store = useChatStore()
+    seedOrganization()
+
+    await store.openConversation('conv-1')
+    await store.sendMessage('后续问题')
+
+    const userMessages = store.messages.filter((message) => message.role === 'user')
+    expect(userMessages).toHaveLength(2)
+    for (const message of userMessages) {
+      expect(message.structuredAnswer).toBeNull()
+    }
   })
 })
 
@@ -260,6 +403,38 @@ describe('发送消息', () => {
     expect(assistant.structured?.citations).toHaveLength(1)
     expect(assistant.structured?.pending_approvals).toHaveLength(1)
     expect(store.sending).toBe(false)
+  })
+
+  it('发送成功：structuredAnswer 由本轮响应填充（实时与历史同一读取口径）', async () => {
+    // 保护行为：实时回答的引用与完整性标记来自本轮响应，必须填充 structuredAnswer，
+    // 供渲染层与历史消息走同一套读取逻辑
+    vi.mocked(chatApi.getConversationHistory).mockResolvedValue(emptyHistory('conv-1'))
+    vi.mocked(chatApi.sendChatMessage).mockResolvedValue(fullResponse())
+    const store = useChatStore()
+    seedOrganization()
+
+    await store.openConversation('conv-1')
+    await store.sendMessage('新的问题')
+
+    const assistant = store.messages[1]
+    expect(assistant.structuredAnswer).toEqual({
+      citations: fullResponse().citations,
+      answerIncomplete: false,
+    })
+  })
+
+  it('发送失败：assistant 占位消息的 structuredAnswer 保持 null', async () => {
+    // 边界情况：失败的消息没有回答级信息，不得留下空对象或旧值（避免渲染层误判有引用）
+    vi.mocked(chatApi.getConversationHistory).mockResolvedValue(emptyHistory('conv-1'))
+    vi.mocked(chatApi.sendChatMessage).mockRejectedValue(apiError(500, '模型暂时不可用'))
+    const store = useChatStore()
+    seedOrganization()
+
+    await store.openConversation('conv-1')
+    await store.sendMessage('会失败的问题')
+
+    expect(store.messages[1].sendState).toBe('error')
+    expect(store.messages[1].structuredAnswer).toBeNull()
   })
 
   it('发送失败：助手消息标记失败且保留用户输入', async () => {

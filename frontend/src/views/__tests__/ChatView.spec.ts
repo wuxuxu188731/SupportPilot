@@ -63,7 +63,7 @@ const CONVERSATIONS = [
   },
 ]
 
-/** 一条含两条问答的历史。 */
+/** 一条含两条问答的历史（回答级结构化字段必填，按升级前语义给空值）。 */
 function historyResponse(): ConversationHistoryResponse {
   return {
     conversation_id: 'conv-1',
@@ -71,8 +71,22 @@ function historyResponse(): ConversationHistoryResponse {
     created_at: '2026-09-01 08:00:00',
     updated_at: '2026-09-02 08:00:00',
     messages: [
-      { sequence: 1, role: 'user', content: '用户历史问题', created_at: '2026-09-01 08:01:00' },
-      { sequence: 2, role: 'assistant', content: 'Agent 历史回答', created_at: '2026-09-01 08:02:00' },
+      {
+        sequence: 1,
+        role: 'user',
+        content: '用户历史问题',
+        created_at: '2026-09-01 08:01:00',
+        citations: [],
+        answer_incomplete: false,
+      },
+      {
+        sequence: 2,
+        role: 'assistant',
+        content: 'Agent 历史回答',
+        created_at: '2026-09-01 08:02:00',
+        citations: [],
+        answer_incomplete: false,
+      },
     ],
   }
 }
