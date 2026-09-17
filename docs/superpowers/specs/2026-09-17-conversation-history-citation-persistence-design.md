@@ -15,6 +15,7 @@
 > | 3 | 引用片段正文 `content` 是否入库 | **入库**（先按"不入库"评估后改回）：行内自带证据快照，历史响应直接复用 `Citation`，前端组件零改动、刷新后卡片与实时完全一致；不入库会引入两套引用形状与一处于用户可见的行为差异，工作量与长期维护面都更大（9.1 决策 3 有对比） |
 > | 4 | 引用锚点作用域修复 | **并入本次**（5.4） |
 > | 5 | `(document_id, version_id)` 反查索引 | **暂不建**：本次只用会话读路径，将来做反查时再加 |
+> | 6 | 一轮多次 `search_knowledge` 的引用编号冲突（2.4 的既有缺陷） | **纳入本次修复**（2026-09-17 确认）：turn 内全局编号 + 允许集合并集 + 合并摘要，设计见 4.5。理由：本次把引用持久化之后，该错误会从"一次性显示问题"变成"看起来可信的历史审计记录" |
 
 | 项 | 内容 |
 | --- | --- |
@@ -31,9 +32,10 @@
 | --- | --- |
 | 是否要新增数据库表？ | **要，新增 1 张表 `message_citations`**：一条引用一行，列名与 `Citation` 字段一一对应（含片段正文快照），另加 `conversation_id` / `seq` / `ordinal` / `created_at`。引用是结构化领域对象而非"一坨展示 JSON"，建表后**列即文档**，维护者读表结构就能懂。 |
 | 是否需要迁移？ | **需要。** 迁移 `0014_message_citations`：`CREATE TABLE message_citations`（外键 + 唯一约束 + 读路径索引）**并且** `ALTER TABLE messages ADD COLUMN answer_incomplete INTEGER NULL`（回答级属性，不属于任何一条引用，见 3.2 末段）。升级前的历史回答没有任何引用行，读取时按「无引用」处理，**无需回填**。 |
-| 改动方向一句话 | 回答生成时，在**消息落库的同一事务**里把该回答的引用（标识 + 定位字段 + 证据片段快照）逐条写入 `message_citations`；历史接口把它们作为新字段返回，前端在历史回答下渲染同一套引用卡片，刷新后的展示与实时完全一致。 |
+| 改动方向一句话 | 回答生成时，在**消息落库的同一事务**里把该回答的引用（标识 + 定位字段 + 证据片段快照）逐条写入 `message_citations`；历史接口把它们作为新字段返回，前端在历史回答下渲染同一套引用卡片，刷新后的展示与实时完全一致。**另含一项前置修复**：一轮多次检索的引用编号冲突（2.4 / 4.5）。 |
 
-预期改动规模：后端 **9 个文件**（1 个迁移 + 4 个源文件 + 4 个测试文件）、
+预期改动规模：后端 **11 个文件**（1 个迁移 + 5 个源文件 + 5 个测试文件；其中
+`app/agent/runner.py` 与 `tests/agent/test_runner.py` 属于 4.5 的修复）、
 前端 **10 个文件**（6 个源文件 + 4 个测试文件）、文档 **5 个文件**。完整清单见第 6 节。
 
 ---
@@ -48,7 +50,9 @@
    偏移为空则降级为「只打开来源文档」；
 3. 刷新后仍能显示「当前回答的证据引用可能不完整，请谨慎采用」这类**安全提示**
    （实时响应里的 `answer_incomplete` 不能丢）；
-4. 全过程不扩大数据暴露面：历史接口仍然只返回"该用户当时已经看到过"的内容。
+4. 全过程不扩大数据暴露面：历史接口仍然只返回"该用户当时已经看到过"的内容；
+5. **顺带修复**（2.4 / 4.5）：一轮内多次检索时，引用编号在该轮内全局唯一、且每条引用
+   指向它真正来自的那次检索的证据——否则持久化只会把"指错文档的引用"变成耐久记录。
 
 ### 1.2 非目标（本次明确不做，理由见第 11 节）
 
@@ -100,10 +104,10 @@
   `tests/application/test_chat_service.py:184-210`。
   这些断言必须继续成立：**引用不得出现在 `load_messages()` 的返回值里**。
 
-### 2.4 既有缺陷（本次不修，但会被本次改动**持久化**，必须登记）
+### 2.4 既有缺陷（**本次一并修复**：一轮多次检索的引用编号冲突）
 
-**一轮里调用多次 `search_knowledge` 时，只有第一次检索的引用会被保留，且两次检索的
-`C1..Cn` 编号会互相冲突。**
+**缺陷：一轮里多次调用 `search_knowledge` 时，只有第一次检索的引用会被保留，且两次检索的
+`C1..Cn` 编号会互相冲突，导致引用可能指向错误的文档与偏移。**
 
 事实链：
 
@@ -116,14 +120,19 @@
    `validate_final_citations` 也只拿这一个 payload（`runner.py:69-109`）。
 3. 每次检索各自从 `C1` 开始编号（`app/knowledge/retrieval.py:385`、`app/knowledge/service.py:456`）。
 
-后果：模型若用第二次检索的 `[C1]` 指代证据，前端会把它解析成**第一次检索的 C1**——
-即引用卡片与（本次改动之后）持久化的引用可能指向**错误的文档与偏移**；
-第二次检索的其余引用则永远不会出现。今天这个错误只活在本轮响应里，本次改动会把它
-变成"看起来可信的历史审计记录"，因此必须在实施前决定处理方式（见第 11 节登记项）。
+后果：模型在工具结果里看到两次 `C1..Cn`，若回答里写 `[C1]` 指代第二次检索的证据，
+前端会把它解析成**第一次检索的 C1**——引用卡片与（本次改动之后）持久化的引用会指向
+**错误的文档与偏移**；第二次检索的其余引用则永远不会出现。
 
-> 与本次改动的关系：持久化内容与实时响应**完全一致**，因此不引入新的错误来源；
-> 但它会让既有错误长期留存。修复属于 `app/agent/runner.py` 的独立任务（见第 11 节），
-> 不属于本次范围。
+**为什么纳入本次**：本次把引用持久化之后，这个错误不再是"本轮响应里的一次性显示问题"，
+而会变成"看起来可信的历史审计记录"。用户已确认（2026-09-17）与本次一并修复，
+修复方向见 4.5。
+
+**现有测试状态（缺陷能存活至今的原因）**：
+`tests/agent/test_runner.py:348`（`test_second_budget_denial_does_not_overwrite_first_knowledge_payload`）
+是切换前遗留的用例——它模拟"第二次调用被预算拒绝"，而生产链路的 Gateway 已经不再拦截，
+所以**没有任何测试覆盖"两次检索都成功"**。本次必须新增该场景用例，并把这条遗留用例
+按新语义改写（保留其"失败结果不得覆盖已缓存结果"的意图，见 4.5 与 7.1 第 18 条）。
 
 
 
@@ -460,12 +469,79 @@ class ConversationHistoryMessage(BaseModel):
 - 契约钉子：`MESSAGE_CITATION_COLUMNS == Citation.public_dict().keys()`（7.1 第 12 条）——
   `Citation` 将来加字段却忘了加列时，这条测试会立刻失败。
 
-### 4.5 明确不改的文件（防止顺手扩大改动面）
+### 4.5 修复：一轮多次检索的引用编号与聚合（`app/agent/runner.py`）
 
-`app/agent/runner.py`（不改消息结构，避免污染模型上下文与大量断言精确相等的 runner 测试）、
-`app/knowledge/**`（正文接口、检索、`Citation` 均已满足）、
+修复 2.4 的缺陷。三条规则（R1 编号、R2 允许集合、R3 摘要），都在 `run_one_turn` 内完成。
+
+#### R1：turn 内全局编号（**先重编号，再写回模型**）
+
+```python
+citation_counter = itertools.count(1)          # turn 级计数器，跨多次检索连续编号
+
+func_result = func(**func_arguments)           # 工具执行（现状）
+# 新增：把本次检索的 citation_id 续编为全局编号（返回新副本，不原地改工具返回值）
+func_result = _renumber_knowledge_citations(func_result, citation_counter)
+...
+emit(AgentEvent(type="tool_call.completed", ..., result=func_result, ...))   # 事件里也是全局编号
+messages.append({"role": "tool", "content": stringify_tool_result(func_result)})  # 模型看到的也是
+```
+
+- **顺序是关键**：重编号必须发生在 `emit(tool_call.completed)` 与
+  `stringify_tool_result(...)` **之前**，因此模型看到的 `[C#]`、事件里的编号、
+  `LLMResponse.citations`、以及（本次新增的）持久化引用**全部同一套编号**。
+- 只重写 `data.citations[].citation_id`；其余字段与每一轮自己的 `data.retrieval_summary`
+  **原样保留**（每轮的 `evidence_status` 仍是模型判断"这次检索够不够"的依据，不能被合并值覆盖）。
+- 返回新副本（复制 `citations` 列表与其中的 dict），不原地修改工具返回值。
+- 只处理"成功且带 `data.citations` 的知识结果"；业务工具、失败结果、无 citations 的结果原样返回。
+
+#### R2：允许集合 = 所有检索轮次的并集
+
+`run_one_turn` 里的 `knowledge_payload` / `knowledge_call_id` 由单值改为列表
+（`knowledge_payloads` / `knowledge_call_ids`，按调用顺序追加），
+`validate_final_citations(answer, knowledge_payloads)` 的 `allowed` 合并各轮 citations
+（编号已全局唯一，不存在相互覆盖）。
+
+- **签名兼容**：参数接受 `dict | Sequence[dict] | None`（内部先归一化成列表）。
+  这样 `tests/agent/test_runner.py:242-289` 里 4 条直接传单个 payload 的测试**不用改**。
+- `citation.invalid` 事件的 `tool_call_id`：仍取**第一次**知识调用的 id（诊断字段；
+  多轮时无法把"未知编号"归因到某一次检索），保持现有行为并在代码注释里写明。
+
+#### R3：摘要合并成一条（诚实反映"本轮检索了 N 次"）
+
+| 字段 | 合并规则 |
+| --- | --- |
+| `strategy` | 取第一次检索的 `strategy`（传统 RAG 恒为 `baseline`） |
+| `round_count` | **本 turn 实际检索次数**（1..3） |
+| `latency_ms` | 各轮之和 |
+| `evidence_status` | 任一轮 `sufficient` → `sufficient`；否则任一轮 `insufficient` → `insufficient`；否则 `failed` |
+
+- **为什么必须合并 `evidence_status`**：`missing_required_citation` 的判据是
+  `evidence_status == "sufficient"`。若只看第一轮，就会出现"第一轮不够、第二轮拿到证据、
+  回答却一个引用都没带"**不告警**的漏判（`answer_incomplete=False`），这是安全口径问题。
+- 影响面：`RetrievalSummary` 只用于聊天响应与该校验（评测走自己的汇总，
+  `app/evals/stage_c/reporting.py`），因此改动集中在聊天路径；
+  前端那行「检索：baseline · N 轮 · 证据 …」会因此变得**真实**（N = 实际检索次数）。
+- 备选（更保守）：摘要仍取第一轮，UI 与判据都不变——代价是 N 恒为 1、上面那条漏判仍在（见 9.2）。
+
+#### 其它约定
+
+- **同一 chunk 被两次检索命中 → 得到两个编号**（如 `C1` 与 `C4`），**不做去重**：
+  两个编号都指向同一条证据，去重反而要强迫模型改编号。与主设计稿"块重叠不去重"
+  （`2026-09-09-...-design.md` §7.4）保持一致，测试要固定这条行为。
+- **单次检索的行为必须与今天完全一致**（编号仍从 `C1` 开始、摘要是那一轮的）——
+  这是回归红线：现有 `tests/agent/test_runner.py:293-325`、`:328-345` 与
+  `tests/agent/test_customer_support_golden_path.py:347-366` 都不许改。
+- **评测链路**：`app/evals/stage_c/answer_ab.py:334` 也调用 `run_one_turn`，
+  多轮检索的样例在修复后结果会变化（第二次检索的引用不再被丢弃）。历史报告不重跑；
+  将来若重跑 Stage C，需要在报告里注明这处行为变化。
+
+### 4.6 明确不改的文件（防止顺手扩大改动面）
+
+`app/knowledge/**`（正文接口、检索、`Citation` 均已满足；本修复只重写 `citation_id`，不动检索）、
+`app/tools/knowledge_gateway.py`（工具契约与 payload 形状不变；编号由 runner 在写回模型前重写）、
 `app/api/router.py`（路由与错误口径不变）、
 `frontend/src/views/ChatView.vue`（`open-document` 链路已存在，历史引用复用同一 `CitationTarget`）。
+`app/agent/runner.py` **本次要改**（4.5），它是唯一被本次触碰的既有核心链路。
 
 ---
 
@@ -557,18 +633,20 @@ export interface ConversationHistoryMessage {
 
 ## 6. 文件清单
 
-### 6.1 后端（9 个文件）
+### 6.1 后端（11 个文件）
 
 | 文件 | 改动 |
 | --- | --- |
 | `migrations/versions/0014_message_citations.py` | **新增**：建表 `message_citations`（外键/唯一约束/CHECK/索引）+ `messages.answer_incomplete` 列（含中文迁移说明与降级） |
+| `app/agent/runner.py` | **4.5 的修复**：turn 内全局编号（`_renumber_knowledge_citations`）、多轮 payload 聚合、合并摘要；`validate_final_citations` 接受单个 payload 或列表 |
 | `app/sessions/base.py` | 新增 `MessageDisplay` dataclass；`MessageRecord` 增 `citations` / `answer_incomplete`；`append_messages` 协议增 `display` 形参（属性与形参均带中文注释） |
-| `app/sessions/sqlite_store.py` | 写入侧：同事务插引用行 + 写 `answer_incomplete`；读取侧 `load_message_records` 增查引用表并按 `seq` 分组；新增 `MESSAGE_CITATION_COLUMNS` |
-| `app/application/chat_service.py` | 写入侧：构造 `display`（`Citation.public_dict()`）；读取侧：`_to_visible_message` 输出引用（`dict → Citation`）与完整性标记 |
+| `app/sessions/sqlite_store.py` | 写入侧：同事务插引用行 + 写 `answer_incomplete`（含引用行写入失败的降级保护）；读取侧 `load_message_records` 增查引用表并按 `seq` 分组；新增 `MESSAGE_CITATION_COLUMNS` |
+| `app/application/chat_service.py` | 写入侧：构造 `display`（写前规整 + `Citation.public_dict()`）；读取侧：`_to_visible_message` 输出引用（`dict → Citation`）与完整性标记 |
 | `app/schemas/chat.py` | `ConversationHistoryMessage` 增 `citations`（复用 `Citation`）/ `answer_incomplete` |
 | `tests/db/test_migrations.py` | **新增** 0014 迁移用例（表/列/索引存在、约束生效、降级删表删列、往返升级、旧数据不受影响） |
-| `tests/sessions/test_sqlite_store.py` | 引用行写入与读回（含顺序）、`payload_json` 不含引用、`load_messages` 零变化、无引用为默认值、`display` 长度不符报错 |
-| `tests/application/test_chat_service.py` | 历史带引用（真实 SQLite 走一遍 chat → 历史）、用户/中间消息不带引用、坏数据丢弃 |
+| `tests/sessions/test_sqlite_store.py` | 引用行写入与读回（含顺序）、`payload_json` 不含引用、`load_messages` 零变化、无引用为默认值、`display` 长度不符报错、引用行写入失败降级 |
+| `tests/agent/test_runner.py` | **4.5 的验收**：两次检索都成功时的编号续编、模型看到的 tool 消息与事件、回答引用第二次检索时的证据归属、合并摘要、单次检索回归；改写遗留的"预算拒绝"用例 |
+| `tests/application/test_chat_service.py` | 历史带引用（真实 SQLite 走一遍 chat → 历史）、顺序与实时一致、写前规整、用户/中间消息不带引用、坏数据丢弃 |
 | `tests/api/test_router.py` | 真实响应含新字段、防泄漏回归、跨租户 404 不回归 |
 
 > `app/agent/runner.py`、`app/knowledge/**`、`app/api/router.py` **不改**（见 4.5）。
@@ -588,7 +666,7 @@ export interface ConversationHistoryMessage {
 
 | 文件 | 改动 |
 | --- | --- |
-| `docs/frontend/api-inventory.md` | 4.3.4（`:505-533`）改写：历史接口现在返回 `citations` 与 `answer_incomplete`（**引用模型与实时响应同为 `Citation`，字段见 A.8**），并说明 events/审批仍不保存；附录 A.5（`:1119-1130`）字段表补两行；§5.3（`:965-983`）"刷新后只恢复问答文本"的口径更新；头部增量记录加一条 |
+| `docs/frontend/api-inventory.md` | 4.3.4（`:505-533`）改写：历史接口现在返回 `citations` 与 `answer_incomplete`（**引用模型与实时响应同为 `Citation`，字段见 A.8**），并说明 events/审批仍不保存；附录 A.5（`:1119-1130`）字段表补两行；**A.8 补一句 `citation_id` 的编号口径**（一轮内全局唯一：一次提问多次检索时连续续编，不再是"每次检索各自从 C1 开始"）；§5.3（`:965-983`）"刷新后只恢复问答文本"的口径更新；头部增量记录加一条 |
 | `docs/frontend/manual-test-runbook.md` | E-09（`:525-531`）改为"刷新后引用卡片仍在、可继续跳转，且与刷新前一致"；F-14-9（`:785-791`）改写为"升级前的历史回答仍无引用"；第 15 条已知限制（`:1067`）同步；新增"历史引用跳转 + 停用文档 + 跨租户"验收项 |
 | `README.md` | 能力清单（`:60-64`）补"引用随回答持久化，刷新后仍可核对来源"；已知限制（`:77-78`）移除该项 |
 | `docs/superpowers/specs/2026-09-09-knowledge-document-content-viewer-design.md` | §6 第 1 项标记"已实施（见本文档）"；§3 决策 6 的口径更新 |
@@ -618,11 +696,15 @@ export interface ConversationHistoryMessage {
 | 12 | **契约钉子**：`set(MESSAGE_CITATION_COLUMNS) == set(Citation.public_dict().keys())`——将来给 `Citation` 加字段却不加列（或反过来）时，这条测试立刻失败 | `tests/knowledge/test_results.py` 或 `tests/sessions/test_sqlite_store.py` |
 | 13 | OpenAPI 字段集合与真实响应一致（现有用例自动覆盖新字段，不得放宽） | `tests/api/test_router.py:273-292` |
 | 14 | 跨租户/跨用户读历史仍 404（不回归） | `tests/api/test_router.py:206-212` |
+| 15 | **多轮检索：编号续编**（4.5 R1）：一轮内两次 `search_knowledge` 都成功时，第二次结果的 `citation_id` 续编（如 `C3`/`C4`），且**写回模型的 tool 消息**与 `tool_call.completed` 事件里的编号都是续编后的 | `tests/agent/test_runner.py` |
+| 16 | **多轮检索：证据归属正确**（4.5 R2）：回答引用第二次检索的编号时，`LLMResponse.citations` 取到的是**第二次**那条证据（`document_id`/`chunk_id`/偏移都对），`answer_incomplete=False`；回答引用两次检索的编号时两条都在、顺序与回答一致 | `tests/agent/test_runner.py` |
+| 17 | **多轮检索：合并摘要**（4.5 R3）：`round_count` = 实际检索次数、`latency_ms` = 各轮之和、`evidence_status` = 合并；且"第一轮 insufficient、第二轮 sufficient、回答无任何引用"→ `answer_incomplete=True`（合并前的漏判必须消失） | `tests/agent/test_runner.py` |
+| 18 | **单次检索不回归**：`test_validate_final_citations_*`（4 条，直接传单个 payload）、`test_runner_emits_content_free_citation_invalid_event`、`test_customer_support_golden_path` 的知识检索断言**原样通过**；遗留用例 `test_second_budget_denial_does_not_overwrite_first_knowledge_payload` 按新语义改写（保留"失败结果不覆盖已缓存结果"的意图，不删用例） | `tests/agent/test_runner.py` |
 
 命令：
 
 ```powershell
-python -m pytest tests/db/test_migrations.py tests/sessions tests/application/test_chat_service.py tests/api/test_router.py -q
+python -m pytest tests/db/test_migrations.py tests/sessions tests/agent tests/application/test_chat_service.py tests/api/test_router.py -q
 python -m pytest -q
 ```
 
@@ -657,7 +739,11 @@ npm test
 5. 升级**之前**产生的历史回答 → 仍无引用卡片（预期行为，不是 Bug）；
 6. 断网/后端不可用时点历史引用 → 面板内报错并可重试，对话区不受影响；
 7. 带偏移缺失的引用刷新后点击 → 降级为"只打开文档"（有章节路径则滚到该章节），
-   不上屏错误。
+   不上屏错误；
+8. **多轮检索（4.5 的手工验证）**：提一个需要跨主题的复杂问题（例如"退货期限 + 退款到账时间"），
+   在 Network/事件里确认 Agent 检索了 2 次以上；检查回答里的 `[C#]` 编号**连续不重复**、
+   引用卡片数与编号一一对应、每条「查看原文位置」都落在**它自己**那条证据所在的文档与片段上；
+   F5 刷新后这些引用仍然指向同一处（这正是本次修复要守住的东西）。
 
 ---
 
@@ -670,14 +756,19 @@ npm test
 
 | 阶段 | 任务 | 内容 | 依赖 |
 | --- | --- | --- | --- |
-| A | A1 迁移与会话存储 | 迁移 0014（建 `message_citations` + `messages.answer_incomplete`）+ `sessions` 读写 + 存储层/迁移测试 | 无 |
-| A | A2 应用层与响应契约 | `chat_service` 写入（构造 `display`：`Citation.public_dict()`）与读取（`dict → Citation`）+ `schemas.chat` + 服务层与接口测试（含防泄漏、契约钉子） | A1 |
-| A | A3 接口文档同步 | `api-inventory.md` 4.3.4 / A.5 / §5.3 + 头部增量 | A2（契约冻结） |
-| B | B1 类型与 store | `api/types.ts`、`stores/chat.ts` + store 测试 | A2 |
+| A | A1 迁移与会话存储 | 迁移 0014（建 `message_citations` + `messages.answer_incomplete`）+ `sessions` 读写（含降级保护）+ 存储层/迁移测试 | 无 |
+| A | A2 多轮检索引用修复 | `app/agent/runner.py` 的 R1/R2/R3（4.5）+ `tests/agent/test_runner.py` 新增/改写用例；**先行落地并冻结"引用编号"契约** | 无（可与 A1 并行） |
+| A | A3 应用层与响应契约 | `chat_service` 写入（写前规整 + 构造 `display`）与读取（`dict → Citation`）+ `schemas.chat` + 服务层与接口测试（含防泄漏、契约钉子、顺序） | A1、A2 |
+| A | A4 接口文档同步 | `api-inventory.md` 4.3.4 / A.5 / §5.3 + 头部增量 | A3（契约冻结） |
+| B | B1 类型与 store | `api/types.ts`、`stores/chat.ts` + store 测试 | A3 |
 | B | B2 渲染与锚点修复 | `MessageList`、`CitationList`、`MarkdownContent`、`AssistantAnswer` + 组件测试 | B1 |
 | C | C1 验收与文档收口 | runbook、README、2026-09-09 设计稿 §6、迁移文档 | B2 |
 
-建议先做 A 阶段并冻结契约，再做前端：A 完成后即可用 curl/手工构造历史响应验证前端渲染。
+顺序建议：**A2 先做**（它改变引用编号的来源，A3 的持久化要基于冻结后的编号契约），
+A1 可与 A2 并行；A 阶段完成后即可用 curl/手工构造历史响应验证前端渲染。
+
+> 若希望进一步缩小单次交付风险，A2 也可以拆成"仅 R1+R2（编号与归属正确）"和
+> "R3（合并摘要）"两次提交——R1+R2 修的是错误证据，R3 修的是漏报告警，二者可独立验收。
 
 ---
 
@@ -693,12 +784,14 @@ npm test
 | 3 | 引用片段正文 `content` 是否入库 | **入库**（一度评估"不入库"，2026-09-17 复核后改回）。入库让历史响应直接复用 `Citation`、前端组件零改动、刷新前后展示完全一致；不入库反而要多出后端 `ConversationCitation` + 前端 `CitationDisplay` 两套形状、`CitationList` 条件渲染与解释文案，并留下"刷新前有片段、刷新后没有"这一长期需要解释的行为差异。代价是库内多存一份片段快照（每答约 5~10KB），需要时可在展示层截断或将来做历史分页，不改契约。详见 3.1 末段 |
 | 4 | 引用锚点作用域修复 | **并入本次**（5.4） |
 | 5 | `(document_id, version_id)` 反查索引 | **暂不建**。本次只用会话读路径；将来做"哪些回答引用了这份文档"时再加索引与查询 |
+| 6 | 一轮多次 `search_knowledge` 的引用编号冲突 | **纳入本次修复**（2.4 / 4.5）：turn 内全局编号（R1）+ 允许集合并集（R2）+ 合并摘要（R3） |
 
 ### 9.2 可选的口径（实施时按下面建议走即可）
 
 | # | 事项 | 备选 | 建议 |
 | --- | --- | --- | --- |
-| 6 | 超长证据片段是否折叠显示 | 原样展示 / 前端折叠（`max-height` + 展开） | **先原样展示**：保持与实时一致；实测发现长片段影响阅读时再做展示层折叠（不改契约、不动存储） |
+| 7 | 超长证据片段是否折叠显示 | 原样展示 / 前端折叠（`max-height` + 展开） | **先原样展示**：保持与实时一致；实测发现长片段影响阅读时再做展示层折叠（不改契约、不动存储） |
+| 8 | 多轮检索的 `retrieval_summary` 怎么合成（4.5 R3） | 合并成一条（`round_count`=检索次数、`evidence_status`=合并） / 仍取第一轮 | **合并**：不合并会留下"第二轮拿到证据、回答没引用却不告警"的漏判（安全口径）；若产品更在意"摘要行保持简单"，可采用备选，但必须把漏判写成已知限制 |
 
 ---
 
@@ -730,10 +823,14 @@ npm test
    一旦被触发，`append_messages` 的事务会整体回滚 → 已经生成的回答、已经创建的提案都拿不到
    （用户看到 500）。防线有两道：**应用层写前规整**（4.3 第 2 条，主防线）+ **store 内引用行
    写入失败降级**（4.2，次防线）。两条都要有测试（7.1 第 2b/2c 条）。
-10. **既有缺陷被持久化（本次自查新增）**：一轮多次 `search_knowledge` 时引用可能指错文档
-    （2.4）——持久化不会让它变新，但会让它变成"看起来可信的历史记录"。建议在本次实施前
-    先决定：要么单独立任务修 `runner`（汇总多轮检索并统一编号），要么先把提示词/网关收紧为
-    每轮一次检索（见第 11 节）。
+10. **多轮检索修复自身的风险（本次自查新增，已纳入范围）**：R1 改了"模型看到的编号"、
+    R3 改了聊天响应里 `retrieval_summary` 的语义，因此有三处要盯住：
+    (a) **单次检索必须与今天完全一致**（编号仍从 `C1` 起、摘要是那一轮的）——
+    `tests/agent/test_runner.py:293-345` 与 `test_customer_support_golden_path` 不许改；
+    (b) `app/evals/stage_c/answer_ab.py:334` 也走 `run_one_turn`，多轮样例的行为会变，
+    历史报告不重跑、将来重跑需在报告里注明；
+    (c) 工具结果被重编号后写回模型，务必**先重编号再 emit/写消息**，否则模型看到的编号
+    与最终响应不一致（这正是原缺陷的形态）。三条都要有测试（7.1 第 15-18 条）。
 11. **前端"不伪造"约定不能被改坏**：本次只放开"引用"，`events` / 审批卡片仍必须为
     `null` / 不渲染；`MessageList.spec.ts:154-165` 的用例要按新语义改写而不是删除。
 
@@ -751,9 +848,9 @@ npm test
 | 引用写 localStorage | 服务端是唯一可信来源；本地缓存会引入跨企业/跨用户泄漏与陈旧数据风险 |
 | "旧引用对齐到最新版本" | 偏移只对生成时的版本文本有效，对齐必然失真；"政策现在怎么说"是版本对照功能 |
 | 引用反查的**查询接口/页面**（哪些回答引用了某文档） | 本次只建表与读路径，不做界面与接口；表已具备条件，将来加一条按 `document_id` 的查询（必要时补索引）即可 |
-| **多轮 `search_knowledge` 的引用汇总/编号统一**（2.4 的既有缺陷） | 属于 `app/agent/runner.py` 的独立修复，会改动消息与事件结构、影响 runner 的一批精确断言；本次只登记，建议随本次实施**并行开一个小任务**处理（两种修法：runner 汇总所有检索 payload 并统一编号，或把提示词与网关收紧为每轮一次检索）。不修的影响：引用卡片与历史引用可能指向错误文档 |
 | **`message_citations` 的数据保留/清理策略** | 会话与消息目前都没有删除接口，引用行随对话自然增长（每答约 5~10KB）；等出现"删除会话/归档"能力时一起设计（届时决定 `ON DELETE` 行为） |
 | 历史回答里 `[C#]` 角标无对应卡片时的显式提示 | 未知引用（模型引了不存在的编号）压根不会被持久化，点击角标时现有实现静默忽略；属既有行为，本次不加提示 |
+| 把多轮检索的引用来源（第几次检索）暴露给前端 | 本次只保证编号全局唯一与证据归属正确，不新增"检索轮次"字段；前端仍只看到 `C1..Cn` 的平铺列表 |
 
 ---
 
@@ -763,7 +860,7 @@ npm test
 
 | # | 类型 | 问题 | 处理 |
 | --- | --- | --- | --- |
-| 1 | 缺陷（会被本次放大） | 一轮多次 `search_knowledge` 时只有第一次检索的引用被保留、两次检索 `C1..Cn` 编号冲突，引用可能指向错误文档 | 新增 2.4 事实章节 + 第 10 节风险 10 + 第 11 节登记为并行小任务 |
+| 1 | 缺陷（**已纳入本次修复**） | 一轮多次 `search_knowledge` 时只有第一次检索的引用被保留、两次检索 `C1..Cn` 编号冲突，引用可能指向错误文档 | 新增 2.4 事实章节 + 4.5 修复设计（R1 编号 / R2 并集 / R3 摘要）+ 第 10 节风险 10 + 7.1 第 15-18 条验收；用户 2026-09-17 确认纳入范围 |
 | 2 | 缺陷（写库失败风险） | `Citation` 类型不禁止"只有一个偏移"，而表上有 `(start_offset IS NULL) = (end_offset IS NULL)` 等 CHECK → 会抛 `IntegrityError`，把整轮对话（含已创建提案）一起回滚 | 4.1 加"CHECK 是最后防线"警示；4.3 第 2 条加**写前规整**（主防线）；4.2 加**引用行写入失败降级**（次防线）；7.1 加第 2b/2c 条测试 |
 | 3 | 自相矛盾 | `ordinal` 一处写"决定 C1..Cn 顺序"、契约注释写"C1..Cn 原序"，但实时数组顺序是"回答中首次出现的顺序"（`runner.py:73-87`），两者不等价 | 3.1 表、4.4 注释、7.1 第 7 条统一改为"与实时响应数组顺序一致"，并加一条乱序断言 |
 | 4 | 遗漏 | 前端新字段若无条件必填，`npm run typecheck` 会因三处 fixture 失败（tsconfig 的 include 覆盖 spec） | 5.1 明确"必填 + 必须同步更新 `stores/__tests__/chat.spec.ts:37/48`、`views/__tests__/ChatView.spec.ts:67`"，6.2/7.2 同步 |
