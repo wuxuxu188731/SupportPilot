@@ -33,7 +33,8 @@
 | 是否需要迁移？ | **需要。** 迁移 `0014_message_citations`：`CREATE TABLE message_citations`（外键 + 唯一约束 + 读路径索引）**并且** `ALTER TABLE messages ADD COLUMN answer_incomplete INTEGER NULL`（回答级属性，不属于任何一条引用，见 3.2 末段）。升级前的历史回答没有任何引用行，读取时按「无引用」处理，**无需回填**。 |
 | 改动方向一句话 | 回答生成时，在**消息落库的同一事务**里把该回答的引用（标识 + 定位字段 + 证据片段快照）逐条写入 `message_citations`；历史接口把它们作为新字段返回，前端在历史回答下渲染同一套引用卡片，刷新后的展示与实时完全一致。 |
 
-预期改动规模：后端 **9 个文件**（含 1 个迁移与 4 个测试文件）、前端 **6 个文件**（含 3 个测试文件）、文档 **5 个文件**。完整清单见第 6 节。
+预期改动规模：后端 **9 个文件**（1 个迁移 + 4 个源文件 + 4 个测试文件）、
+前端 **10 个文件**（6 个源文件 + 4 个测试文件）、文档 **5 个文件**。完整清单见第 6 节。
 
 ---
 
@@ -65,7 +66,7 @@
 
 | 事实 | 依据 |
 | --- | --- |
-| 引用来自由工具结果解析出的结构化 `citations`，并随 `POST /conversations/{id}/chat/` 一次性返回 | `app/agent/runner.py:227-248`（`validate_final_citations` → `LLMResponse.citations`） |
+| 引用来自由工具结果解析出的结构化 `citations`，并随 `POST /conversations/{id}/chat/` 一次性返回 | `app/agent/runner.py:69-109`（`validate_final_citations` 定义）、`:227-248`（最终回答调用点 → `LLMResponse.citations`） |
 | 持久化的只有**模型上下文消息**：`chat()` 把本轮新增的消息批量写库 | `app/application/chat_service.py:224-229` |
 | 历史接口只做「白名单过滤」，绝不返回结构化展示信息 | `app/application/chat_service.py:128-161`（`_to_visible_message`）、`app/schemas/chat.py:67-76` |
 | 前端 store 明确写着「刷新后不会恢复结构化展示信息，不伪造」 | `frontend/src/stores/chat.ts:1-14`、`frontend/src/components/chat/MessageList.vue:181-184` |
@@ -99,7 +100,34 @@
   `tests/application/test_chat_service.py:184-210`。
   这些断言必须继续成立：**引用不得出现在 `load_messages()` 的返回值里**。
 
-### 2.4 正文侧能力已齐备，历史引用不需要新接口
+### 2.4 既有缺陷（本次不修，但会被本次改动**持久化**，必须登记）
+
+**一轮里调用多次 `search_knowledge` 时，只有第一次检索的引用会被保留，且两次检索的
+`C1..Cn` 编号会互相冲突。**
+
+事实链：
+
+1. 生产提示词明确要求/允许拆分多轮检索：`app/agent/prompts.py:11`
+   「简单问题调用 1 次，涉及多个独立主题或条件的复杂问题可拆分查询 **2-3 次**」；
+   工具说明同口径（`app/tools/knowledge_definitions.py`），且 2026-09-16 切换传统 RAG 时
+   **移除了**"每轮只能检索一次"的限制（commit `5a023a1` 删掉了 Gateway 里的 `used` 标志）。
+2. 但 `run_one_turn` 只缓存**第一次**成功的知识结果：
+   `knowledge_payload is None` 的守卫在 `app/agent/runner.py:354-361`，
+   `validate_final_citations` 也只拿这一个 payload（`runner.py:69-109`）。
+3. 每次检索各自从 `C1` 开始编号（`app/knowledge/retrieval.py:385`、`app/knowledge/service.py:456`）。
+
+后果：模型若用第二次检索的 `[C1]` 指代证据，前端会把它解析成**第一次检索的 C1**——
+即引用卡片与（本次改动之后）持久化的引用可能指向**错误的文档与偏移**；
+第二次检索的其余引用则永远不会出现。今天这个错误只活在本轮响应里，本次改动会把它
+变成"看起来可信的历史审计记录"，因此必须在实施前决定处理方式（见第 11 节登记项）。
+
+> 与本次改动的关系：持久化内容与实时响应**完全一致**，因此不引入新的错误来源；
+> 但它会让既有错误长期留存。修复属于 `app/agent/runner.py` 的独立任务（见第 11 节），
+> 不属于本次范围。
+
+
+
+### 2.5 正文侧能力已齐备，历史引用不需要新接口
 
 | 历史引用的需求 | 现有能力 |
 | --- | --- |
@@ -130,7 +158,7 @@
 | `id` | INTEGER PK AUTOINCREMENT | 行主键，仅作唯一标识，业务逻辑不依赖它 |
 | `conversation_id` | TEXT NOT NULL | 所属会话（外键 → `conversations.id`） |
 | `seq` | INTEGER NOT NULL | 引用所属消息的 `messages.seq`；只有 assistant 最终回答会有引用行 |
-| `ordinal` | INTEGER NOT NULL | 引用在该回答中的展示次序（1..n，决定 C1..Cn 顺序） |
+| `ordinal` | INTEGER NOT NULL | 引用在该回答中的**展示次序**（1..n）。注意：它等于**实时响应里 `citations` 数组的顺序**（即 `[C#]` 在回答中首次出现的顺序，见 `app/agent/runner.py:73-87`），**不等于** `citation_id` 的数字顺序（回答可能先出现 `[C3]` 再出现 `[C1]`） |
 | `citation_id` | TEXT NOT NULL | `C1..Cn` 标签，与回答正文里的 `[C#]` 角标对应 |
 | `document_id` | TEXT NOT NULL | 来源文档标识 |
 | `version_id` | TEXT NOT NULL | **生成时冻结**的版本标识（读取历史引用时按它取正文，见 3.3） |
@@ -215,7 +243,7 @@
   一旦换成当前 active 版本，偏移与引用正文会同时失真，属于红线（见第 10 节）。
 - 因此历史引用点开后走的就是现有正文接口的"历史版本"分支，界面已会提示
   「该引用来自历史版本 vN，当前有效版本为 vM」，无需新逻辑。
-- 版本正文解析后不可变（2.4），所以历史引用的偏移与片段**长期保持一致**。
+- 版本正文解析后不可变（2.5），所以历史引用的偏移与片段**长期保持一致**。
 - 文档之后被停用：正文接口仍返回 200（既定决策），历史引用仍可核对；
   界面已有的「该文档已停用」提示继续生效。
 - 文档/版本目前**没有删除接口**，因此本次**不需要**"引用已失效则过滤"的逻辑；
@@ -320,6 +348,8 @@
        将来做"哪些回答引用了这份文档"时再加一条 `CREATE INDEX` 即可。
   2. `op.add_column("messages", sa.Column("answer_incomplete", sa.Integer(), nullable=True))`
      （可空、无默认 → SQLite 直接 `ADD COLUMN`，无需 `batch_alter_table`）。
+     **取值必须是 `0` / `1`**（见下表 CHECK）：仓库里没有 `sa.Boolean` 列先例，
+     用 `INTEGER + CHECK` 与既有风格一致，读侧 `NULL` 与 `0` 一律当 `false`。
 - CHECK 约束（沿用仓库习惯，把"不可能的状态"挡在库外）：
 
   | 约束名 | 表达式 | 挡住的错误 |
@@ -330,8 +360,12 @@
   | `ck_message_citations_offsets_ordered` | `start_offset IS NULL OR end_offset > start_offset` | 反向/零长区间 |
   | `ck_message_citations_offsets_non_negative` | `start_offset IS NULL OR start_offset >= 0` | 负偏移 |
   | `ck_message_citations_content_not_blank` | `length(trim(content)) > 0` | 空证据片段（与 `document_chunks` 的同名约束口径一致，见迁移 `0009:161-164`） |
+  | `ck_messages_answer_incomplete_value`（加在 `messages` 上） | `answer_incomplete IS NULL OR answer_incomplete IN (0, 1)` | 把 `true/2/-1` 之类写进列里，导致读侧语义漂移 |
 
   `heading_path` 允许 `NULL`（引用可以没有章节路径），不加约束。
+  ⚠️ **这些 CHECK 是"最后一道防线"，不是"正常路径"**：应用层必须在写库前把上游数据规整成
+  合法形态（见 4.3 第 2 条），否则一次 `IntegrityError` 会让整轮对话（含已生成的回答、
+  甚至已创建的提案）一起失败——那是比"引用没存上"严重得多的事故。
 - `downgrade()`：`op.drop_column("messages", "answer_incomplete")` →
   `op.drop_index("idx_message_citations_conversation_seq")`（及可选索引）→
   `op.drop_table("message_citations")`。**降级会丢弃已持久化的引用数据**
@@ -351,10 +385,11 @@
 | `base.py` 新增 `MessageDisplay` | 冻结 dataclass：`citations : tuple[dict, ...] = ()`（每项键 = `MESSAGE_CITATION_COLUMNS`，即 `Citation.public_dict()` 全集）、`answer_incomplete : bool = False`；每个属性带中文注释，并写明「仅供展示与历史读取使用，**绝不进入模型上下文**」 |
 | `base.py` `MessageRecord` | 新增 `citations : tuple[dict, ...] = ()` 与 `answer_incomplete : bool = False`（带中文注释）。带默认值 → 唯一构造点在 `sqlite_store.py:180`，安全 |
 | `base.py` `SessionStore` 协议 | `append_messages` 增可选 `display` 形参，并写明「与 `messages` 等长、与消息同事务写入、不进入 `payload_json`」 |
-| `sqlite_store.py` `append_messages` | 新增关键字参数 `display : list[MessageDisplay \| None] \| None = None`；长度必须与 `messages` 相等，否则 `ValueError`。在**同一事务**内：插消息 → 按本地算出的 `seq` 插引用行 → 写入 `messages.answer_incomplete`（并入消息 `INSERT` 的列值即可） |
+| `sqlite_store.py` `append_messages` | 新增关键字参数 `display : list[MessageDisplay \| None] \| None = None`；长度必须与 `messages` 相等，否则 `ValueError`；`messages` 为空时保持现有的提前返回（此时 `display` 必须是 `None` 或全 `None`，否则同样 `ValueError`）。在**同一事务**内：插消息（含 `answer_incomplete` 列值）→ 按本地算出的 `seq` 插引用行 |
+| `sqlite_store.py` `append_messages`（降级保护） | 引用行插入用 `try/except sqlite3.IntegrityError` 包住：**失败只丢弃引用行并记诊断日志，绝不让整轮消息落库失败**（引用是展示数据，消息与提案才是业务事实）。要有测试覆盖这条降级路径 |
 | `sqlite_store.py` `load_message_records` | 先查消息行，再 `SELECT ... FROM message_citations WHERE conversation_id = ? ORDER BY seq ASC, ordinal ASC`，按 `seq` 分组填进各 `MessageRecord`（升级前/无引用的消息得到空元组） |
 | `sqlite_store.py` `load_messages` | **不改**（模型上下文路径一行不动） |
-| `sqlite_store.py` 模块常量 | 新增 `MESSAGE_CITATION_COLUMNS`（业务列白名单，与 `Citation.public_dict()` 的键**完全相等**）：写入前用它校验 dict 的键（**缺列 → `ValueError`**，多余键忽略，避免静默写入半截数据）；7.1 第 12 条的"列 ↔ 字段"钉子测试也复用它 |
+| `sqlite_store.py` 模块常量 | 新增 `MESSAGE_CITATION_COLUMNS`（业务列白名单，与 `Citation.public_dict()` 的键**完全相等**）：写入前用它校验 dict 的键——**缺列报错、多余键同样报错**（多余键意味着 `Citation` 加了字段却没加列，必须显式失败而不是静默丢字段）；7.1 第 12 条的"列 ↔ 字段"钉子测试也复用它 |
 
 写入接口形态（第 9 节决策点 2，已拍板为**显式可选参数** `display`）：
 
@@ -385,21 +420,33 @@ self._store.append_messages(..., messages=new_messages, display=display)
    都填** `MessageDisplay(citations=..., answer_incomplete=response.answer_incomplete)`
    （`citations` 为空就只写 `answer_incomplete`，不插引用行）；找不到（理论上不会发生）
    时全部传 `None`，**不报错**。
-2. `_to_visible_message()`：新增 `citations` / `answer_incomplete` 两个返回字段。
+2. **写库前必须把引用规整成"库能接受"的形态**（否则 CHECK 会抛 `IntegrityError`，
+   把整轮对话一起带下水）。`_citation_row(citation)` 除了投影字段，还要做三件事：
+   - **偏移同生共灭**：`start_offset` / `end_offset` 任一为 `None`、或 `start >= end`、
+     或出现负数 → **两个都置 `None`**（与前端"无法精确定位就降级为只打开文档"的口径一致），
+     绝不写"只带一个偏移"的行；
+   - **空片段兜底**：`content` 为空/全空白（正常不会发生，`document_chunks` 有同样的 CHECK）
+     → 丢弃该条引用而不是写空行；
+   - **按键白名单投影**：只取 `MESSAGE_CITATION_COLUMNS` 里的键，且**顺序即 `ordinal`**
+     （`enumerate(citations, start=1)`）。
+   `Citation` 的默认值允许"两个偏移都是 `None`"，但类型上并不禁止"只有 start"，
+   所以这一步是必需的，不是防御性冗余。
+3. `_to_visible_message()`：新增 `citations` / `answer_incomplete` 两个返回字段。
    - `user` 消息恒为 `[]` / `False`；
-   - assistant 最终回答把 `stored.citations` 里的 dict **逐条**转成 `Citation`
-     （`Citation(**item)`），非法/缺字段的条目丢弃并留诊断日志（3.6 第 5 条）；
+   - assistant 最终回答把 `stored.citations` 里的 dict **逐条**转成 `Citation`：
+     先按 `Citation` 的字段名过滤键（库里将来多一列时不会因此整条丢弃），
+     再 `Citation(**filtered)`；校验失败/缺必填字段的条目丢弃并留诊断日志（3.6 第 5 条）；
    - 升级前的历史记录没有引用行 → 与今天的输出完全一致。
-3. 两个方向的映射各只写一遍：`Citation → dict` 直接用现成的 `Citation.public_dict()`；
-   `dict → Citation` 用一个模块级小函数（中文 docstring）。两个方向都要有测试。
-4. 不改动：`get_history()` 的归属校验与顺序、`load_messages` 的调用、锁与幂等逻辑。
+4. 两个方向的映射各只写一遍：`Citation → dict` 与 `dict → Citation` 各一个模块级小函数
+   （中文 docstring）。两个方向都要有测试。
+5. 不改动：`get_history()` 的归属校验与顺序、`load_messages` 的调用、锁与幂等逻辑。
 
 ### 4.4 响应契约（`app/schemas/chat.py`）
 
 ```python
 class ConversationHistoryMessage(BaseModel):
   # ……现有字段不变……
-  citations : list[Citation] = Field(default_factory=list)  # 该回答的知识引用（C1..Cn 原序，字段与实时响应完全一致）；用户消息与无引用回答为空数组
+  citations : list[Citation] = Field(default_factory=list)  # 该回答的知识引用（顺序与实时响应一致，字段与实时响应完全同形）；用户消息与无引用回答为空数组
   answer_incomplete : bool = False  # 该回答生成时的引用完整性标记；为 True 时界面须给出「谨慎采用」提示
 ```
 
@@ -439,6 +486,11 @@ export interface ConversationHistoryMessage {
 
 - **不引入任何新类型**：决策 3 决定片段正文一起入库，历史引用就是 `Citation[]`，
   与实时响应完全一致；`CitationList`、`CitationTarget`、`ChatView.onDocument` 全都零改动。
+- **两个新字段取必填（不加 `?`）**：后端每次都会返回它们（Pydantic 默认值），
+  必填能让"忘记处理"在编译期暴露。代价是**三处测试 fixture 必须同步补齐**，否则
+  `npm run typecheck` 会失败（`tsconfig.json` 的 include 覆盖 `src/**/*.ts`，spec 也在检查范围内）：
+  `src/stores/__tests__/chat.spec.ts:37`（`emptyHistory`）、`:48`（`textHistory`）、
+  `src/views/__tests__/ChatView.spec.ts:67-78`（`historyResponse`）。
 - 唯一需要注意的兼容性事实（既有约定，不是本次新增）：`start_offset` / `end_offset` 在
   `Citation` 上是**可选可空**（旧载荷可能缺失），前端一律用 `== null` 判断降级，
   仍**禁止**用 `!start_offset`（偏移 0 是合法值，见 `frontend/src/api/types.ts:240-252`）。
@@ -453,9 +505,10 @@ export interface ConversationHistoryMessage {
   structuredAnswer: { citations: Citation[]; answerIncomplete: boolean } | null
   ```
 
-  - 历史消息：由历史响应填充（无引用时也填 `{ citations: [], answerIncomplete: false }`，
-    便于模板分支判断）；
-  - 实时消息：在 `sendMessage()` 成功分支由 `response.citations` / `response.answer_incomplete` 填充。
+  - 历史消息：由历史响应填充；**用户消息恒为 `null`**（`citations` 为空数组时也填
+    `{ citations: [], answerIncomplete: false }`，便于模板统一判断）；
+  - 实时消息：在 `sendMessage()` 成功分支由 `response.citations` / `response.answer_incomplete` 填充；
+    失败/发送中态与 `structured` 一样保持 `null`。
 - **不要**给历史消息伪造 `structured: LLMResponse`：那会让 `MessageList` 走去实时分支，
   凭空渲染出处理过程与审批卡片，违反 store 头部注释里"不伪造"的既有约定。
   只把"引用与完整性标记"从"不伪造"改成"来自服务端持久化"。
@@ -520,7 +573,7 @@ export interface ConversationHistoryMessage {
 
 > `app/agent/runner.py`、`app/knowledge/**`、`app/api/router.py` **不改**（见 4.5）。
 
-### 6.2 前端（6 个文件）
+### 6.2 前端（6 个源文件 + 4 个测试文件）
 
 | 文件 | 改动 |
 | --- | --- |
@@ -529,7 +582,7 @@ export interface ConversationHistoryMessage {
 | `src/components/chat/MessageList.vue` | 历史回答渲染引用卡片与完整性提示；传入引用锚点前缀 |
 | `src/components/chat/CitationList.vue` | 新增 `anchorPrefix` prop，卡片 id 加作用域前缀（引用渲染逻辑不变） |
 | `src/components/common/MarkdownContent.vue` + `src/components/chat/AssistantAnswer.vue` | `[C1]` 定位使用同一作用域前缀（透传 prop） |
-| `src/stores/__tests__/chat.spec.ts`、`src/components/chat/__tests__/MessageList.spec.ts`、`src/components/chat/__tests__/CitationList.spec.ts`、`src/components/common/__tests__/MarkdownContent.spec.ts` | 历史引用映射与卡片渲染、旧响应兜底、"两条回答的 [C1] 各自归位" |
+| `src/stores/__tests__/chat.spec.ts`、`src/components/chat/__tests__/MessageList.spec.ts`、`src/components/chat/__tests__/CitationList.spec.ts`、`src/components/common/__tests__/MarkdownContent.spec.ts`、`src/views/__tests__/ChatView.spec.ts` | 历史引用映射与卡片渲染、旧响应兜底、"两条回答的 [C1] 各自归位"；**三处 fixture 必须补新字段**（见 5.1） |
 
 ### 6.3 文档（5 个文件）
 
@@ -539,7 +592,7 @@ export interface ConversationHistoryMessage {
 | `docs/frontend/manual-test-runbook.md` | E-09（`:525-531`）改为"刷新后引用卡片仍在、可继续跳转，且与刷新前一致"；F-14-9（`:785-791`）改写为"升级前的历史回答仍无引用"；第 15 条已知限制（`:1067`）同步；新增"历史引用跳转 + 停用文档 + 跨租户"验收项 |
 | `README.md` | 能力清单（`:60-64`）补"引用随回答持久化，刷新后仍可核对来源"；已知限制（`:77-78`）移除该项 |
 | `docs/superpowers/specs/2026-09-09-knowledge-document-content-viewer-design.md` | §6 第 1 项标记"已实施（见本文档）"；§3 决策 6 的口径更新 |
-| `docs/database-migrations.md` | 第 7 节验收命令补 `tests/db/test_migrations.py` 相关说明（如无变化则仅确认） |
+| `docs/database-migrations.md` | 第 6 节「回滚最近一次迁移」补一句：**回滚 `0014_message_citations` 会删除全部引用行与 `messages.answer_incomplete` 列，消息本体保留**；第 2 节备份提醒适用于本次升级（新表结构变更前后都要能回到旧版）。第 7 节验收命令已含 `tests/db/test_migrations.py`，核对即可 |
 
 ---
 
@@ -550,12 +603,14 @@ export interface ConversationHistoryMessage {
 | # | 断言 | 位置 |
 | --- | --- | --- |
 | 1 | 迁移后 `message_citations` 表存在且列与 3.1 一致；`messages` 有 `answer_incomplete` 列；旧行不受影响（引用表为空、该列为 `NULL`）；降级后表与列消失且消息数据不丢 | `tests/db/test_migrations.py` |
-| 2 | 唯一约束与 CHECK 真的生效：同 `(会话, seq, citation_id)` 插两次报错；只写 `start_offset` 报错；`ordinal = 0` 报错 | `tests/db/test_migrations.py` 或 `tests/sessions/test_sqlite_store.py` |
+| 2 | 唯一约束与 CHECK 真的生效：同 `(会话, seq, citation_id)` 插两次报错；只写 `start_offset` 报错；`ordinal = 0` 报错；`messages.answer_incomplete = 2` 报错 | `tests/db/test_migrations.py` 或 `tests/sessions/test_sqlite_store.py` |
+| 2b | **规整优先于约束**：上游给出"只有一个偏移""`start >= end`""负偏移"的引用时，写库**成功**且落库的是"两个偏移都为 `NULL`"，而不是抛 `IntegrityError`（4.3 第 2 条） | `tests/application/test_chat_service.py` |
+| 2c | **引用写不进去不拖垮对话**：注入一个会触发 `IntegrityError` 的 display（如伪造列不匹配）时，消息仍然落库、`chat()` 不抛错、引用行缺失（4.2 降级保护） | `tests/sessions/test_sqlite_store.py` |
 | 3 | `append_messages(messages=[...], display=[...])` 后：引用行按 `ordinal` 落库；`citations` 为空时**不插引用行但仍写 `answer_incomplete=0`**；**且 `payload_json` 里不含任何 `citation` 相关键**（模型上下文零污染） | `tests/sessions/test_sqlite_store.py` |
 | 4 | `load_messages()` 返回值与调用方传入的模型载荷**逐字相等**（模型上下文零变化） | `tests/sessions/test_sqlite_store.py` |
 | 5 | `load_message_records()` 把引用按 `seq` 分组带回且顺序正确；没有引用的消息得到空元组、`answer_incomplete=false` | `tests/sessions/test_sqlite_store.py` |
 | 6 | `display` 长度与 `messages` 不一致 → `ValueError`（不静默错位写入） | `tests/sessions/test_sqlite_store.py` |
-| 7 | 走完 `chat()`（真实 SQLite + 假 runner 返回带引用回答）后，`get_history()` 的对应 assistant 消息带**完整引用**（含 `content`）与偏移 | `tests/application/test_chat_service.py` |
+| 7 | 走完 `chat()`（真实 SQLite + 假 runner 返回带引用回答）后，`get_history()` 的对应 assistant 消息带**完整引用**（含 `content`）与偏移，且**顺序与实时响应一致**（构造一个 `[C3]` 先于 `[C1]` 出现的回答，断言历史顺序 == 实时顺序，而不是按编号排序） | `tests/application/test_chat_service.py` |
 | 8 | 用户消息恒为空引用；带 `tool_calls` 的中间助手消息、`system`/`tool` 消息即使库里有引用行也**不返回** | `tests/application/test_chat_service.py` |
 | 9 | 引用行字段非法（空 `citation_id`、只有一个偏移）时：历史接口仍 200，坏行被丢弃（不炸接口） | `tests/application/test_chat_service.py` |
 | 10 | 真实 SQLite 迷你应用：`GET /conversations/{id}/messages/` 响应含新字段，且引用的每一个字段（含 `content`）都与落库一致 | `tests/api/test_router.py` |
@@ -582,6 +637,7 @@ python -m pytest -q
 | 5 | 历史回答 `answer_incomplete=true` → 显示「谨慎采用」提示；`false` → 不显示 |
 | 6 | 同一页面两条回答都含 `C1`：点击各自正文里的 `[C1]` 只滚动到**自己**的引用卡片（锚点作用域） |
 | 7 | 现有历史消息安全用例按新语义更新（"没有结构化数据就不渲染"，而不是"永不渲染"），**不得**留下跳过或删除的用例 |
+| 8 | **`npm run typecheck` 必须绿**：`ConversationHistoryMessage` 的两个新字段是必填，`stores/__tests__/chat.spec.ts`、`views/__tests__/ChatView.spec.ts` 的 fixture 都要补齐（5.1） |
 
 命令：
 
@@ -670,8 +726,16 @@ npm test
    `uq_messages_conversation_seq` 与 `idx_messages_conversation_seq`。
 8. **字段漂移**：独立表的代价是"`Citation` 加字段 = 加列 = 一次迁移"。用 7.1 第 12 条的
    契约钉子测试把两者钉死，避免"代码加了字段、库里没列、历史引用悄悄缺字段"。
-9. **前端"不伪造"约定不能被改坏**：本次只放开"引用"，`events` / 审批卡片仍必须为
-   `null` / 不渲染；`MessageList.spec.ts:154-165` 的用例要按新语义改写而不是删除。
+9. **写库失败连带整轮对话失败（本次自查新增）**：`message_citations` 的 CHECK 与唯一约束
+   一旦被触发，`append_messages` 的事务会整体回滚 → 已经生成的回答、已经创建的提案都拿不到
+   （用户看到 500）。防线有两道：**应用层写前规整**（4.3 第 2 条，主防线）+ **store 内引用行
+   写入失败降级**（4.2，次防线）。两条都要有测试（7.1 第 2b/2c 条）。
+10. **既有缺陷被持久化（本次自查新增）**：一轮多次 `search_knowledge` 时引用可能指错文档
+    （2.4）——持久化不会让它变新，但会让它变成"看起来可信的历史记录"。建议在本次实施前
+    先决定：要么单独立任务修 `runner`（汇总多轮检索并统一编号），要么先把提示词/网关收紧为
+    每轮一次检索（见第 11 节）。
+11. **前端"不伪造"约定不能被改坏**：本次只放开"引用"，`events` / 审批卡片仍必须为
+    `null` / 不渲染；`MessageList.spec.ts:154-165` 的用例要按新语义改写而不是删除。
 
 ---
 
@@ -687,3 +751,42 @@ npm test
 | 引用写 localStorage | 服务端是唯一可信来源；本地缓存会引入跨企业/跨用户泄漏与陈旧数据风险 |
 | "旧引用对齐到最新版本" | 偏移只对生成时的版本文本有效，对齐必然失真；"政策现在怎么说"是版本对照功能 |
 | 引用反查的**查询接口/页面**（哪些回答引用了某文档） | 本次只建表与读路径，不做界面与接口；表已具备条件，将来加一条按 `document_id` 的查询（必要时补索引）即可 |
+| **多轮 `search_knowledge` 的引用汇总/编号统一**（2.4 的既有缺陷） | 属于 `app/agent/runner.py` 的独立修复，会改动消息与事件结构、影响 runner 的一批精确断言；本次只登记，建议随本次实施**并行开一个小任务**处理（两种修法：runner 汇总所有检索 payload 并统一编号，或把提示词与网关收紧为每轮一次检索）。不修的影响：引用卡片与历史引用可能指向错误文档 |
+| **`message_citations` 的数据保留/清理策略** | 会话与消息目前都没有删除接口，引用行随对话自然增长（每答约 5~10KB）；等出现"删除会话/归档"能力时一起设计（届时决定 `ON DELETE` 行为） |
+| 历史回答里 `[C#]` 角标无对应卡片时的显式提示 | 未知引用（模型引了不存在的编号）压根不会被持久化，点击角标时现有实现静默忽略；属既有行为，本次不加提示 |
+
+---
+
+## 12. 自查记录（2026-09-17，交实施前复核）
+
+对全文逐条对照源码复核后，修正了下列问题；实施时如发现新的矛盾，请回到本表登记。
+
+| # | 类型 | 问题 | 处理 |
+| --- | --- | --- | --- |
+| 1 | 缺陷（会被本次放大） | 一轮多次 `search_knowledge` 时只有第一次检索的引用被保留、两次检索 `C1..Cn` 编号冲突，引用可能指向错误文档 | 新增 2.4 事实章节 + 第 10 节风险 10 + 第 11 节登记为并行小任务 |
+| 2 | 缺陷（写库失败风险） | `Citation` 类型不禁止"只有一个偏移"，而表上有 `(start_offset IS NULL) = (end_offset IS NULL)` 等 CHECK → 会抛 `IntegrityError`，把整轮对话（含已创建提案）一起回滚 | 4.1 加"CHECK 是最后防线"警示；4.3 第 2 条加**写前规整**（主防线）；4.2 加**引用行写入失败降级**（次防线）；7.1 加第 2b/2c 条测试 |
+| 3 | 自相矛盾 | `ordinal` 一处写"决定 C1..Cn 顺序"、契约注释写"C1..Cn 原序"，但实时数组顺序是"回答中首次出现的顺序"（`runner.py:73-87`），两者不等价 | 3.1 表、4.4 注释、7.1 第 7 条统一改为"与实时响应数组顺序一致"，并加一条乱序断言 |
+| 4 | 遗漏 | 前端新字段若无条件必填，`npm run typecheck` 会因三处 fixture 失败（tsconfig 的 include 覆盖 spec） | 5.1 明确"必填 + 必须同步更新 `stores/__tests__/chat.spec.ts:37/48`、`views/__tests__/ChatView.spec.ts:67`"，6.2/7.2 同步 |
+| 5 | 遗漏 | `messages.answer_incomplete` 没有取值约束，可写入 2/-1 | 4.1 增 `ck_messages_answer_incomplete_value`（`NULL OR IN (0,1)`）与取值说明 |
+| 6 | 遗漏 | 白名单"多余键忽略"会让 `Citation` 新增字段被静默丢弃 | 4.2 改为"缺列、多余键**都报错**" |
+| 7 | 遗漏 | 前端用户消息的 `structuredAnswer` 取值、失败/发送中态未定义 | 5.2 补"用户消息恒为 `null`；失败/发送中与 `structured` 一致" |
+| 8 | 遗漏 | `append_messages` 空 `messages` 与 `display` 的组合未定义 | 4.2 补"空消息提前返回；此时 `display` 必须为空或全 `None`" |
+| 9 | 遗漏 | 字段计数与实际不符（前端"6 个文件（含 3 个测试文件）"） | 0 节与 6.2 改为"6 个源文件 + 4 个测试文件" |
+| 10 | 遗漏 | 迁移文档只写了"补验收命令"，没写降级会丢引用行 | 6.3 明确写入"回滚 0014 删除全部引用行与 `answer_incomplete` 列（消息保留）" |
+| 11 | 遗漏 | `dict → Citation` 若直接用 `Citation(**item)`，库里多一列会导致整条引用被丢弃 | 4.3 第 3 条改为"先按字段名过滤键再构造" |
+| 12 | 轻微 | §2.1 的源码引用把 `validate_final_citations` 的定义行与调用行混在一起 | 拆成 `runner.py:69-109`（定义）+ `:227-248`（调用点） |
+| 13 | 轻微 | 3.6 第 5 条"丢弃非法引用行"与 CHECK 约束看似重复 | 4.1 末段说明：约束防的是人工改库/未来迁移漂移，读侧兜底防的是历史脏数据，两者都不删 |
+| 14 | 遗漏 | 数据保留/清理策略、`[C#]` 无卡片时的静默行为未登记 | 第 11 节补两条 |
+
+复核确认**没有**问题的点（供实施者放心）：
+
+- 迁移编号与链路：`0013` 是当前 head，`0014.down_revision` 正确；`messages` 没有入向外键，
+  `ADD COLUMN`/`DROP COLUMN` 无需重建表；本机 SQLite 3.39.4 支持。
+- 现有断言不会被新字段破坏：`tests/api/test_router.py:189-203`（空 `messages` 的整体相等）、
+  `tests/test_main.py:389-395`（空会话历史整体相等）、`tests/sessions/test_sqlite_store.py:169/457`
+  （载荷往返相等）、`tests/application/test_chat_service.py`（直接调 `append_messages` 时
+  `display` 默认 `None`）。
+- 归属与隔离：引用表不带 `organization_id` 是安全的（查询前已用
+  `_get_owned_row` 校验会话归属，`conversations.id` 是 uuid4 全局唯一）。
+- 前端联动：`open-document` 链路（`MessageList` → `ChatView.onOpenDocument` → 面板/整页）
+  对历史引用可直接复用，`CitationTarget` 载荷不含 `content`，不受决策 3 影响。
