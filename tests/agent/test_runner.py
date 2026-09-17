@@ -346,6 +346,9 @@ def test_runner_flags_citation_without_knowledge_tool_with_fixed_identity():
 
 
 def test_second_budget_denial_does_not_overwrite_first_knowledge_payload():
+  # 保护行为（按新语义改写，意图不变）：第二次检索失败不得覆盖或污染
+  # 第一次检索的引用——回答里的 [C1] 仍解析到第一次检索的证据，
+  # 引用校验仍为完整（answer_incomplete=False）。
   tool_calls = [
     SimpleNamespace(id="call-1", function=SimpleNamespace(
       name="search_knowledge", arguments='{"question":"returns"}'
@@ -379,6 +382,211 @@ def test_second_budget_denial_does_not_overwrite_first_knowledge_payload():
     tool_functions={"search_knowledge": lambda **kwargs: next(service_results)},
   )
   assert [item.citation_id for item in result.citations] == ["C1"]
+  assert result.citations[0].chunk_id == "chunk-C1"
+  assert result.retrieval_summary.evidence_status == "sufficient"
+  assert result.answer_incomplete is False
+
+
+# —— 一轮多次检索：编号续编 / 证据归属 / 合并摘要（设计 4.5） ——
+
+def _second_knowledge_payload(
+  citation_id="C1",
+  *,
+  document_id="doc-2",
+  evidence_status="sufficient",
+  latency_ms=7,
+):
+  """构造第二次检索的工具结果：文档与偏移都与第一次检索明显不同。"""
+  return {
+    "ok": True,
+    "data": {
+      "result_code": "KNOWLEDGE_FOUND",
+      "strategy": "multi",
+      "evidence_status": evidence_status,
+      "citations": (
+        [{
+          "citation_id": citation_id,
+          "document_id": document_id,
+          "version_id": "version-2",
+          "chunk_id": "chunk-2",
+          "title": "退款到账",
+          "heading_path": "/refund",
+          "content": "退款 3 个工作日到账",
+          "start_offset": 200,
+          "end_offset": 212,
+        }]
+        if evidence_status != "failed"
+        else []
+      ),
+      "retrieval_summary": {
+        "strategy": "multi",
+        "round_count": 1,
+        "evidence_status": evidence_status,
+        "latency_ms": latency_ms,
+      },
+    },
+  }
+
+
+def _run_two_knowledge_searches(
+  final_answer,
+  second_payload,
+  *,
+  first_sufficient=True,
+):
+  """跑一轮「两次 search_knowledge 都成功」的对话，返回结果与写回模型的消息。"""
+  tool_calls = [
+    SimpleNamespace(id="call-1", function=SimpleNamespace(
+      name="search_knowledge", arguments='{"question":"returns"}'
+    )),
+    SimpleNamespace(id="call-2", function=SimpleNamespace(
+      name="search_knowledge", arguments='{"question":"refund"}'
+    )),
+  ]
+  responses = iter([
+    SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+      content="", reasoning_content=None, tool_calls=[tool_calls[0]]
+    ))]),
+    SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+      content="", reasoning_content=None, tool_calls=[tool_calls[1]]
+    ))]),
+    SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+      content=final_answer, reasoning_content=None, tool_calls=None
+    ))]),
+  ])
+  client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(
+    create=lambda **kwargs: next(responses)
+  )))
+  service_results = iter([
+    _knowledge_payload("C1", "C2", sufficient=first_sufficient),
+    second_payload,
+  ])
+  messages = [{"role": "user", "content": "退货与退款"}]
+  result = run_one_turn(
+    messages=messages,
+    client=client,
+    tool_definitions=[],
+    tool_functions={"search_knowledge": lambda **kwargs: next(service_results)},
+  )
+  return result, messages
+
+
+def test_two_knowledge_searches_continue_citation_numbering():
+  # 保护行为：一轮内两次检索都成功时，第二次检索的编号必须续编（C3 而不是又一组 C1），
+  # 且**事件与写回模型的 tool 消息**都必须是续编后的编号——
+  # 否则模型看到的编号与最终响应不一致，引用会指向错误的文档。
+  result, messages = _run_two_knowledge_searches(
+    "退货看 [C1]，退款看 [C3]。", _second_knowledge_payload("C1")
+  )
+
+  completed = [
+    event for event in result.events if event.type == "tool_call.completed"
+  ]
+  assert [
+    item["citation_id"] for item in completed[1].result["data"]["citations"]
+  ] == ["C3"]
+
+  tool_messages = [m for m in messages if m["role"] == "tool"]
+  assert len(tool_messages) == 2
+  assert '"citation_id": "C1"' in tool_messages[0]["content"]
+  assert '"citation_id": "C3"' in tool_messages[1]["content"]
+  # 第二次检索的原始编号 C1 不得再出现（它已被续编为 C3）
+  assert '"citation_id": "C1"' not in tool_messages[1]["content"]
+
+
+def test_two_knowledge_searches_attribute_each_citation_to_its_own_evidence():
+  # 保护行为：回答引用第二次检索的编号时，必须取到第二次那条证据
+  # （document_id / version_id / chunk_id / 偏移都对），而不是第一次检索的同名编号。
+  result, _ = _run_two_knowledge_searches(
+    "退款到账时间见 [C3]。", _second_knowledge_payload("C1")
+  )
+
+  assert [item.citation_id for item in result.citations] == ["C3"]
+  citation = result.citations[0]
+  assert citation.document_id == "doc-2"
+  assert citation.version_id == "version-2"
+  assert citation.chunk_id == "chunk-2"
+  assert citation.start_offset == 200
+  assert citation.end_offset == 212
+  assert result.answer_incomplete is False
+
+
+def test_two_knowledge_searches_keep_answer_order_across_rounds():
+  # 保护行为：引用两次检索的编号时两条都在，顺序与回答正文里首次出现的顺序一致
+  # （回答先写 [C3] 再写 [C1]，结果顺序也必须是 C3、C1）。
+  result, _ = _run_two_knowledge_searches(
+    "先看退款 [C3]，再看退货 [C1]。", _second_knowledge_payload("C1")
+  )
+
+  assert [item.citation_id for item in result.citations] == ["C3", "C1"]
+  assert result.citations[0].document_id == "doc-2"
+  assert result.citations[1].document_id == "doc-1"
+  assert result.answer_incomplete is False
+
+
+def test_same_chunk_hit_twice_gets_two_distinct_citation_ids():
+  # 边界情况：同一条证据被两次检索命中时得到两个编号（C1 与 C3），不做去重——
+  # 去重会强迫模型改编号，且与主设计稿「块重叠不去重」的口径冲突。
+  result, _ = _run_two_knowledge_searches(
+    "两次都引到同一条 [C1] [C3]。", _second_knowledge_payload("C1")
+  )
+
+  assert [item.citation_id for item in result.citations] == ["C1", "C3"]
+  assert {item.chunk_id for item in result.citations} == {"chunk-C1", "chunk-2"}
+
+
+def test_two_knowledge_searches_merge_retrieval_summary():
+  # 保护行为：摘要必须合并成一条——round_count 是本轮实际检索次数、
+  # latency_ms 是各轮之和、evidence_status 取「最有证据」的那一轮。
+  result, _ = _run_two_knowledge_searches(
+    "退货与退款政策见 [C1]。", _second_knowledge_payload("C1", latency_ms=11)
+  )
+
+  assert result.retrieval_summary.round_count == 2
+  assert result.retrieval_summary.latency_ms == 3 + 11
+  assert result.retrieval_summary.evidence_status == "sufficient"
+  assert result.retrieval_summary.strategy == "multi"
+
+
+def test_merged_summary_reports_missing_citation_when_later_round_found_evidence():
+  # 保护行为（安全性）：第一轮证据不足、第二轮拿到证据，回答却一个引用都没带时，
+  # 必须判为 answer_incomplete=True——只看第一轮会让这条漏引不告警。
+  result, _ = _run_two_knowledge_searches(
+    "退货与退款政策请咨询客服。",
+    _second_knowledge_payload("C1", evidence_status="sufficient"),
+    first_sufficient=False,
+  )
+
+  assert list(result.citations) == []
+  assert result.retrieval_summary.evidence_status == "sufficient"
+  assert result.retrieval_summary.round_count == 2
+  assert result.answer_incomplete is True
+
+
+def test_merged_summary_stays_insufficient_when_no_round_has_evidence():
+  # 边界情况：两轮都没有证据时合并结果是 insufficient（而不是 failed），
+  # 且不会因为「没有可用引用」就误判为漏引。
+  result, _ = _run_two_knowledge_searches(
+    "没有查到相关政策。",
+    _second_knowledge_payload("C1", evidence_status="insufficient"),
+    first_sufficient=False,
+  )
+
+  assert result.retrieval_summary.evidence_status == "insufficient"
+  assert result.retrieval_summary.round_count == 2
+  assert result.answer_incomplete is False
+
+
+def test_second_failed_search_does_not_hide_first_round_summary():
+  # 边界情况：第二次检索整体失败（没有 retrieval_summary）时，
+  # 摘要仍由第一轮决定，且编号续编不会影响第一轮的引用归属。
+  result, _ = _run_two_knowledge_searches(
+    "退货政策见 [C1]。",
+    {"ok": False, "error": {"code": "SEARCH_INTERNAL_ERROR", "message": "boom"}},
+  )
+
+  assert [item.citation_id for item in result.citations] == ["C1"]
+  assert result.retrieval_summary.round_count == 1
   assert result.retrieval_summary.evidence_status == "sufficient"
   assert result.answer_incomplete is False
 

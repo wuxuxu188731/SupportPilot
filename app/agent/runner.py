@@ -1,5 +1,6 @@
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Protocol, Sequence
 from dataclasses import dataclass
+import itertools
 import re
 
 from app.agent.events import AgentEvent
@@ -66,20 +67,80 @@ class CitationValidationResult:
   answer_incomplete: bool
 
 
+def _citation_allowlist(
+  knowledge_payloads : Sequence[dict],
+)->dict[str, dict]:
+  """汇总所有检索轮次允许出现的引用（citation_id → 引用原始字段）。
+
+  编号已由 ``_renumber_knowledge_citations`` 在写回模型前续编成 turn 内全局唯一，
+  因此这里的并集不会互相覆盖；仍按「后一轮覆盖前一轮」的次序合并，
+  以防上游给了重复编号。
+  """
+  allowed : dict[str, dict] = {}
+  for payload in knowledge_payloads:
+    data = (payload or {}).get("data") or {}
+    for item in data.get("citations", []) or []:
+      if isinstance(item, dict) and item.get("citation_id"):
+        allowed[item["citation_id"]] = item
+  return allowed
+
+
+def _merge_retrieval_summaries(
+  knowledge_payloads : Sequence[dict],
+)->RetrievalSummary | None:
+  """把一轮内多次检索的摘要合并成一条，诚实反映「本轮检索了 N 次」。
+
+  ``strategy`` 取第一次检索的策略、``round_count`` 取实际检索次数、
+  ``latency_ms`` 取各轮之和；``evidence_status`` 取最"有证据"的那一轮：
+  任一轮 sufficient → sufficient，否则任一轮 insufficient → insufficient，
+  否则 failed。**必须合并**：漏引判据是 ``evidence_status == "sufficient"``，
+  只看第一轮会漏掉「第一轮不够、第二轮拿到证据却没引用」这一不告警的漏判。
+  """
+  summaries : list[dict] = []
+  for payload in knowledge_payloads:
+    data = (payload or {}).get("data") or {}
+    summary = data.get("retrieval_summary")
+    if isinstance(summary, dict):
+      summaries.append(summary)
+  if not summaries:
+    return None
+  statuses = [summary.get("evidence_status") for summary in summaries]
+  if "sufficient" in statuses:
+    evidence_status = "sufficient"
+  elif "insufficient" in statuses:
+    evidence_status = "insufficient"
+  else:
+    evidence_status = "failed"
+  return RetrievalSummary(
+    strategy=str(summaries[0].get("strategy") or ""),
+    round_count=len(summaries),
+    evidence_status=evidence_status,
+    latency_ms=sum(
+      int(summary.get("latency_ms") or 0) for summary in summaries
+    ),
+  )
+
+
 def validate_final_citations(
   answer: str | None,
-  knowledge_payload: dict | None,
+  knowledge_payload : dict | Sequence[dict] | None,
 ) -> CitationValidationResult:
+  """校验最终回答里的 [C#] 角标，并给出引用、摘要与完整性判定。
+
+  ``knowledge_payload`` 兼容单个 payload（历史调用方）与 payload 列表
+  （一轮内多次检索：允许集取各轮并集，摘要按 4.5 R3 合并）。
+  """
   found: list[str] = []
   for citation_id in _CITATION_PATTERN.findall(answer or ""):
     if citation_id not in found:
       found.append(citation_id)
-  data = (knowledge_payload or {}).get("data") or {}
-  allowed = {
-    item.get("citation_id"): item
-    for item in data.get("citations", [])
-    if isinstance(item, dict) and item.get("citation_id")
-  }
+  if knowledge_payload is None:
+    payloads : list[dict] = []
+  elif isinstance(knowledge_payload, dict):
+    payloads = [knowledge_payload]
+  else:
+    payloads = [item for item in knowledge_payload if item]
+  allowed = _citation_allowlist(payloads)
   citations = tuple(
     Citation(**allowed[citation_id])
     for citation_id in found
@@ -88,14 +149,10 @@ def validate_final_citations(
   unknown = tuple(
     citation_id for citation_id in found if citation_id not in allowed
   )
-  summary_payload = data.get("retrieval_summary")
-  summary = (
-    RetrievalSummary(**summary_payload)
-    if isinstance(summary_payload, dict)
-    else None
-  )
+  summary = _merge_retrieval_summaries(payloads)
+  merged_evidence_status = summary.evidence_status if summary else None
   missing_required = (
-    data.get("evidence_status") == "sufficient"
+    merged_evidence_status == "sufficient"
     and bool(allowed)
     and not citations
   )
@@ -107,6 +164,41 @@ def validate_final_citations(
     missing_required_citation=missing_required,
     answer_incomplete=incomplete,
   )
+
+
+def _renumber_knowledge_citations(
+  result : Any,
+  citation_counter : "itertools.count[int]",
+)->Any:
+  """把本次知识检索的 citation_id 续编为 turn 内全局编号，返回新副本。
+
+  背景（本次一并修复的既有缺陷）：一轮里多次调用 ``search_knowledge`` 时，
+  每次检索都从 ``C1`` 开始编号，模型在工具结果里看到两组 ``C1..Cn``；
+  若回答里的 ``[C1]`` 指的是第二次检索的证据，前端就会解析成第一次检索的
+  ``C1``——引用指向错误的文档与偏移，第二次检索的其余引用则永远不会出现。
+
+  只重写 ``data.citations[].citation_id``，其余字段与每一轮自己的
+  ``data.retrieval_summary`` **原样保留**（每轮的 ``evidence_status`` 仍是模型
+  判断"这次检索够不够"的依据）；不在原地修改工具返回值，业务工具、失败结果与
+  不含 citations 的结果原样返回。
+  """
+  if not isinstance(result, dict):
+    return result
+  data = result.get("data")
+  if not isinstance(data, dict):
+    return result
+  citations = data.get("citations")
+  if not isinstance(citations, list):
+    return result
+  renumbered = []
+  for item in citations:
+    if not isinstance(item, dict):
+      renumbered.append(item)
+      continue
+    item_copy = dict(item)
+    item_copy["citation_id"] = f"C{next(citation_counter)}"
+    renumbered.append(item_copy)
+  return {**result, "data": {**data, "citations": renumbered}}
 
 
 class AgentToolRoundLimitError(RuntimeError):
@@ -165,9 +257,11 @@ def run_one_turn(
     raise ValueError("max_tool_rounds must be positive")
   tool_rounds = 0
   events : list[AgentEvent] = []
-  knowledge_payload: dict | None = None
-  knowledge_call_id: str | None = None
+  knowledge_payloads : list[dict] = []
+  knowledge_call_ids : list[str] = []
   pending_approvals: list[dict] = []
+  # turn 级引用编号计数器：跨多次检索连续编号，保证 [C#] 在一轮内全局唯一。
+  citation_counter = itertools.count(1)
 
   # 统一收集 Agent 事件，并按需通知外部监听器。
   def emit(event : AgentEvent):
@@ -224,13 +318,17 @@ def run_one_turn(
           "reasoning_content":reason_content,
         }
       )
-      validation = validate_final_citations(llm_res, knowledge_payload)
+      validation = validate_final_citations(llm_res, knowledge_payloads)
       if validation.answer_incomplete:
         emit(AgentEvent(
           type="citation.invalid",
-          tool_call_id=knowledge_call_id or "final-answer",
+          # tool_call_id 取第一次知识调用的 id：多轮检索时无法把「未知编号」
+          # 归因到某一次检索，这里只是诊断字段，保持既有行为不变。
+          tool_call_id=(
+            knowledge_call_ids[0] if knowledge_call_ids else "final-answer"
+          ),
           tool_call_name=(
-            "search_knowledge" if knowledge_call_id else "citation_validation"
+            "search_knowledge" if knowledge_call_ids else "citation_validation"
           ),
           result={
             "unknown_citation_ids": list(validation.unknown_citation_ids),
@@ -353,12 +451,15 @@ def run_one_turn(
         continue
       if (
         func_name == "search_knowledge"
-        and knowledge_payload is None
         and isinstance(func_result, dict)
         and isinstance((func_result.get("data") or {}).get("retrieval_summary"), dict)
       ):
-        knowledge_payload = func_result
-        knowledge_call_id = tool_call.id
+        # 一轮内可以有多次检索（复杂问题允许拆分 2-3 次查询）：
+        # 先续编本次检索的编号，再记录 payload——顺序是关键，
+        # 下面的事件与写回模型的 tool 消息都必须看到续编后的编号。
+        func_result = _renumber_knowledge_citations(func_result, citation_counter)
+        knowledge_payloads.append(func_result)
+        knowledge_call_ids.append(tool_call.id)
 
       # 提案工具成功结果归一化为结构化待审批摘要（设计 12.5），
       # 调用方不需要从自然语言或事件中解析 Approval ID。
