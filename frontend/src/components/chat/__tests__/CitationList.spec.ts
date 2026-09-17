@@ -67,6 +67,24 @@ describe('CitationList 引用列表', () => {
 
     expect(wrapper.text()).not.toContain('章节：null')
   })
+
+  it('anchorPrefix 使卡片 id 带回答作用域前缀（不传时保持原 id）', async () => {
+    // 保护行为（设计 5.4）：同一页面多条回答各有 C1 时，卡片 id 必须按回答作用域
+    // 区分（否则 id 重复，正文 [C1] 会跳到第一条回答的卡片）；
+    // 不传 anchorPrefix 时退化为 citation-C1，保持既有用法与被外部指向的 id 可用
+    const scoped = mount(CitationList, {
+      props: { citations: CITATIONS, anchorPrefix: 'answer-7' },
+    })
+    await flushPromises()
+    expect(scoped.find('.citation-card').attributes('id')).toBe('answer-7-citation-C1')
+    // 引用渲染逻辑不变：编号、标题、正文照旧展示
+    expect(scoped.text()).toContain('[C1]')
+    expect(scoped.text()).toContain('消费者可在签收后 7 日内申请退货。')
+
+    const legacy = mount(CitationList, { props: { citations: CITATIONS } })
+    await flushPromises()
+    expect(legacy.find('.citation-card').attributes('id')).toBe('citation-C1')
+  })
 })
 
 describe('CitationList「查看原文位置」入口', () => {

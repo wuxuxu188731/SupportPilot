@@ -102,4 +102,38 @@ describe('MarkdownContent 引用标记交互', () => {
 
     await expect(wrapper.find('.citation-ref').trigger('click')).resolves.not.toThrow()
   })
+
+  it('带 citationAnchorPrefix 时按前缀定位到对应回答的卡片', async () => {
+    // 保护行为（设计 5.4）：同一页面多条回答都含 C1 时，必须先拼回答作用域前缀
+    // 再查找卡片；否则 getElementById 只返回第一个，会跳到别条回答的卡片
+    const legacyCard = document.createElement('div')
+    legacyCard.id = 'citation-C1'
+    const legacyScroll = vi.fn()
+    legacyCard.scrollIntoView = legacyScroll
+    document.body.appendChild(legacyCard)
+
+    const scopedCard = document.createElement('div')
+    scopedCard.id = 'answer-9-citation-C1'
+    scopedCard.tabIndex = -1
+    const scopedScroll = vi.fn()
+    scopedCard.scrollIntoView = scopedScroll
+    document.body.appendChild(scopedCard)
+
+    const wrapper = mount(MarkdownContent, {
+      props: {
+        content: '依据政策 [C1] 处理',
+        citations: true,
+        citationAnchorPrefix: 'answer-9',
+      },
+    })
+    await flushPromises()
+
+    await wrapper.find('.citation-ref').trigger('click')
+
+    expect(scopedScroll).toHaveBeenCalledTimes(1)
+    expect(legacyScroll).not.toHaveBeenCalled()
+    expect(document.activeElement).toBe(scopedCard)
+    legacyCard.remove()
+    scopedCard.remove()
+  })
 })

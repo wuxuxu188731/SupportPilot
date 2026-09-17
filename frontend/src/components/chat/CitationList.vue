@@ -4,7 +4,12 @@
  * 并提供「查看原文位置」入口（引用 → 知识库正文）。
  *
  * 事实：引用必须读取结构化 citations 数组，禁止从回答文本猜测；
- * 回答正文中的 [C1] 标记通过元素 id（citation-C1）与本卡片关联。
+ * 回答正文中的 [C1] 标记通过元素 id 与本卡片关联，id 形如
+ * `${anchorPrefix}-citation-C1`（不传前缀时退化为 citation-C1）。
+ *
+ * 锚点作用域：同一页面可能同时存在多条带引用的回答（多轮实时回答、刷新后的
+ * 历史回答），它们各自的编号都从 C1 开始，全局 id 必然重复；因此宿主必须用
+ * 回答自身的稳定标识作为 anchorPrefix，否则正文 [C1] 会跳到别条回答的卡片。
  *
  * 跳转载荷：emit 的是**结构化字段**（documentId/versionId/startOffset/endOffset/
  * title/headingPath），全部直接取自 citations 元素，不从回答文本或引用正文里解析。
@@ -15,15 +20,26 @@ import { NButton, NCollapse, NCollapseItem, NText } from 'naive-ui'
 
 import type { Citation, CitationTarget } from '@/api/types'
 
-defineProps<{
-  /** 结构化知识引用数组（C1..Cn） */
+const props = defineProps<{
+  /** 结构化知识引用数组（C1..Cn），顺序与实时响应一致 */
   citations: Citation[]
+  /**
+   * 引用卡片 id 的作用域前缀（建议用回答自身的稳定标识，如 answer-12）。
+   * 空串/不传表示不加前缀，卡片 id 退化为 citation-C1（兼容既有用法）。
+   */
+  anchorPrefix?: string
 }>()
 
 const emit = defineEmits<{
   /** 打开来源文档正文：载荷为结构化定位信息（不做任何文本解析） */
   openDocument: [payload: CitationTarget]
 }>()
+
+/** 引用卡片 id：带作用域前缀时为 `${前缀}-citation-${编号}`，否则为 `citation-${编号}`。 */
+function citationCardId(citation: Citation): string {
+  const prefix = props.anchorPrefix ?? ''
+  return prefix ? `${prefix}-citation-${citation.citation_id}` : `citation-${citation.citation_id}`
+}
 
 /** 引用默认全部展开：引用是回答的证据来源，默认可见而非折叠在深处。 */
 function defaultExpanded(citations: Citation[]): string[] {
@@ -67,7 +83,7 @@ function onOpenDocument(citation: Citation): void {
         :title="`[${citation.citation_id}] ${citation.title}`"
       >
         <div
-          :id="`citation-${citation.citation_id}`"
+          :id="citationCardId(citation)"
           tabindex="-1"
           class="citation-card"
           :aria-label="`引用 ${citation.citation_id} 详情`"

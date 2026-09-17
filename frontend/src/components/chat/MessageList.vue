@@ -4,11 +4,14 @@
  *
  * 展示规则：
  *  - 用户消息：右侧气泡，纯文本展示（用户输入按原文回显）；
- *  - Agent 历史消息（source=history）：左侧气泡，正文按 Markdown 渲染；
- *    服务端历史不保存 citations/events/pending_approvals，因此**不会**伪造
- *    引用或审批卡片，正文中的 [C1] 仅作为文本展示；
+ *  - Agent 历史消息（source=history）：左侧气泡，正文按 Markdown 渲染，并展示
+ *    **服务端持久化**的回答级结构化信息——引用卡片（citations）与完整性提示
+ *    （answer_incomplete），两者与实时回答同形；历史仍不保存 events /
+ *    retrieval_summary / pending_approvals，因此**不会**伪造处理过程或审批卡片；
  *  - Agent 实时消息（source=live）：先显示「处理中」占位，成功后展示
  *    回答与结构化内容（引用、检索摘要、处理过程、待审批提案）；
+ *  - 引用锚点按回答作用域（`answer-${message.id}`）：同一页面多条带引用的回答
+ *    都从 C1 开始编号，只有给卡片 id 加回答前缀，正文 [C1] 才能定位到自己那张卡片；
  *  - 发送失败显示失败原因；网络/超时提示结果不确定，引导刷新历史；
  *  - 默认不展示 llm_reasoning_content（模型推理不作为普通内容展示）。
  *
@@ -21,11 +24,9 @@ import { NSpin, NEmpty } from 'naive-ui'
 import type { ChatMessageView } from '@/stores/chat'
 import type { CitationTarget, RetrievalSummary } from '@/api/types'
 import { formatMessageTime } from '@/utils/time'
-import AssistantAnswer from '@/components/chat/AssistantAnswer.vue'
-import CitationList from '@/components/chat/CitationList.vue'
 import AgentEventTimeline from '@/components/chat/AgentEventTimeline.vue'
+import AnswerWithCitations from '@/components/chat/AnswerWithCitations.vue'
 import PendingApprovalCard from '@/components/chat/PendingApprovalCard.vue'
-import MarkdownContent from '@/components/common/MarkdownContent.vue'
 
 const props = defineProps<{
   /** 当前会话消息（历史 + 实时混合） */
@@ -100,6 +101,11 @@ function retrievalSummaryText(summary: RetrievalSummary): string {
 function messageTimeText(createdAt: string): string {
   return formatMessageTime(createdAt)
 }
+
+/** 回答锚点前缀：用消息自身的稳定标识，保证同页不同回答的引用卡片 id 不冲突（设计 5.4）。 */
+function answerAnchorPrefix(message: ChatMessageView): string {
+  return `answer-${message.id}`
+}
 </script>
 
 <template>
@@ -150,23 +156,21 @@ function messageTimeText(createdAt: string): string {
           <p v-if="message.errorMessage" class="failed-detail">{{ message.errorMessage }}</p>
         </div>
 
-        <!-- Agent 消息主体：历史纯文本 / 实时结构化展示 -->
+        <!-- Agent 消息主体：历史（正文 + 持久化引用）/ 实时（结构化展示） -->
         <div v-else class="bubble agent-bubble" data-test="agent-message">
           <template v-if="message.structured">
-            <!-- 实时结构化结果：回答 + 检索摘要 + 引用 + 处理过程 + 待审批 -->
-            <AssistantAnswer
+            <!-- 实时结构化结果：回答 + 引用 + 检索摘要 + 处理过程 + 待审批 -->
+            <AnswerWithCitations
               :content="message.structured.llm_answer ?? message.content"
-              :answer-incomplete="message.structured.answer_incomplete"
-              :citation-links="message.structured.citations.length > 0"
-            />
-            <p v-if="message.structured.retrieval_summary" class="retrieval-summary" data-test="retrieval-summary">
-              {{ retrievalSummaryText(message.structured.retrieval_summary) }}
-            </p>
-            <CitationList
-              v-if="message.structured.citations.length > 0"
               :citations="message.structured.citations"
+              :answer-incomplete="message.structured.answer_incomplete"
+              :anchor-prefix="answerAnchorPrefix(message)"
               @open-document="(payload) => emit('open-document', payload)"
-            />
+            >
+              <p v-if="message.structured.retrieval_summary" class="retrieval-summary" data-test="retrieval-summary">
+                {{ retrievalSummaryText(message.structured.retrieval_summary) }}
+              </p>
+            </AnswerWithCitations>
             <AgentEventTimeline v-if="message.structured.events.length > 0" :events="message.structured.events" />
             <div v-if="message.structured.pending_approvals.length > 0" class="pending-approvals" data-test="pending-approvals">
               <p class="pending-heading">待审批提案</p>
@@ -179,8 +183,15 @@ function messageTimeText(createdAt: string): string {
             </div>
           </template>
           <template v-else>
-            <!-- 历史恢复的消息：只展示安全问答文本（不伪造结构化内容），正文按 Markdown 渲染 -->
-            <MarkdownContent class="agent-text" :content="message.content" />
+            <!-- 历史恢复的消息：正文 + 服务端持久化的引用卡片（不伪造处理过程与审批卡片） -->
+            <AnswerWithCitations
+              class="agent-text"
+              :content="message.content"
+              :citations="message.structuredAnswer?.citations ?? []"
+              :answer-incomplete="message.structuredAnswer?.answerIncomplete ?? false"
+              :anchor-prefix="answerAnchorPrefix(message)"
+              @open-document="(payload) => emit('open-document', payload)"
+            />
           </template>
         </div>
       </li>
@@ -272,7 +283,7 @@ function messageTimeText(createdAt: string): string {
 }
 
 .agent-text {
-  /* 历史 Agent 消息的 Markdown 排版由 MarkdownContent 组件负责，这里仅限制宽度基准 */
+  /* 历史 Agent 消息的正文+引用排版由 AnswerWithCitations 组件负责，这里仅限制宽度基准 */
   max-width: 100%;
 }
 

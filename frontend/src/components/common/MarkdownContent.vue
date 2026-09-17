@@ -6,7 +6,9 @@
  *  - HTML 由 utils/markdown 的 markdown-it 实例生成，源码内联 HTML 已禁用、
  *    链接协议已校验、图片已降级为文本，因此可安全使用 v-html；
  *  - 引用标记 [C1] 由 markdown-it 行内规则生成，点击/回车通过本组件容器上的
- *    事件委托处理，定位到对应的引用卡片（CitationList 中的 citation-C1）。
+ *    事件委托处理，定位到对应的引用卡片（CitationList 中的
+ *    `${citationAnchorPrefix}-citation-C1`，前缀为空时退化为 citation-C1）。
+ *    前缀即「回答作用域」：同一页面多条回答都含 C1 时，必须靠前缀各自归位。
  */
 import { computed } from 'vue'
 
@@ -17,10 +19,21 @@ const props = defineProps<{
   content: string
   /** 是否把正文中的 [C1] 渲染为可点击引用标记（仅该回答携带结构化 citations 时启用） */
   citations?: boolean
+  /**
+   * 引用卡片 id 的作用域前缀，必须与宿主传给 CitationList 的 anchorPrefix 一致；
+   * 空串/不传表示不加前缀（退化为 citation-C1，兼容既有用法）。
+   */
+  citationAnchorPrefix?: string
 }>()
 
 /** 渲染后的 HTML；空文本返回空串，由父组件决定降级文案。 */
 const html = computed(() => renderMarkdown(props.content, { citations: props.citations === true }))
+
+/** 引用卡片 id：与 CitationList 的规则保持一致（带前缀时按回答作用域拼接）。 */
+function citationCardId(citationId: string): string {
+  const prefix = props.citationAnchorPrefix ?? ''
+  return prefix ? `${prefix}-citation-${citationId}` : `citation-${citationId}`
+}
 
 /** 引用标记点击/回车：滚动并聚焦到对应引用卡片（无对应卡片时忽略）。 */
 function handleCitationActivate(event: Event): void {
@@ -28,7 +41,7 @@ function handleCitationActivate(event: Event): void {
   if (!(target instanceof HTMLElement)) return
   const citationId = target.dataset.citationId
   if (!citationId) return
-  const card = document.getElementById(`citation-${citationId}`)
+  const card = document.getElementById(citationCardId(citationId))
   card?.scrollIntoView({ behavior: 'smooth', block: 'center' })
   card?.focus({ preventScroll: true })
 }

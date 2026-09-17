@@ -1,10 +1,11 @@
 /*
  * Agent 回答展示组件测试：Markdown 富文本渲染、空回答降级、
- * answer_incomplete 警告、引用标记分段与正文不执行回答文本中的 HTML。
+ * answer_incomplete 警告、引用标记分段与回答作用域锚点透传、
+ * 以及正文不执行回答文本中的 HTML。
  */
 
 import { flushPromises, mount } from '@vue/test-utils'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import AssistantAnswer from '@/components/chat/AssistantAnswer.vue'
 
@@ -95,5 +96,40 @@ describe('AssistantAnswer 回答展示', () => {
     await flushPromises()
     expect(wrapper.find('.citation-ref').exists()).toBe(false)
     expect(wrapper.find('.answer-text').text()).toContain('[C1]')
+  })
+
+  it('citationAnchorPrefix 透传到引用定位，避免跳到别条回答的卡片', async () => {
+    // 保护行为（设计 5.4）：AssistantAnswer 只做透传——正文 [C1] 必须定位到
+    // 带同一回答作用域前缀的卡片，而不是同页第一条回答的卡片
+    const legacyCard = document.createElement('div')
+    legacyCard.id = 'citation-C1'
+    legacyCard.tabIndex = -1
+    const legacyScroll = vi.fn()
+    legacyCard.scrollIntoView = legacyScroll
+    document.body.appendChild(legacyCard)
+
+    const scopedCard = document.createElement('div')
+    scopedCard.id = 'answer-5-citation-C1'
+    scopedCard.tabIndex = -1
+    const scopedScroll = vi.fn()
+    scopedCard.scrollIntoView = scopedScroll
+    document.body.appendChild(scopedCard)
+
+    const wrapper = mount(AssistantAnswer, {
+      props: {
+        content: '依据政策 [C1] 处理',
+        citationLinks: true,
+        citationAnchorPrefix: 'answer-5',
+      },
+    })
+    await flushPromises()
+
+    await wrapper.find('.citation-ref').trigger('click')
+
+    expect(scopedScroll).toHaveBeenCalledTimes(1)
+    expect(legacyScroll).not.toHaveBeenCalled()
+    expect(document.activeElement).toBe(scopedCard)
+    legacyCard.remove()
+    scopedCard.remove()
   })
 })

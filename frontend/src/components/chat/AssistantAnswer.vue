@@ -7,6 +7,8 @@
  *    源码内联 HTML 被禁用、链接协议被校验、图片降级为文本，
  *    渲染细节与安全约束统一由 utils/markdown 负责；
  *  - 正文中的 [C1] 样式标记渲染为可点击标记，点击可滚动定位到引用卡片；
+ *    定位目标由 citationAnchorPrefix 决定（回答作用域前缀，与 CitationList 的
+ *    anchorPrefix 一致），避免同页多条回答都含 C1 时跳到别条回答的卡片；
  *  - 默认不展示 llm_reasoning_content（模型内部推理不作为普通客服内容）；
  *  - 空回答给出降级提示；answer_incomplete=true 时给出谨慎采纳警告。
  */
@@ -22,6 +24,8 @@ const props = defineProps<{
   answerIncomplete?: boolean
   /** 是否启用正文引用标记（仅当该回答携带结构化 citations 时启用） */
   citationLinks?: boolean
+  /** 引用卡片 id 的作用域前缀（透传给正文的 [C1] 定位逻辑；空串表示不加前缀） */
+  citationAnchorPrefix?: string
 }>()
 
 /** 回答是否为空（null/空串/全空白）。 */
@@ -47,6 +51,7 @@ const isEmptyAnswer = computed(() => !props.content || props.content.trim().leng
       class="answer-text"
       :content="content ?? ''"
       :citations="citationLinks === true"
+      :citation-anchor-prefix="citationAnchorPrefix ?? ''"
     />
   </div>
 </template>
