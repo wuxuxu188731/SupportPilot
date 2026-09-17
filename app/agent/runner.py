@@ -93,7 +93,8 @@ def _merge_retrieval_summaries(
   ``strategy`` 取第一次检索的策略、``round_count`` 取实际检索次数、
   ``latency_ms`` 取各轮之和；``evidence_status`` 取最"有证据"的那一轮：
   任一轮 sufficient → sufficient，否则任一轮 insufficient → insufficient，
-  否则 failed。**必须合并**：漏引判据是 ``evidence_status == "sufficient"``，
+  否则任一轮 not_needed → not_needed（Agentic 链路下"不需要检索"不是失败），
+  最后才是 failed。**必须合并**：漏引判据是 ``evidence_status == "sufficient"``，
   只看第一轮会漏掉「第一轮不够、第二轮拿到证据却没引用」这一不告警的漏判。
   """
   summaries : list[dict] = []
@@ -109,6 +110,8 @@ def _merge_retrieval_summaries(
     evidence_status = "sufficient"
   elif "insufficient" in statuses:
     evidence_status = "insufficient"
+  elif "not_needed" in statuses:
+    evidence_status = "not_needed"
   else:
     evidence_status = "failed"
   return RetrievalSummary(
