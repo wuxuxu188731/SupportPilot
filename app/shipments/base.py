@@ -81,3 +81,19 @@ class ShipmentStore(Protocol):
         order_no: str,
     ) -> Shipment:
         raise NotImplementedError
+
+    def update_demo_times(
+        self,
+        *,
+        organization_id: str,
+        shipment_no: str,
+        shipped_at: str | None,
+        estimated_delivery_at: str | None,
+        delivered_at: str | None,
+    ) -> int:
+        """只更新演示物流的时间列，返回被更新的行数。
+
+        供演示数据初始化把「会过期的日期」重新对齐到当前时间基准；不得
+        修改状态、承运商、运单号等业务字段，也不得用于业务写路径。
+        """
+        raise NotImplementedError

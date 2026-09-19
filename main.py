@@ -10,6 +10,7 @@ from app.actions.sqlite_store import SQLiteActionStore
 from app.api.router import creat_conversation_router
 from app.api.action_router import create_action_router
 from app.api.auth_router import create_auth_router
+from app.api.demo_data_router import create_demo_data_router
 from app.api.dependencies import create_current_user_dependency, create_current_tenant_dependency
 from app.api.organization_router import create_organization_router
 from app.application.chat_service import ChatService
@@ -27,10 +28,14 @@ from app.core.config import (
 )
 from app.core.cors import configure_cors
 from app.api.knowledge_router import create_knowledge_router
+from app.customers.sqlite_store import SQLiteCustomerStore
+from app.demo_data.seeder import DemoDataSeeder
 from app.knowledge.factory import create_knowledge_services
 from app.organizations.sqlite_store import SQLiteOrganizationStore
 from app.orders.sqlite_store import SQLiteOrderStore
 from app.sessions.sqlite_store import SQLiteSessionStore
+from app.shipments.sqlite_store import SQLiteShipmentStore
+from app.tickets.sqlite_store import SQLiteTicketStore
 from app.users.sqlite_store import SQLiteUserStore
 from app.tools.support_factory import create_customer_support_tool_gateway
 from app.tools.action_gateway import ActionToolGateway
@@ -98,6 +103,15 @@ action_service = ActionWorkflowService(
 
 support_tool_gateway = create_customer_support_tool_gateway(
   database_path,
+)
+# 演示数据初始化（CLI 与前端「生成测试数据」按钮共用同一个 Seeder）：
+# 身份由认证链提供，Seeder 内部按数据库中的成员角色校验管理员权限。
+demo_data_seeder = DemoDataSeeder(
+  organization_store=organization_store,
+  customer_store=SQLiteCustomerStore(database_path),
+  order_store=SQLiteOrderStore(database_path),
+  shipment_store=SQLiteShipmentStore(database_path),
+  ticket_store=SQLiteTicketStore(database_path),
 )
 token_service = AccessTokenService(
   secret_key=get_auth_secret_key(),
@@ -172,6 +186,12 @@ app.include_router(
   create_organization_router(
     organization_service=organization_service,
     get_current_user=get_current_user,
+  )
+)
+app.include_router(
+  create_demo_data_router(
+    seeder=demo_data_seeder,
+    get_current_tenant=get_current_tenant,
   )
 )
 app.include_router(

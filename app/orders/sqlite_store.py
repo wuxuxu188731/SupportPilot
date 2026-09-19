@@ -148,3 +148,31 @@ class SQLiteOrderStore(OrderStore):
         if row is None:
             raise OrderNotFoundError("order not found")
         return self._to_order(row)
+
+    def update_demo_times(
+        self,
+        *,
+        organization_id: str,
+        order_no: str,
+        placed_at: str,
+        promised_ship_at: str | None,
+    ) -> int:
+        # 只更新两个时间列：状态、金额、客户与商品摘要都不在 SET 里，
+        # 因此业务数据不会被这条演示数据专用路径改写。行不存在时返回 0。
+        with self._connection() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE orders
+                SET placed_at = ?,
+                    promised_ship_at = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE organization_id = ? AND order_no = ?
+                """,
+                (
+                    placed_at,
+                    promised_ship_at,
+                    organization_id,
+                    order_no,
+                ),
+            )
+            return cursor.rowcount

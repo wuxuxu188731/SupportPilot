@@ -174,3 +174,34 @@ class SQLiteShipmentStore(ShipmentStore):
         if row is None:
             raise ShipmentNotFoundError("shipment not found")
         return self._to_shipment(row)
+
+    def update_demo_times(
+        self,
+        *,
+        organization_id: str,
+        shipment_no: str,
+        shipped_at: str | None,
+        estimated_delivery_at: str | None,
+        delivered_at: str | None,
+    ) -> int:
+        # 与订单同理：SET 里只有三个时间列，状态、承运商与运单号保持原值，
+        # 三个时间列同批更新，避免出现 delivered_at 早于 shipped_at 的组合。
+        with self._connection() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE shipments
+                SET shipped_at = ?,
+                    estimated_delivery_at = ?,
+                    delivered_at = ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE organization_id = ? AND shipment_no = ?
+                """,
+                (
+                    shipped_at,
+                    estimated_delivery_at,
+                    delivered_at,
+                    organization_id,
+                    shipment_no,
+                ),
+            )
+            return cursor.rowcount

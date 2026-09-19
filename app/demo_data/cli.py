@@ -42,6 +42,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--reference-time",
         type=parse_reference_time,
         default=None,
+        help=(
+            "时间基准 T（ISO 8601 且必须带时区）；缺省为当前时刻。"
+        ),
+    )
+    parser.add_argument(
+        "--refresh-times",
+        action="store_true",
+        help=(
+            "把已有演示订单与物流的时间列重新对齐到时间基准 T（缺省即当前"
+            "时刻），用于修复放久后过期的承诺发货时间/预计送达时间；"
+            "业务字段（状态、金额、客户）仍然幂等，不会被覆盖。"
+        ),
     )
     return parser
 
@@ -60,6 +72,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         organization_id=args.organization_id,
         actor_user_id=args.actor_user_id,
         reference_time=args.reference_time,
+        refresh_times=args.refresh_times,
     )
     print(json.dumps(asdict(result), ensure_ascii=False))
     return 0

@@ -543,8 +543,9 @@ def test_cors_headers_present_on_real_app_response(monkeypatch, tmp_path):
 
 
 def test_member_paths_registered_in_openapi(monkeypatch, tmp_path):
-    """成员管理三条路径已注册，且合计 27 个 HTTP 操作（在第四阶段盘点口径的
-    26 个之上，新增知识库正文读取接口 1 个）。"""
+    """成员管理三条路径与演示数据初始化路径已注册，且合计 28 个 HTTP 操作
+    （在第四阶段盘点口径的 26 个之上，新增知识库正文读取接口 1 个、
+    演示数据初始化接口 1 个）。"""
     app = load_app(monkeypatch, tmp_path)
     paths = app.openapi()["paths"]
     http_methods = {"get", "post", "put", "patch", "delete"}
@@ -560,8 +561,12 @@ def test_member_paths_registered_in_openapi(monkeypatch, tmp_path):
         ]
         if method in http_methods
     ) == ["delete", "patch"]
+    assert sorted(
+        method for method in paths["/demo-data/"]
+        if method in http_methods
+    ) == ["post"]
     total_operations = sum(
         len([method for method in methods if method in http_methods])
         for methods in paths.values()
     )
-    assert total_operations == 27
+    assert total_operations == 28

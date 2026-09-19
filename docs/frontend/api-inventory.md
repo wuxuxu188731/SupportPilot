@@ -14,8 +14,8 @@
 >   `app/api/dependencies.py` / `tests/api/*`，并在导入阶段用临时环境变量
 >   在内存中生成 OpenAPI（`app.openapi()`，未启动服务器、未修改任何配置、
 >   DB 指向临时目录）交叉核对；两种口径结果一致。
-> - 统计结果：**22 个路径、27 个 HTTP 操作**（不含 FastAPI 自带的
->   `/docs`、`/openapi.json` 等）。
+> - 统计结果（**当前**）：**23 个路径、28 个 HTTP 操作**（不含 FastAPI 自带的
+>   `/docs`、`/openapi.json` 等）；加入演示数据接口前为 22 个路径、27 个操作。
 > - **勘误（2026-09-11 手工测试 DEF-04）**：本节此前写「23 个路径」有误，
 >   实际为 **21 个路径**。`42b83d9` 的 **23** 是**操作数**（由 git 历史核对：
 >   当时会话 5 + 认证 3 + 知识库 7 + 审批 5 + 组织 3 = 23 个操作、20 个路径），
@@ -40,6 +40,12 @@
 >   `retrieval_summary` 仍**不持久化**；`reasoning_content` / `tool_calls` /
 >   工具原始参数与结果 / `payload_json` 仍一律不返回。设计与决策见
 >   `docs/superpowers/specs/2026-09-17-conversation-history-citation-persistence-design.md`。
+> - **演示数据接口增量（一键生成测试数据）**：新增 4.6.1
+>   `POST /demo-data/`（仅 admin，为当前企业幂等生成演示业务数据，
+>   并把演示订单/物流的时间列对齐到点击时刻），接口面变为
+>   **23 个路径、28 个操作**。前端「生成测试数据」按钮与命令行
+>   `python -m app.demo_data.cli` 共用同一个 `DemoDataSeeder`。字段与
+>   错误码见 4.6.1，验收路径见 [`business-scenarios/manual-test-paths.md`](../business-scenarios/manual-test-paths.md)。
 
 ---
 
@@ -59,6 +65,7 @@
 | 会话与聊天 conversations | `/conversations` | 5 | 会话列表/新建、单轮聊天、历史读取、更新会话系统提示词 |
 | 知识库 knowledge | `/knowledge` | 8 | 文档上传/新版本、列表/详情、正文读取、停用/启用、入库任务查询 |
 | 退款/补偿审批与 Run | `/approvals`、`/action-runs` | 5 | 审批列表/详情/决定、Run 状态/恢复 |
+| 演示数据 demo-data | `/demo-data` | 1 | 为当前企业生成演示业务数据（幂等，仅管理员） |
 
 角色与权限矩阵（详见各接口小节）：
 
@@ -75,6 +82,7 @@
 | 知识库写接口（上传/新版本/停用/启用） | ❌ | ❌ | ✅ |
 | 审批列表/详情、Run 状态（本企业范围） | ❌ | ✅ | ✅ |
 | 审批决定、显式恢复 Run | ❌ | ❌ | ✅ |
+| 生成演示业务数据（/demo-data） | ❌ | ❌（403） | ✅ |
 | 跨企业访问任何租户资源 | ❌ | ❌ | ❌（一律伪装为 404） |
 
 ## 2. 全局通用规则
@@ -216,6 +224,7 @@ A=仅 admin；✅/❌ 同理。P=公开。
 | 25 | 组织 | GET | `/organizations/{organization_id}/members/` | 企业成员列表 | ✅ | ❌ | G（成员均可读） | 200 | 成员管理页列表 |
 | 26 | 组织 | PATCH | `/organizations/{organization_id}/members/{user_id}/` | 修改成员角色 | ✅ | ❌ | A（不能改自己） | 200 | 成员管理页角色下拉 |
 | 27 | 组织 | DELETE | `/organizations/{organization_id}/members/{user_id}/` | 移除成员 | ✅ | ❌ | A（不能移除自己） | 204 | 成员管理页“移除”按钮 |
+| 28 | 演示数据 | POST | `/demo-data/` | 为当前企业生成演示业务数据（幂等） | ✅ | ✅ | A | 201 | 「生成测试数据」按钮（面试现场初始化用） |
 
 ---
 
@@ -934,6 +943,64 @@ A=仅 admin；✅/❌ 同理。P=公开。
   `test_real_runner_rejected_run_resume_returns_409`）。
 - 建议页面：Run 状态面板/审批详情页“恢复执行”按钮（仅 admin 可见）；
   点击后刷新详情，503 时保留按钮允许重试。
+
+### 4.6 演示数据 `/demo-data`（1 个）
+
+#### 4.6.1 POST `/demo-data/` — 为当前企业生成演示业务数据（201）
+
+- 用途：给「生成测试数据」按钮使用，一次调用创建整套演示业务数据
+  （2 个客户、3 笔订单、2 笔物流、2 张工单与 3 条备注），供面试现场与
+  Agent 对话使用。CLI（`python -m app.demo_data.cli`）调用的是同一个
+  `DemoDataSeeder`，两者产出完全一致。
+- 鉴权：需要 Bearer Token 与 `X-Organization-ID`；**仅 admin**。
+- 请求体：**无**（不要传 organization_id、user_id、role 等任何字段，
+  服务端不接受请求体）。企业取自已认证请求头，调用者取自 Token。
+- 行为：
+  - **幂等**：重复调用不会重复创建，`counts` 中各项为 0；
+  - **刷新时间**：本入口固定按「点击时刻」重算演示订单/物流的时间列
+    （承诺发货时间 = T − 3 天、运输中订单预计送达 = T + 1 天），
+    因此在任何日期点击都能得到可用于对话的数据；
+  - **只碰演示编号**：仅 `ORD-DELAY-001`、`ORD-TRANSIT-001`、
+    `ORD-DELIVERED-001`、`SHP-TRANSIT-001`、`SHP-DELIVERED-001`
+    会被刷新，体验者自建订单不受影响；状态、金额、客户、商品摘要等
+    业务字段从不改写。
+- 成功：`201`：
+
+  ```json
+  {
+    "organization_id": "…",
+    "reference_at": "2026-09-19T13:02:54+00:00",
+    "counts": {
+      "customers": 2, "orders": 3, "shipments": 2,
+      "tickets": 2, "ticket_comments": 3
+    },
+    "customer_nos": ["CUST-001", "CUST-002"],
+    "order_nos": ["ORD-DELAY-001", "ORD-TRANSIT-001", "ORD-DELIVERED-001"],
+    "shipment_nos": ["SHP-TRANSIT-001", "SHP-DELIVERED-001"],
+    "ticket_nos": ["TKT-DELAY-001", "TKT-DAMAGE-001"]
+  }
+  ```
+
+  `counts` 为**本次真正新增的行数**，键固定为 `customers` / `orders` /
+  `shipments` / `tickets` / `ticket_comments`；前端据此区分「新增」与
+  「已存在」，不要用总数推断。
+- 错误：
+  - `400 organization context required`（缺 `X-Organization-ID`）；
+  - `401`（无 Token / Token 无效，同全局规则）；
+  - `403 {"detail": "organization admin required"}`（agent 或非本企业成员）；
+  - `404`（`X-Organization-ID` 指向的企业中当前用户不是成员，防枚举）；
+  - `409 {"detail": "<订单号> already exists with different data"}`：
+    演示编号已被业务操作改过（例如审批后订单状态变成 `refunded`）。
+    本接口**不静默覆盖**这类记录；前端应提示「演示数据已被业务操作修改，
+    可新建企业后重新生成」。
+- 源码：`app/api/demo_data_router.py`、`app/demo_data/seeder.py`；
+  装配见 `main.py` 的 `demo_data_seeder`。
+- 测试：`tests/api/test_demo_data_router.py`（管理员成功、重复点击幂等、
+  agent 403、冲突 409）、`tests/demo_data/test_seeder.py`（时间刷新只碰
+  演示编号、默认不刷新）、`tests/demo_data/test_cli.py`（`--refresh-times`）。
+- 建议页面：企业设置或工作台顶部「生成测试数据」按钮（仅 admin 可见）；
+  点击后按钮 loading，成功后提示新增数量与时间基准，409 时给出新建企业的引导；
+  知识库文档**不在**本接口范围内，仍需按手工测试文档通过 UI 上传。
 
 ---
 
