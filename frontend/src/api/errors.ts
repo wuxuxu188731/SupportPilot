@@ -140,6 +140,7 @@ const BACKEND_MESSAGE_MAP: Record<string, string> = {
   'user not found': '用户不存在，请确认对方已注册且用户名正确',
   'user is already an organization member': '该用户已是本企业成员',
   'conversation not found error': '会话不存在或已失效',
+  'organization admin required': '该操作需要企业管理员权限，请用管理员账号操作',
 }
 
 /** 后端稳定错误码 → 中文兜底文案（结构化错误优先按 code 提示）。 */

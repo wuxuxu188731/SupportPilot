@@ -34,7 +34,9 @@ export function isTenantRequestPath(requestPath: string): boolean {
   return path.startsWith('/conversations') ||
     path.startsWith('/knowledge') ||
     path.startsWith('/approvals') ||
-    path.startsWith('/action-runs')
+    path.startsWith('/action-runs') ||
+    // 演示数据接口同样读取企业上下文（仅管理员可调用）
+    path.startsWith('/demo-data')
 }
 
 /** 请求拦截器附加逻辑：可独立测试的纯函数。 */

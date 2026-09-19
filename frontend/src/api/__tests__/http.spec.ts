@@ -1,4 +1,4 @@
-﻿/*
+/*
  * HTTP 客户端凭据注入测试：验证认证与租户 Header 的自动附加规则。
  * 保护行为：登录后请求携带 Bearer Token；租户接口携带 X-Organization-ID；
  * /auth/* 与 /organizations/* 等非租户接口不依赖当前企业。
@@ -34,12 +34,14 @@ function seedStorage(token = 'token-1', organizationId: string | null = null): v
 }
 
 describe('isTenantRequestPath：租户接口判定', () => {
-  it('会话/知识库/审批/Run 前缀的路径判定为租户接口', () => {
+  it('会话/知识库/审批/Run/演示数据前缀的路径判定为租户接口', () => {
     // 保护行为：需要 X-Organization-ID 的接口范围与后端依赖一致
     expect(isTenantRequestPath('/api/conversations/abc/chat/')).toBe(true)
     expect(isTenantRequestPath('/api/knowledge/documents/')).toBe(true)
     expect(isTenantRequestPath('/api/approvals/?status=pending')).toBe(true)
     expect(isTenantRequestPath('/api/action-runs/r1/resume/')).toBe(true)
+    // 演示数据接口也要企业上下文（仅管理员可调用），漏判会让后端直接 400
+    expect(isTenantRequestPath('/api/demo-data/')).toBe(true)
   })
 
   it('/auth/* 与 /organizations/* 判定为非租户接口', () => {

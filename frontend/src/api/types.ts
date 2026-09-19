@@ -110,6 +110,45 @@ export interface MembershipResponse {
 /** 成员角色枚举：admin=管理员（可审批/可管理企业），agent=客服。 */
 export type MembershipRole = 'admin' | 'agent'
 
+// —— 演示数据 /demo-data ——
+
+/** 演示数据各表新增行数：键为后端固定表名，值为本次真正新增的行数。
+ *
+ * 重复生成时全部为 0——界面据此区分「新增」与「已存在」，
+ * 不能用列表长度或总数推断。 */
+export interface DemoSeedCounts {
+  /** 新增客户数（完整初始化为 2） */
+  customers: number
+  /** 新增订单数（完整初始化为 3） */
+  orders: number
+  /** 新增物流数（完整初始化为 2） */
+  shipments: number
+  /** 新增工单数（完整初始化为 2） */
+  tickets: number
+  /** 新增工单备注数（完整初始化为 3） */
+  ticket_comments: number
+}
+
+/** 生成演示业务数据的响应（后端 POST /demo-data/，201）。
+ *
+ * 字段名与后端 JSON 完全一致（snake_case），不做驼峰转换。 */
+export interface DemoSeedResult {
+  /** 本次生成的企业标识（等于请求头 X-Organization-ID 指向的企业） */
+  organization_id: string
+  /** 本次使用的时间基准 T（UTC ISO 文本）：演示订单/物流的日期按它重算 */
+  reference_at: string
+  /** 本次真正新增的行数：重复点击时全部为 0 */
+  counts: DemoSeedCounts
+  /** 演示客户编号列表 */
+  customer_nos: string[]
+  /** 演示订单编号列表 */
+  order_nos: string[]
+  /** 演示物流编号列表 */
+  shipment_nos: string[]
+  /** 演示工单编号列表 */
+  ticket_nos: string[]
+}
+
 // —— 通用 ——
 
 /** 后端返回的三种错误形态统一解析后的前端错误对象。 */

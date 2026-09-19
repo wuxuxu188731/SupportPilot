@@ -3,6 +3,7 @@
  * 企业选择/创建页（/organizations）：
  *  - 展示当前用户可加入的企业与各自角色，点击进入主界面；
  *  - 无企业时展示空状态并引导创建；
+ *  - 管理员可就地为某个企业生成演示业务数据（面试现场一键初始化）；
  *  - 支持加载中、加载失败（错误 + 重试）、退出登录；
  *  - 页面加载时会恢复本地保存的企业选择（若仍有效，由守卫直接放行主界面）；
  *  - 若从受保护页面被引导至此，query.redirect 记录原目标，选择后返回。
@@ -14,8 +15,32 @@ import { NAlert, NButton, NCard, NEmpty, NSpin, useMessage } from 'naive-ui'
 import RoleTag from '@/components/common/RoleTag.vue'
 import AppIcon from '@/components/common/AppIcon.vue'
 import OrganizationCreateDialog from '@/components/organization/OrganizationCreateDialog.vue'
+import { generateDemoData } from '@/api/demoData'
+import { toApiErrorFromThrowable } from '@/api/errors'
+import type { DemoSeedCounts } from '@/api/types'
 import { useAuthStore } from '@/stores/auth'
 import { useOrganizationStore } from '@/stores/organization'
+import { formatDateTime } from '@/utils/time'
+
+/** 演示数据新增行数的中文标签（与后端 counts 固定键一一对应，顺序固定）。 */
+const DEMO_COUNT_LABELS: Array<{ key: keyof DemoSeedCounts; label: string }> = [
+  { key: 'customers', label: '客户' },
+  { key: 'orders', label: '订单' },
+  { key: 'shipments', label: '物流' },
+  { key: 'tickets', label: '工单' },
+  { key: 'ticket_comments', label: '备注' },
+]
+
+/** 演示数据与已有业务记录冲突时的补充引导（后端 409）。 */
+const DEMO_CONFLICT_SUFFIX = '，请新建一个企业后重新生成'
+
+/** 生成演示数据的失败提示：冲突（409）追加可操作引导，其余原样透出。 */
+function describeGenerateError(error: unknown): string {
+  const apiError = toApiErrorFromThrowable(error)
+  return apiError.status === 409
+    ? apiError.message + DEMO_CONFLICT_SUFFIX
+    : apiError.message
+}
 
 const route = useRoute()
 const router = useRouter()
@@ -25,6 +50,12 @@ const organizationStore = useOrganizationStore()
 
 /** 是否显示创建企业对话框 */
 const showCreateDialog = ref(false)
+
+/** 正在生成演示数据的企业 id；null 表示当前没有进行中的生成 */
+const generatingOrganizationId = ref<string | null>(null)
+
+/** 最近一次生成结果的展示文案（含企业名、新增明细与数据基准时间） */
+const lastSeedSummary = ref<string | null>(null)
 
 /** 选择企业后的落地地址：优先回到被引导前记录的原始目标。 */
 const destination = computed(() => {
@@ -53,6 +84,33 @@ async function handleEnter(organizationId: string): Promise<void> {
 function handleCreated(): void {
   message.success('企业创建成功')
   void router.push(destination.value)
+}
+
+/**
+ * 就地为某个企业生成演示业务数据（仅该企业管理员可见该入口）。
+ *
+ * 这里显式传企业 id：用户可能还没进入任何企业（本地没有「当前企业」），
+ * 而接口需要 X-Organization-ID；生成完成后停在当前页，由用户自行决定进入。
+ */
+async function handleGenerate(organizationId: string, organizationName: string): Promise<void> {
+  if (generatingOrganizationId.value) return
+  generatingOrganizationId.value = organizationId
+  try {
+    const result = await generateDemoData(organizationId)
+    const detail = DEMO_COUNT_LABELS
+      .map(({ key, label }) => `${label} ${result.counts[key]}`)
+      .join('、')
+    const created = DEMO_COUNT_LABELS.reduce((sum, { key }) => sum + result.counts[key], 0)
+    const prefix = created > 0 ? `「${organizationName}」已生成演示数据：` : `「${organizationName}」演示数据已存在：`
+    lastSeedSummary.value = `${prefix}${detail}（新增 ${created} 条，数据基准时间 ${formatDateTime(result.reference_at)}）`
+    message.success(lastSeedSummary.value)
+  } catch (error) {
+    const text = describeGenerateError(error)
+    lastSeedSummary.value = null
+    message.error(text)
+  } finally {
+    generatingOrganizationId.value = null
+  }
 }
 
 /** 退出登录：本地清理后返回登录页（后端无服务端登出接口）。 */
@@ -124,13 +182,17 @@ async function handleLogout(): Promise<void> {
           :key="item.organization_id"
           class="org-card"
           :bordered="false"
-          role="button"
-          tabindex="0"
-          :aria-label="`进入企业 ${item.name}`"
-          @click="handleEnter(item.organization_id)"
-          @keydown.enter.prevent="handleEnter(item.organization_id)"
         >
-          <div class="org-card-body">
+          <!-- 卡片主体是「进入企业」的可点击区域；生成按钮放在主体之外，
+               避免按钮嵌在 role="button" 里造成可访问性冲突 -->
+          <div
+            class="org-card-body"
+            role="button"
+            tabindex="0"
+            :aria-label="`进入企业 ${item.name}`"
+            @click="handleEnter(item.organization_id)"
+            @keydown.enter.prevent="handleEnter(item.organization_id)"
+          >
             <div class="org-card-main">
               <h3 class="org-card-name">{{ item.name }}</h3>
               <p class="org-card-role">我在该企业的角色：{{ item.role === 'admin' ? '管理员' : '客服' }}</p>
@@ -140,7 +202,30 @@ async function handleLogout(): Promise<void> {
               <span class="org-card-enter" aria-hidden="true">进入 →</span>
             </div>
           </div>
+
+          <!-- 演示数据入口：仅该企业管理员可见（后端仍会强制校验角色） -->
+          <div v-if="item.role === 'admin'" class="org-card-actions">
+            <n-button
+              size="small"
+              secondary
+              data-test="generate-demo-data"
+              :aria-label="`为 ${item.name} 生成测试数据`"
+              :loading="generatingOrganizationId === item.organization_id"
+              :disabled="generatingOrganizationId !== null"
+              @click="handleGenerate(item.organization_id, item.name)"
+            >
+              生成测试数据
+            </n-button>
+            <span class="org-card-actions-hint">
+              为该企业生成订单、物流与工单等演示数据（可重复点击，日期会刷新到当前）
+            </span>
+          </div>
         </n-card>
+
+        <!-- 生成结果：保留一行文本，刷新页面即消失（不做持久化） -->
+        <p v-if="lastSeedSummary" class="org-demo-summary" data-test="demo-data-summary">
+          {{ lastSeedSummary }}
+        </p>
 
         <n-button
           class="org-create-entry"
@@ -249,14 +334,12 @@ async function handleLogout(): Promise<void> {
 }
 
 .org-card {
-  cursor: pointer;
   box-shadow: var(--sp-shadow-card);
   transition: border-color 0.15s ease;
   border: 1px solid transparent;
 }
 
-.org-card:hover,
-.org-card:focus-visible {
+.org-card:has(.org-card-body:hover) {
   border-color: var(--sp-color-primary);
   background: var(--sp-color-bg-hover);
 }
@@ -266,6 +349,13 @@ async function handleLogout(): Promise<void> {
   align-items: center;
   justify-content: space-between;
   gap: var(--sp-space-4);
+  cursor: pointer;
+}
+
+.org-card-body:focus-visible {
+  outline: 2px solid var(--sp-color-primary);
+  outline-offset: 2px;
+  border-radius: var(--sp-radius-sm);
 }
 
 .org-card-main {
@@ -297,6 +387,30 @@ async function handleLogout(): Promise<void> {
   font-weight: 500;
 }
 
+/* 演示数据入口：与「进入企业」的可点击区域分开，避免误触 */
+.org-card-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-space-3);
+  margin-top: var(--sp-space-3);
+  padding-top: var(--sp-space-3);
+  border-top: 1px dashed var(--sp-color-border);
+}
+
+.org-card-actions-hint {
+  font-size: var(--sp-font-size-xs);
+  color: var(--sp-color-text-3);
+}
+
+.org-demo-summary {
+  margin: 0;
+  padding: var(--sp-space-2) var(--sp-space-3);
+  border-radius: var(--sp-radius-sm);
+  background: var(--sp-color-bg-hover);
+  font-size: var(--sp-font-size-sm);
+  color: var(--sp-color-text-2);
+}
+
 .org-create-entry {
   margin-top: var(--sp-space-2);
 }
@@ -304,6 +418,15 @@ async function handleLogout(): Promise<void> {
 @media (max-width: 560px) {
   .org-main {
     padding-top: var(--sp-space-5);
+  }
+
+  .org-card-body {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .org-card-side {
+    flex-wrap: wrap;
   }
 }
 </style>
