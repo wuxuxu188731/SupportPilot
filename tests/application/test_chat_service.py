@@ -185,6 +185,49 @@ def test_chat_persists_only_current_conversation(tmp_path):
   ) == []
 
 
+# 保护行为：上下文估算包含不对用户展示的工具消息，并在发送与更新提示词后刷新。
+def test_context_tokens_include_internal_history_and_follow_updates(tmp_path):
+  service, store = build_service(tmp_path, direct_answer_runner)
+  conversation = service.create_conversation(context=CONTEXT)
+  internal_history = [
+    {"role": "user", "content": "查询订单"},
+    {"role": "assistant", "content": None, "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}]},
+    {"role": "tool", "tool_call_id": "call-1", "content": "订单已经发货，预计明天送达"},
+    {"role": "assistant", "content": "订单已经发货"},
+  ]
+  store.append_messages(
+    organization_id=CONTEXT.organization_id,
+    user_id=CONTEXT.user_id,
+    conversation_id=conversation.conversation_id,
+    messages=internal_history,
+  )
+
+  history = service.get_history(context=CONTEXT, conversation_id=conversation.conversation_id)
+  assert len(history.messages) == 2
+  assert history.context_tokens == service.estimate_context_tokens(None, internal_history)
+  assert history.context_tokens > service.estimate_context_tokens(
+    None, [internal_history[0], internal_history[-1]]
+  )
+
+  response = service.chat(
+    context=CONTEXT, conversation_id=conversation.conversation_id, question="还有多久送达"
+  )
+  persisted = store.load_messages(
+    organization_id=CONTEXT.organization_id,
+    user_id=CONTEXT.user_id,
+    conversation_id=conversation.conversation_id,
+  )
+  assert response.context_tokens == service.estimate_context_tokens(None, persisted)
+
+  updated_tokens = service.update_system_prompt(
+    context=CONTEXT,
+    conversation_id=conversation.conversation_id,
+    system_prompt="请用简体中文详细解释每一步",
+  )
+  assert updated_tokens == service.estimate_context_tokens("请用简体中文详细解释每一步", persisted)
+  assert updated_tokens > response.context_tokens
+
+
 
 def test_second_turn_receives_previous_history_and_system_prompt(tmp_path):
   received_messages = []

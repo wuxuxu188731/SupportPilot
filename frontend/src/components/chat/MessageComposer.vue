@@ -21,6 +21,8 @@ const props = defineProps<{
   disabled?: boolean
   /** 发送按钮文案或等待提示 */
   placeholder?: string
+  /** 下一轮模型消息的 token 估算数；null 表示暂不可用 */
+  contextTokens?: number | null
 }>()
 
 const emit = defineEmits<{
@@ -59,6 +61,17 @@ function submit(): void {
 
 /** 发送按钮可用性：有文本且不在发送/禁用中。 */
 const canSend = computed(() => !props.disabled && !props.sending && props.value.trim().length > 0)
+
+/** 超过 40 万 token 时提醒用户新开会话，仍允许继续发送。 */
+const CONTEXT_WARNING_THRESHOLD = 400_000
+const contextTooLong = computed(
+  () => props.contextTokens != null && props.contextTokens > CONTEXT_WARNING_THRESHOLD,
+)
+const contextLabel = computed(() =>
+  props.contextTokens == null
+    ? '上下文：暂不可用'
+    : `上下文：约 ${props.contextTokens.toLocaleString('zh-CN')} / 400,000 tokens`,
+)
 </script>
 
 <template>
@@ -82,17 +95,28 @@ const canSend = computed(() => !props.disabled && !props.sending && props.value.
       <span class="composer-hint" aria-hidden="true">
         {{ sending ? 'Agent 处理中，请耐心等待…' : 'Enter 发送 · Shift+Enter 换行' }}
       </span>
-      <n-button
-        type="primary"
-        :disabled="!canSend"
-        :loading="sending"
-        aria-label="发送消息"
-        data-test="chat-send"
-        @click="submit"
-      >
-        发送
-      </n-button>
+      <div class="composer-send-group">
+        <span
+          class="composer-context"
+          :class="{ 'composer-context--warning': contextTooLong }"
+          data-test="chat-context-tokens"
+          title="按完整会话消息估算，实际模型用量可能不同"
+        >{{ contextLabel }}</span>
+        <n-button
+          type="primary"
+          :disabled="!canSend"
+          :loading="sending"
+          aria-label="发送消息"
+          data-test="chat-send"
+          @click="submit"
+        >
+          发送
+        </n-button>
+      </div>
     </div>
+    <p v-if="contextTooLong" class="composer-warning" role="alert" data-test="chat-context-warning">
+      当前上下文过长，请开新窗口继续对话
+    </p>
   </div>
 </template>
 
@@ -113,5 +137,30 @@ const canSend = computed(() => !props.disabled && !props.sending && props.value.
   align-items: center;
   justify-content: space-between;
   gap: var(--sp-space-3);
+  flex-wrap: wrap;
+}
+
+.composer-send-group {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-space-3);
+  margin-left: auto;
+}
+
+.composer-context {
+  color: var(--sp-color-text-3);
+  font-size: var(--sp-font-size-xs);
+  white-space: nowrap;
+}
+
+.composer-context--warning,
+.composer-warning {
+  color: var(--sp-color-warning);
+}
+
+.composer-warning {
+  margin: 0;
+  font-size: var(--sp-font-size-xs);
+  text-align: right;
 }
 </style>

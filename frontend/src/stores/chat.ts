@@ -142,6 +142,8 @@ export const useChatStore = defineStore('chat', () => {
   const systemPrompt = ref<string | null>(null)
   /** 历史接口返回的当前标题，供未出现在已加载列表中的会话展示 */
   const historyTitle = ref<string | null>(null)
+  /** 下一轮模型消息的 token 估算数；未获取到可信数值时为 null */
+  const contextTokens = ref<number | null>(null)
   /** 消息发送中（防止重复提交） */
   const sending = ref(false)
   /** 可展示错误：发送/系统提示词等瞬时操作的最新错误消息 */
@@ -199,6 +201,7 @@ export const useChatStore = defineStore('chat', () => {
     historyLoadedConversationId.value = null
     systemPrompt.value = null
     historyTitle.value = null
+    contextTokens.value = null
     historyError.value = null
     sending.value = false
     displayError.value = null
@@ -241,6 +244,7 @@ export const useChatStore = defineStore('chat', () => {
     historyLoadedConversationId.value = null
     systemPrompt.value = null
     historyTitle.value = null
+    contextTokens.value = null
     sending.value = false
     displayError.value = null
     creating.value = false
@@ -346,6 +350,7 @@ export const useChatStore = defineStore('chat', () => {
       historyError.value = null
       systemPrompt.value = prompt ? prompt : null
       historyTitle.value = '新会话'
+      contextTokens.value = created.context_tokens ?? null
       // 刷新列表让新会话出现在列表（标题「新会话」，排序在顶部）
       await refreshConversationListSilently()
       return created.conversation_id
@@ -383,6 +388,7 @@ export const useChatStore = defineStore('chat', () => {
     historyLoadedConversationId.value = null
     systemPrompt.value = null
     historyTitle.value = null
+    contextTokens.value = null
     sending.value = false
     displayError.value = null
     historyLoading.value = true
@@ -393,6 +399,7 @@ export const useChatStore = defineStore('chat', () => {
       historyLoadedConversationId.value = conversationId
       systemPrompt.value = history.system_prompt
       historyTitle.value = history.title ?? null
+      contextTokens.value = history.context_tokens ?? null
       return 'ok'
     } catch (error) {
       if (!isRequestCurrent(epoch, capturedOrganizationId)) return 'ok'
@@ -421,6 +428,7 @@ export const useChatStore = defineStore('chat', () => {
     historyError.value = null
     systemPrompt.value = null
     historyTitle.value = null
+    contextTokens.value = null
     sending.value = false
     displayError.value = null
     historyLoading.value = false
@@ -474,6 +482,7 @@ export const useChatStore = defineStore('chat', () => {
     try {
       const response = await chatApi.sendChatMessage(conversationId, trimmed)
       if (!isRequestCurrent(epoch, capturedOrganizationId)) return 'sent' // 迟到响应丢弃
+      contextTokens.value = response.context_tokens ?? null
       const target = messages.value.find((message) => message.id === pendingAssistantId)
       if (target) {
         target.content = response.llm_answer ?? ''
@@ -501,6 +510,7 @@ export const useChatStore = defineStore('chat', () => {
       }
       const uncertain =
         isApiError(error) && error.status === 0 // 网络中断/超时：结果状态不确定
+      if (uncertain) contextTokens.value = null
       const message = uncertain
         ? '网络中断或请求超时，结果状态可能不确定，请先刷新历史再决定是否重新发送'
         : error instanceof Error
@@ -535,9 +545,10 @@ export const useChatStore = defineStore('chat', () => {
     promptUpdating.value = true
     displayError.value = null
     try {
-      await chatApi.updateSystemPrompt(conversationId, { system_prompt: trimmed })
+      const updated = await chatApi.updateSystemPrompt(conversationId, { system_prompt: trimmed })
       if (!isRequestCurrent(epoch, capturedOrganizationId)) return false
       systemPrompt.value = trimmed
+      contextTokens.value = updated.context_tokens ?? null
       return true
     } catch (error) {
       if (isRequestCurrent(epoch, capturedOrganizationId)) {
@@ -630,6 +641,7 @@ export const useChatStore = defineStore('chat', () => {
     historyLoadedConversationId,
     systemPrompt,
     historyTitle,
+    contextTokens,
     sending,
     displayError,
     creating,

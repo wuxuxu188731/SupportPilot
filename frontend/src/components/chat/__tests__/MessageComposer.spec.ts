@@ -9,12 +9,13 @@ import { describe, expect, it } from 'vitest'
 import MessageComposer from '@/components/chat/MessageComposer.vue'
 
 /** 挂载输入组件并返回 textarea 与发送按钮。 */
-async function mountComposer(props: { value?: string; sending?: boolean; disabled?: boolean } = {}) {
+async function mountComposer(props: { value?: string; sending?: boolean; disabled?: boolean; contextTokens?: number | null } = {}) {
   const wrapper = mount(MessageComposer, {
     props: {
       value: props.value ?? '',
       sending: props.sending ?? false,
       disabled: props.disabled ?? false,
+      contextTokens: props.contextTokens ?? null,
       'onUpdate:value': (value: string) => wrapper.setProps({ value }),
     },
   })
@@ -94,5 +95,17 @@ describe('MessageComposer 键盘发送行为', () => {
 
     const locked = await mountComposer({ value: '内容', disabled: true })
     expect(locked.wrapper.find('[data-test="chat-send"]').attributes('disabled')).toBeDefined()
+  })
+
+  // 边界情况：恰好 40 万不提醒，超过后显示指定文案且仍能发送。
+  it('显示上下文估算值并在超过阈值时提醒', async () => {
+    const { wrapper } = await mountComposer({ value: '继续咨询', contextTokens: 400_000 })
+    expect(wrapper.find('[data-test="chat-context-tokens"]').text()).toContain('400,000 / 400,000 tokens')
+    expect(wrapper.find('[data-test="chat-context-warning"]').exists()).toBe(false)
+
+    await wrapper.setProps({ contextTokens: 400_001 })
+    expect(wrapper.find('[data-test="chat-context-warning"]').text()).toBe('当前上下文过长，请开新窗口继续对话')
+    await wrapper.find('[data-test="chat-send"]').trigger('click')
+    expect(wrapper.emitted('send')?.[0]).toEqual(['继续咨询'])
   })
 })

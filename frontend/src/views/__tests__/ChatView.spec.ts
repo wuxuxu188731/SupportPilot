@@ -72,6 +72,7 @@ function historyResponse(): ConversationHistoryResponse {
     system_prompt: null,
     created_at: '2026-09-01 08:00:00',
     updated_at: '2026-09-02 08:00:00',
+    context_tokens: 123,
     messages: [
       {
         sequence: 1,
@@ -103,6 +104,7 @@ function chatResponse(): LLMResponse {
     retrieval_summary: null,
     answer_incomplete: false,
     pending_approvals: [],
+    context_tokens: 456,
   }
 }
 
@@ -254,6 +256,7 @@ describe('ChatView 进入会话', () => {
     expect(wrapper.text()).toContain('用户历史问题')
     expect(wrapper.text()).toContain('Agent 历史回答')
     expect(wrapper.text()).toContain('订单咨询')
+    expect(wrapper.find('[data-test="chat-context-tokens"]').text()).toContain('123 / 400,000 tokens')
   })
 
   it('不存在的会话回到空态并提示「会话不存在或已不可访问」', async () => {
@@ -291,6 +294,7 @@ describe('ChatView 进入会话', () => {
 
     expect(chatApi.sendChatMessage).toHaveBeenCalledWith('conv-1', '请问退款多久到账')
     expect(wrapper.text()).toContain('实时回答正文')
+    expect(wrapper.find('[data-test="chat-context-tokens"]').text()).toContain('456 / 400,000 tokens')
     // 不展示内部推理内容
     expect(wrapper.text()).not.toContain('不应展示的推理')
     const inputElement = wrapper.find('[data-test="chat-input"] textarea')

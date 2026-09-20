@@ -37,6 +37,9 @@ class FakeChatService:
       system_prompt=system_prompt,
     )
 
+  def estimate_context_tokens(self, system_prompt, history):
+    return 12
+
   def list_conversations(self,*,context,limit,offset)->list[ConversationListItem]:
     self.calls.append(("list",context.organization_id,context.user_id,limit,offset))
     return [
@@ -65,6 +68,7 @@ class FakeChatService:
       created_at="2026-09-01 08:00:00",
       updated_at="2026-09-02 08:00:00",
       messages=[],
+      context_tokens=56,
     )
 
   def chat(self,*,context,conversation_id,question)->LLMResponse:
@@ -77,6 +81,7 @@ class FakeChatService:
       self, *, context, conversation_id, system_prompt
   ):
     self.calls.append(("prompt",context.organization_id,context.user_id,conversation_id,system_prompt))
+    return 34
 
   def rename_conversation(self, *, context, conversation_id, title)->ConversationListItem:
     self.calls.append(("rename", context.organization_id, context.user_id, conversation_id, title))
@@ -103,6 +108,7 @@ def build_client():
   return TestClient(app), service
 
 
+# 保护行为：创建会话时返回初始上下文估算值。
 def test_create_conversation_returns_server_id():
   client, service = build_client()
   response = client.post(
@@ -112,7 +118,7 @@ def test_create_conversation_returns_server_id():
     }
   )
   assert response.status_code==201
-  assert response.json()=={"conversation_id": "conversation-1"}
+  assert response.json()=={"conversation_id": "conversation-1", "context_tokens": 12}
   assert service.calls==[("create","organization-a","authenticated-user","be helpful")]
 
 
@@ -137,6 +143,7 @@ def test_missing_or_unowned_conversation_returns_404():
   assert response.json()=={"detail":"conversation not found error"}
 
 
+# 保护行为：更新附加偏好后返回最新上下文估算值。
 def test_update_system_prompt_is_conversation_scoped():
   client, service = build_client()
   response = client.put(
@@ -144,7 +151,7 @@ def test_update_system_prompt_is_conversation_scoped():
     json={"system_prompt":"new prompt"}
   )
   assert response.status_code==200
-  assert response.json()=={"updated": True}
+  assert response.json()=={"updated": True, "context_tokens": 34}
   assert service.calls[0]==("prompt","organization-a","authenticated-user","conversation-1","new prompt")
 
 
@@ -230,8 +237,8 @@ def test_list_conversations_pagination_validation_returns_422():
   assert client.get("/conversations/", params={"limit": "abc"}).status_code == 422
 
 
+# 保护行为：历史响应返回安全消息与完整内部上下文的估算值。
 def test_get_conversation_messages_returns_history():
-  # 保护行为：历史消息路由应把会话 id 传给服务层并返回安全历史响应。
   client, service = build_client()
   response = client.get("/conversations/conversation-1/messages/")
 
@@ -244,6 +251,7 @@ def test_get_conversation_messages_returns_history():
     "created_at": "2026-09-01 08:00:00",
     "updated_at": "2026-09-02 08:00:00",
     "messages": [],
+    "context_tokens": 56,
   }
   assert ("history", "organization-a", "authenticated-user", "conversation-1") in service.calls
 

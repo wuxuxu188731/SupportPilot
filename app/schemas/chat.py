@@ -31,6 +31,7 @@ class LLMResponse(BaseModel):
   retrieval_summary: RetrievalSummary | None = None
   answer_incomplete: bool = False
   pending_approvals: list[PendingApproval] = Field(default_factory=list)
+  context_tokens: int | None = None  # 本轮落库后下一轮模型消息的估算 token 数
 
 
 class CreateConversationRequest(BaseModel):
@@ -39,6 +40,7 @@ class CreateConversationRequest(BaseModel):
 
 class ConversationCreated(BaseModel):
   conversation_id : str
+  context_tokens: int | None = None  # 新会话固定提示词与附加偏好的估算 token 数
 
 class ChatRequest(BaseModel):
   model_config = ConfigDict({"extra":"forbid"})
@@ -50,6 +52,7 @@ class UpdateSystemPromptRequest(BaseModel):
 
 class SystemPromptUpdated(BaseModel):
   updated : bool
+  context_tokens: int | None = None  # 更新附加偏好后下一轮模型消息的估算 token 数
 
 
 class RenameConversationRequest(BaseModel):
@@ -103,3 +106,4 @@ class ConversationHistoryResponse(BaseModel):
   created_at : str  # 会话创建时间（UTC 文本）
   updated_at : str  # 会话最近活动时间（UTC 文本）
   messages : list[ConversationHistoryMessage]  # 按 seq 升序的安全历史消息，可为空数组
+  context_tokens: int  # 固定提示词、附加偏好及完整内部历史的估算 token 数

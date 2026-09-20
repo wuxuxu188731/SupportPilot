@@ -368,6 +368,7 @@ onBeforeUnmount(() => {
             <MessageComposer
               v-model:value="draft"
               :sending="chatStore.sending"
+              :context-tokens="chatStore.contextTokens"
               :disabled="chatStore.historyLoading || chatStore.historyError !== null || chatStore.historyLoadedConversationId !== chatStore.currentConversationId"
               @send="onSend"
             />

@@ -219,6 +219,8 @@ export interface ConversationHistoryResponse {
   updated_at: string
   /** 安全历史消息数组：只含用户问题与 Agent 最终回答，可为空数组 */
   messages: ConversationHistoryMessage[]
+  /** 下一轮模型请求将携带的消息 token 估算数，包含内部历史与固定提示词 */
+  context_tokens?: number
 }
 
 /** 创建会话请求体（后端 CreateConversationRequest，extra=forbid）。 */
@@ -231,6 +233,8 @@ export interface CreateConversationRequest {
 export interface ConversationCreated {
   /** 新会话唯一标识 */
   conversation_id: string
+  /** 新会话固定提示词与附加偏好的 token 估算数 */
+  context_tokens?: number | null
 }
 
 /** 重命名会话请求体；去除首尾空白后限 1–30 个字符。 */
@@ -249,6 +253,8 @@ export interface UpdateSystemPromptRequest {
 export interface SystemPromptUpdated {
   /** 固定 true，表示更新请求已被服务端接受 */
   updated: boolean
+  /** 更新附加偏好后下一轮模型消息的 token 估算数 */
+  context_tokens?: number | null
 }
 
 /** 聊天请求体（后端 ChatRequest，extra=forbid）：只发送用户问题。 */
@@ -383,4 +389,6 @@ export interface LLMResponse {
   answer_incomplete: boolean
   /** 本轮提出的退款/补偿待审批提案（禁止从自然语言解析） */
   pending_approvals: PendingApproval[]
+  /** 本轮落库后下一轮模型请求的消息 token 估算数 */
+  context_tokens?: number | null
 }

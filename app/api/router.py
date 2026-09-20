@@ -39,7 +39,10 @@ def creat_conversation_router(
         context=context,
         system_prompt=system_prompt
       )
-      return ConversationCreated(conversation_id=conversation.conversation_id)
+      return ConversationCreated(
+        conversation_id=conversation.conversation_id,
+        context_tokens=chat_service.estimate_context_tokens(conversation.system_prompt, []),
+      )
 
     @router.get("/conversations/", response_model=list[ConversationListItem], tags=["查询会话列表"])
     def list_conversations(
@@ -139,7 +142,7 @@ def creat_conversation_router(
         raise HTTPException(status_code=422, detail="prompt must be not blank")
 
       try:
-        chat_service.update_system_prompt(
+        context_tokens = chat_service.update_system_prompt(
           context=context,
           conversation_id=conversation_id,
           system_prompt=prompt
@@ -147,6 +150,6 @@ def creat_conversation_router(
       except ConversationNotFoundError as exc:
         raise HTTPException(status_code=404, detail="conversation not found error") from exc
 
-      return SystemPromptUpdated(updated=True)
+      return SystemPromptUpdated(updated=True, context_tokens=context_tokens)
 
     return router

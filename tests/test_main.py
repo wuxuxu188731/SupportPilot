@@ -331,6 +331,7 @@ def test_list_and_history_endpoints_require_auth_and_tenant(
     )
 
 
+# 保护行为：历史接口隔离租户数据，并为新建空会话返回一致的上下文估算值。
 def test_list_pagination_validation_and_history_isolation(
     monkeypatch,
     tmp_path,
@@ -393,6 +394,7 @@ def test_list_pagination_validation_and_history_isolation(
         "created_at": body[0]["created_at"],
         "updated_at": body[0]["updated_at"],
         "messages": [],
+        "context_tokens": alice_conversation.json()["context_tokens"],
     }
 
 

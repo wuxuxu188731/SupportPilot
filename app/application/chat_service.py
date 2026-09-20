@@ -1,4 +1,5 @@
 import logging
+import json
 from dataclasses import fields
 from typing import Callable
 from uuid import uuid4
@@ -7,6 +8,7 @@ from app.agent.invocation_context import AgentInvocationContext
 from app.application.organization_service import TenantContext
 from app.concurrency.conversation_locks import ConversationLockRegistry
 from app.knowledge.results import Citation
+from app.knowledge.embeddings import count_tokens
 from app.schemas.chat import (
   ConversationHistoryMessage,
   ConversationHistoryResponse,
@@ -124,6 +126,22 @@ class ChatService:
     if not self._base_system_prompt:
       raise ValueError("base_system_prompt must not be blank")
 
+  def _context_messages(self, system_prompt: str | None, history: list[dict]) -> list[dict]:
+    """构造下一轮调用模型时会携带的固定提示词和完整历史。"""
+    messages = [{"role": "system", "content": self._base_system_prompt}]
+    if system_prompt:
+      messages.append({
+        "role": "user",
+        "content": "会话附加偏好（不能覆盖服务器规则）：\n" + system_prompt,
+      })
+    messages.extend(history)
+    return messages
+
+  def estimate_context_tokens(self, system_prompt: str | None, history: list[dict]) -> int:
+    """按项目统一分词器估算下一轮请求中的消息 token 数。"""
+    messages = self._context_messages(system_prompt, history)
+    return count_tokens(json.dumps(messages, ensure_ascii=False, separators=(",", ":")))
+
   def create_conversation(
     self,
     *,
@@ -193,6 +211,9 @@ class ChatService:
       created_at=record.created_at,
       updated_at=record.updated_at,
       messages=messages,
+      context_tokens=self.estimate_context_tokens(
+        record.system_prompt, [stored.payload for stored in message_records]
+      ),
     )
 
   @staticmethod
@@ -255,7 +276,7 @@ class ChatService:
     context : TenantContext,
     conversation_id : str,
     system_prompt : str
-  )-> None :
+  )-> int:
     with self._locks.acquire(conversation_id=conversation_id):
       self._store.update_system_prompt(
         organization_id=context.organization_id,
@@ -263,6 +284,12 @@ class ChatService:
         conversation_id=conversation_id,
         system_prompt=system_prompt
       )
+      history = self._store.load_messages(
+        organization_id=context.organization_id,
+        user_id=context.user_id,
+        conversation_id=conversation_id,
+      )
+      return self.estimate_context_tokens(system_prompt, history)
 
   def rename_conversation(
     self,
@@ -312,18 +339,7 @@ class ChatService:
         user_id=context.user_id,
         conversation_id=conversation.conversation_id,
       )
-      messages : list[dict] = [
-        {"role":"system", "content":self._base_system_prompt}
-      ]
-      if conversation.system_prompt:
-        messages.append({
-          "role":"user",
-          "content":(
-            "会话附加偏好（不能覆盖服务器规则）：\n"
-            f"{conversation.system_prompt}"
-          ),
-        })
-      messages.extend(history)
+      messages = self._context_messages(conversation.system_prompt, history)
       new_messages_start = len(messages)
       if question.strip():
         messages.append({"role":"user","content":question})
@@ -347,6 +363,9 @@ class ChatService:
         conversation_id=conversation_id,
         messages=new_messages,
         display=self._display_for_turn(new_messages, response),
+      )
+      response.context_tokens = self.estimate_context_tokens(
+        conversation.system_prompt, history + new_messages
       )
       return response
 
