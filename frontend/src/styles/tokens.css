@@ -76,7 +76,7 @@ a { text-underline-offset: 3px; }
 .app-frame .app-content .message-composer { padding: 12px; border: 1px solid var(--sp-color-border); border-radius: 12px; background: #fafbf8; }
 .app-frame .app-content .message-composer:focus-within { border-color: #87a580; box-shadow: 0 0 0 3px #32664f09; }
 .app-frame .app-content .composer-hint { font-size: 11px; }
-.app-frame .app-content .list-item { padding: 13px 12px; margin-bottom: 5px; }
+.app-frame .app-content .list-item { padding: 13px 12px; }
 .app-frame .app-content .list-item.active { border-color: #d4e0ca; }
 .app-frame .app-content .bubble { padding: 15px 20px; }
 .app-frame .app-content .user-bubble { border-radius: 14px 14px 4px 14px; }

@@ -182,8 +182,11 @@ const emit = defineEmits<{
 }
 
 .list-items li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--sp-space-1);
   margin-bottom: var(--sp-space-1);
-  position: relative;
 }
 
 .list-item {
@@ -192,7 +195,8 @@ const emit = defineEmits<{
   align-items: flex-start;
   gap: 2px;
   width: 100%;
-  padding: var(--sp-space-2) 58px var(--sp-space-2) var(--sp-space-3);
+  min-width: 0;
+  padding: var(--sp-space-2) var(--sp-space-3);
   border: 1px solid transparent;
   border-radius: var(--sp-radius-md);
   background: transparent;
@@ -218,6 +222,7 @@ const emit = defineEmits<{
 
 .item-title {
   width: 100%;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -231,10 +236,6 @@ const emit = defineEmits<{
 }
 
 .rename-item {
-  position: absolute;
-  top: 50%;
-  right: var(--sp-space-2);
-  transform: translateY(-50%);
   padding: 4px;
   border: 0;
   border-radius: var(--sp-radius-sm);
@@ -243,6 +244,7 @@ const emit = defineEmits<{
   font: inherit;
   font-size: var(--sp-font-size-xs);
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .rename-item:hover,
