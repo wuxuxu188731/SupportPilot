@@ -11,6 +11,7 @@ from app.schemas.chat import (
   ConversationListItem,
   CreateConversationRequest,
   LLMResponse,
+  RenameConversationRequest,
   SystemPromptUpdated,
   UpdateSystemPromptRequest,
 )
@@ -47,12 +48,34 @@ def creat_conversation_router(
       offset: int = Query(default=0, ge=0),
     )->list[ConversationListItem]:
       # 分页参数由 FastAPI Query 校验（limit 1–100，offset ≥0），
-      # 只返回当前企业与当前用户自己的会话，标题由服务端实时推导。
+      # 只返回当前企业与当前用户自己的会话，手动标题优先。
       return chat_service.list_conversations(
         context=context,
         limit=limit,
         offset=offset,
       )
+
+    @router.put(
+      "/conversations/{conversation_id}/title/",
+      response_model=ConversationListItem,
+      tags=["重命名会话"],
+    )
+    def rename_conversation(
+      conversation_id : str,
+      request : RenameConversationRequest,
+      context : TenantContext = Depends(get_current_tenant),
+    )->ConversationListItem:
+      conversation_id = conversation_id.strip()
+      if not conversation_id:
+        raise HTTPException(status_code=422, detail="conversation_id must not be blank")
+      try:
+        return chat_service.rename_conversation(
+          context=context,
+          conversation_id=conversation_id,
+          title=request.title,
+        )
+      except ConversationNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="conversation not found error") from exc
 
     @router.get(
       "/conversations/{conversation_id}/messages/",

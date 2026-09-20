@@ -17,6 +17,7 @@ import type {
   ConversationListItem,
   CreateConversationRequest,
   LLMResponse,
+  RenameConversationRequest,
   SystemPromptUpdated,
   UpdateSystemPromptRequest,
 } from './types'
@@ -64,6 +65,18 @@ export async function getConversationHistory(
 ): Promise<ConversationHistoryResponse> {
   const response = await httpClient.get<ConversationHistoryResponse>(
     `/conversations/${encodeURIComponent(conversationId)}/messages/`,
+  )
+  return response.data
+}
+
+/** 保存会话手动标题，返回服务端最新列表项。 */
+export async function renameConversation(
+  conversationId: string,
+  payload: RenameConversationRequest,
+): Promise<ConversationListItem> {
+  const response = await httpClient.put<ConversationListItem>(
+    `/conversations/${encodeURIComponent(conversationId)}/title/`,
+    payload,
   )
   return response.data
 }

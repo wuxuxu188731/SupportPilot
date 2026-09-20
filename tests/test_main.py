@@ -388,6 +388,7 @@ def test_list_pagination_validation_and_history_isolation(
     assert own_history.status_code == 200
     assert own_history.json() == {
         "conversation_id": alice_id,
+        "title": "新会话",
         "system_prompt": None,
         "created_at": body[0]["created_at"],
         "updated_at": body[0]["updated_at"],
@@ -542,10 +543,9 @@ def test_cors_headers_present_on_real_app_response(monkeypatch, tmp_path):
     assert "access-control-allow-origin" not in unknown.headers
 
 
+# 保护行为：新增重命名路径应进入公开接口，总操作数与路由注册保持一致。
 def test_member_paths_registered_in_openapi(monkeypatch, tmp_path):
-    """成员管理三条路径与演示数据初始化路径已注册，且合计 28 个 HTTP 操作
-    （在第四阶段盘点口径的 26 个之上，新增知识库正文读取接口 1 个、
-    演示数据初始化接口 1 个）。"""
+    """成员管理、演示数据与会话重命名路径已注册，合计 29 个 HTTP 操作。"""
     app = load_app(monkeypatch, tmp_path)
     paths = app.openapi()["paths"]
     http_methods = {"get", "post", "put", "patch", "delete"}
@@ -565,8 +565,12 @@ def test_member_paths_registered_in_openapi(monkeypatch, tmp_path):
         method for method in paths["/demo-data/"]
         if method in http_methods
     ) == ["post"]
+    assert sorted(
+        method for method in paths["/conversations/{conversation_id}/title/"]
+        if method in http_methods
+    ) == ["put"]
     total_operations = sum(
         len([method for method in methods if method in http_methods])
         for methods in paths.values()
     )
-    assert total_operations == 28
+    assert total_operations == 29

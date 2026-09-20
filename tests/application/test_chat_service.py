@@ -378,6 +378,52 @@ def test_list_conversations_builds_titles_from_first_user_message(tmp_path):
   }
 
 
+# 保护行为：手动标题覆盖自动标题，后续消息不会改回自动标题。
+def test_rename_conversation_keeps_custom_title_after_chat(tmp_path):
+  service, _ = build_service(tmp_path, direct_answer_runner)
+  conversation = service.create_conversation(context=CONTEXT)
+  service.chat(context=CONTEXT, conversation_id=conversation.conversation_id, question="最初的问题")
+
+  renamed = service.rename_conversation(
+    context=CONTEXT,
+    conversation_id=conversation.conversation_id,
+    title="  售后跟进  ",
+  )
+  service.chat(context=CONTEXT, conversation_id=conversation.conversation_id, question="后续的问题")
+
+  item = next(
+    item for item in service.list_conversations(context=CONTEXT, limit=50, offset=0)
+    if item.conversation_id == conversation.conversation_id
+  )
+  assert renamed.title == "售后跟进"
+  assert item.title == "售后跟进"
+  assert service.get_history(
+    context=CONTEXT,
+    conversation_id=conversation.conversation_id,
+  ).title == "售后跟进"
+
+
+# 边界情况：手动标题去空白后必须为 1–30 个字符。
+def test_rename_conversation_validates_title_length(tmp_path):
+  service, _ = build_service(tmp_path, direct_answer_runner)
+  conversation = service.create_conversation(context=CONTEXT)
+
+  for title in ("   ", "长" * 31):
+    with pytest.raises(ValueError):
+      service.rename_conversation(
+        context=CONTEXT,
+        conversation_id=conversation.conversation_id,
+        title=title,
+      )
+
+  renamed = service.rename_conversation(
+    context=CONTEXT,
+    conversation_id=conversation.conversation_id,
+    title="长" * 30,
+  )
+  assert len(renamed.title) == 30
+
+
 # —— 安全历史读取 ——
 
 def test_history_returns_user_and_final_assistant_in_seq_order(tmp_path):

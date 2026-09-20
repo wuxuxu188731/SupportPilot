@@ -86,6 +86,7 @@ class SQLiteSessionStore:
       created_at=row["created_at"],
       updated_at=row["updated_at"],
       first_user_content=first_user_content,
+      custom_title=row["custom_title"],
     )
 
   @staticmethod
@@ -117,7 +118,7 @@ class SQLiteSessionStore:
     """
     return """
       SELECT
-        c.id, c.system_prompt, c.created_at, c.updated_at,
+        c.id, c.system_prompt, c.created_at, c.updated_at, c.custom_title,
         (
           SELECT m.payload_json
           FROM messages AS m
@@ -339,6 +340,31 @@ class SQLiteSessionStore:
         SET system_prompt=?, updated_at=CURRENT_TIMESTAMP
         where id=? AND organization_id=? AND user_id=?
         """,(system_prompt,conversation_id,organization_id,user_id)
+      )
+
+  def rename_conversation(
+    self,
+    *,
+    organization_id : str,
+    user_id : str,
+    conversation_id : str,
+    title : str,
+  )->None:
+    """修改所属会话的手动标题，并更新列表排序时间。"""
+    with self._connection() as connection:
+      self._get_owned_row(
+        connection,
+        organization_id=organization_id,
+        user_id=user_id,
+        conversation_id=conversation_id,
+      )
+      connection.execute(
+        """
+        UPDATE conversations
+        SET custom_title=?, updated_at=CURRENT_TIMESTAMP
+        WHERE id=? AND organization_id=? AND user_id=?
+        """,
+        (title, conversation_id, organization_id, user_id),
       )
 
   def load_messages(

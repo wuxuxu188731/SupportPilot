@@ -1,11 +1,11 @@
 <script setup lang="ts">
 /*
- * 会话列表组件：展示当前企业、当前用户的会话，支持选择、新建、
+ * 会话列表组件：展示当前企业、当前用户的会话，支持选择、新建、重命名、
  * 错误重试与「加载更多」。
  *
  * 说明：
  *  - 后端不返回会话总数：通过「最近一页是否拉满」推断是否还有更多；
- *  - 更新时间按本地时间格式化（see utils/time.ts）。
+ *  - 更新时间按本地时间格式化（参见 utils/time.ts）。
  */
 import { NButton, NEmpty, NSpin } from 'naive-ui'
 
@@ -34,19 +34,14 @@ const emit = defineEmits<{
   select: [conversationId: string]
   /** 打开新建会话对话框 */
   create: []
+  /** 打开指定会话的重命名对话框 */
+  rename: [conversationId: string]
   /** 首屏加载失败后的重试 */
   retry: []
   /** 加载更多会话 */
   loadMore: []
 }>()
 
-/** 会话卡片键盘可达：按 Enter/空格等效点击。 */
-function onItemKeydown(event: KeyboardEvent, conversationId: string): void {
-  if (event.key === 'Enter' || event.key === ' ') {
-    event.preventDefault()
-    emit('select', conversationId)
-  }
-}
 </script>
 
 <template>
@@ -89,23 +84,30 @@ function onItemKeydown(event: KeyboardEvent, conversationId: string): void {
     </div>
 
     <!-- 会话列表 -->
-    <ul v-else class="list-items" role="listbox" aria-label="会话列表">
+    <ul v-else class="list-items" aria-label="会话列表">
       <li
         v-for="item in conversations"
         :key="item.conversation_id"
-        role="option"
-        :aria-selected="item.conversation_id === activeConversationId"
       >
         <button
           type="button"
           class="list-item"
           :class="{ active: item.conversation_id === activeConversationId }"
+          :aria-current="item.conversation_id === activeConversationId ? 'page' : undefined"
           :title="item.title"
           @click="emit('select', item.conversation_id)"
-          @keydown="onItemKeydown($event, item.conversation_id)"
         >
           <span class="item-title">{{ item.title }}</span>
           <span class="item-time">{{ formatConversationTime(item.updated_at) }}</span>
+        </button>
+        <button
+          type="button"
+          class="rename-item"
+          :aria-label="`重命名会话：${item.title}`"
+          :data-test="`rename-${item.conversation_id}`"
+          @click="emit('rename', item.conversation_id)"
+        >
+          重命名
         </button>
       </li>
     </ul>
@@ -181,6 +183,7 @@ function onItemKeydown(event: KeyboardEvent, conversationId: string): void {
 
 .list-items li {
   margin-bottom: var(--sp-space-1);
+  position: relative;
 }
 
 .list-item {
@@ -189,7 +192,7 @@ function onItemKeydown(event: KeyboardEvent, conversationId: string): void {
   align-items: flex-start;
   gap: 2px;
   width: 100%;
-  padding: var(--sp-space-2) var(--sp-space-3);
+  padding: var(--sp-space-2) 58px var(--sp-space-2) var(--sp-space-3);
   border: 1px solid transparent;
   border-radius: var(--sp-radius-md);
   background: transparent;
@@ -225,6 +228,27 @@ function onItemKeydown(event: KeyboardEvent, conversationId: string): void {
 .item-time {
   font-size: var(--sp-font-size-xs);
   color: var(--sp-color-text-3);
+}
+
+.rename-item {
+  position: absolute;
+  top: 50%;
+  right: var(--sp-space-2);
+  transform: translateY(-50%);
+  padding: 4px;
+  border: 0;
+  border-radius: var(--sp-radius-sm);
+  background: transparent;
+  color: var(--sp-color-text-3);
+  font: inherit;
+  font-size: var(--sp-font-size-xs);
+  cursor: pointer;
+}
+
+.rename-item:hover,
+.rename-item:focus-visible {
+  color: var(--sp-color-primary);
+  background: var(--sp-color-bg-hover);
 }
 
 .load-more {

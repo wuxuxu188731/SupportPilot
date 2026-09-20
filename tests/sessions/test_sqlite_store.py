@@ -128,6 +128,65 @@ def test_update_system_prompt_is_persistent(tmp_path):
     assert loaded.system_prompt == "新的系统提示词"
 
 
+# 保护行为：手动标题重开数据库后仍可读，且只影响指定会话。
+def test_rename_conversation_is_persistent(tmp_path):
+    store, alice, _, org_a, _ = build_scope(tmp_path)
+    renamed = store.create_conversation(
+        organization_id=org_a.organization_id,
+        user_id=alice.user_id,
+    )
+    untouched = store.create_conversation(
+        organization_id=org_a.organization_id,
+        user_id=alice.user_id,
+    )
+
+    store.rename_conversation(
+        organization_id=org_a.organization_id,
+        user_id=alice.user_id,
+        conversation_id=renamed.conversation_id,
+        title="售后跟进",
+    )
+
+    reopened = SQLiteSessionStore(tmp_path / "chat.db")
+    records = reopened.list_conversations(
+        organization_id=org_a.organization_id,
+        user_id=alice.user_id,
+        limit=50,
+        offset=0,
+    )
+    titles = {item.conversation_id: item.custom_title for item in records}
+    assert titles[renamed.conversation_id] == "售后跟进"
+    assert titles[untouched.conversation_id] is None
+
+
+# 安全边界：同企业其他用户和其他企业都不能修改会话标题。
+def test_rename_conversation_hides_wrong_owner(tmp_path):
+    store, alice, bob, org_a, org_b = build_scope_with_shared_org(tmp_path)
+    conversation = store.create_conversation(
+        organization_id=org_a.organization_id,
+        user_id=alice.user_id,
+    )
+
+    for organization_id, user_id in (
+        (org_a.organization_id, bob.user_id),
+        (org_b.organization_id, bob.user_id),
+    ):
+        with pytest.raises(ConversationNotFoundError):
+            store.rename_conversation(
+                organization_id=organization_id,
+                user_id=user_id,
+                conversation_id=conversation.conversation_id,
+                title="越权标题",
+            )
+
+    record = store.get_conversation_record(
+        organization_id=org_a.organization_id,
+        user_id=alice.user_id,
+        conversation_id=conversation.conversation_id,
+    )
+    assert record.custom_title is None
+
+
 def test_messages_round_trip_in_order(tmp_path):
     store, alice, _, org_a, _ = build_scope(tmp_path)
     conversation = store.create_conversation(

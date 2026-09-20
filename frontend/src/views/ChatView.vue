@@ -25,6 +25,7 @@ import MessageList from '@/components/chat/MessageList.vue'
 import MessageComposer from '@/components/chat/MessageComposer.vue'
 import NewConversationDialog from '@/components/chat/NewConversationDialog.vue'
 import ConversationSettingsDialog from '@/components/chat/ConversationSettingsDialog.vue'
+import RenameConversationDialog from '@/components/chat/RenameConversationDialog.vue'
 import DocumentContentPanel from '@/components/chat/DocumentContentPanel.vue'
 import type { CitationTarget } from '@/api/types'
 import { useChatStore } from '@/stores/chat'
@@ -42,6 +43,12 @@ const draft = ref('')
 const showCreateDialog = ref(false)
 /** 会话设置对话框显隐。 */
 const showSettingsDialog = ref(false)
+/** 重命名对话框状态与目标会话。 */
+const showRenameDialog = ref(false)
+const renameTargetId = ref<string | null>(null)
+const renameTargetTitle = computed(
+  () => chatStore.conversations.find((item) => item.conversation_id === renameTargetId.value)?.title ?? '',
+)
 /** 窄屏会话列表抽屉显隐。 */
 const showMobileList = ref(false)
 
@@ -98,6 +105,34 @@ async function openConversationById(conversationId: string): Promise<void> {
 function onSelectConversation(conversationId: string): void {
   showMobileList.value = false
   void router.push({ name: 'chat-detail', params: { conversationId } })
+}
+
+/** 从会话列表打开指定会话的重命名对话框。 */
+function onRenameConversation(conversationId: string): void {
+  renameTargetId.value = conversationId
+  showRenameDialog.value = true
+}
+
+/** 保存手动标题；失败时保留输入以便用户修改后重试。 */
+async function onSaveRename(title: string): Promise<void> {
+  const conversationId = renameTargetId.value
+  if (!conversationId) return
+  const ok = await chatStore.renameConversation(conversationId, title)
+  if (ok) {
+    showRenameDialog.value = false
+    renameTargetId.value = null
+    message.success('会话已重命名')
+  } else if (chatStore.currentConversationId === null && routeConversationId.value === conversationId) {
+    showRenameDialog.value = false
+    renameTargetId.value = null
+    await router.replace({ name: 'chat' })
+  } else if (chatStore.displayError === '会话不存在或已不可访问') {
+    showRenameDialog.value = false
+    renameTargetId.value = null
+    message.warning(chatStore.displayError)
+  } else if (chatStore.displayError) {
+    message.error(chatStore.displayError)
+  }
 }
 
 /** 新建会话提交：创建成功后进入新会话。 */
@@ -198,6 +233,8 @@ watch(
   (organizationId, previous) => {
     if (organizationId && organizationId !== previous) {
       docTarget.value = null
+      showRenameDialog.value = false
+      renameTargetId.value = null
       if (routeConversationId.value) {
         void router.replace({ name: 'chat' })
       }
@@ -240,6 +277,7 @@ onBeforeUnmount(() => {
           :loading-more="chatStore.listLoading && chatStore.conversations.length > 0"
           :creating="chatStore.creating"
           @select="onSelectConversation"
+          @rename="onRenameConversation"
           @create="showCreateDialog = true"
           @retry="chatStore.loadConversations(true)"
           @load-more="chatStore.loadMoreConversations"
@@ -356,6 +394,7 @@ onBeforeUnmount(() => {
             :loading-more="chatStore.listLoading && chatStore.conversations.length > 0"
             :creating="chatStore.creating"
             @select="onSelectConversation"
+            @rename="onRenameConversation"
             @create="showCreateDialog = true"
             @retry="chatStore.loadConversations(true)"
             @load-more="chatStore.loadMoreConversations"
@@ -376,6 +415,13 @@ onBeforeUnmount(() => {
         :system-prompt="chatStore.systemPrompt"
         :updating="chatStore.promptUpdating"
         @save="onSaveSystemPrompt"
+      />
+
+      <RenameConversationDialog
+        v-model:show="showRenameDialog"
+        :title="renameTargetTitle"
+        :updating="chatStore.renamingConversationId !== null"
+        @save="onSaveRename"
       />
     </div>
   </MainLayout>

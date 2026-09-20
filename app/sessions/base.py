@@ -18,6 +18,7 @@ class ConversationRecord:
   created_at : str  # 会话创建时间（UTC 文本，供界面展示）
   updated_at : str  # 会话最近活动时间（UTC 文本，用于倒序排序与展示）
   first_user_content : str | None  # 首条用户消息正文（标题推导用）；尚无消息时为 None
+  custom_title : str | None  # 用户手动设置的会话标题；未重命名时为 None
 
 
 @dataclass(frozen = True)
@@ -117,6 +118,17 @@ class SessionStore(Protocol):
     conversation_id : str,
     system_prompt : str
   )->None:
+    raise NotImplementedError
+
+  def rename_conversation(
+    self,
+    *,
+    organization_id : str,
+    user_id : str,
+    conversation_id : str,
+    title : str,
+  )->None:
+    """仅修改当前企业、当前用户自己的会话标题。"""
     raise NotImplementedError
 
   def load_messages(

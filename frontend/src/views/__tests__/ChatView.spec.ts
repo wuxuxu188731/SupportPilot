@@ -14,6 +14,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError } from '@/api/errors'
 import { createAppRouter } from '@/router'
 import ChatView from '@/views/ChatView.vue'
+import RenameConversationDialog from '@/components/chat/RenameConversationDialog.vue'
 import { AUTH_STORAGE_KEY, ORGANIZATION_STORAGE_KEY } from '@/stores/persistence'
 import { flushNavigation } from '@/test/routerHelpers'
 
@@ -31,6 +32,7 @@ vi.mock('@/api/chat', () => ({
   createConversation: vi.fn(),
   getConversationHistory: vi.fn(),
   updateSystemPrompt: vi.fn(),
+  renameConversation: vi.fn(),
   sendChatMessage: vi.fn(),
 }))
 vi.mock('@/api/action', () => ({
@@ -319,6 +321,30 @@ describe('ChatView 会话列表交互', () => {
 
     expect(router.currentRoute.value.name).toBe('chat-detail')
     expect(router.currentRoute.value.params.conversationId).toBe('conv-1')
+  })
+
+  // 保护行为：列表重命名入口保存成功后，当前会话页头立即显示新标题。
+  it('重命名当前会话后更新列表与页头', async () => {
+    vi.mocked(chatApi.listConversations).mockResolvedValue(CONVERSATIONS)
+    vi.mocked(chatApi.getConversationHistory).mockResolvedValue(historyResponse())
+    vi.mocked(chatApi.renameConversation).mockResolvedValue({
+      ...CONVERSATIONS[0],
+      title: '售后跟进',
+      updated_at: '2026-09-20 08:00:00',
+    })
+    seedLogin()
+
+    const { wrapper } = await mountChatView('/app/chat/conv-1')
+    await flushNavigation()
+    await wrapper.find('[data-test="rename-conv-1"]').trigger('click')
+    const dialog = wrapper.findComponent(RenameConversationDialog)
+    expect(dialog.props('show')).toBe(true)
+    dialog.vm.$emit('save', '售后跟进')
+    await flushPromises()
+
+    expect(chatApi.renameConversation).toHaveBeenCalledWith('conv-1', { title: '售后跟进' })
+    expect(wrapper.find('.chat-title').text()).toBe('售后跟进')
+    expect(dialog.props('show')).toBe(false)
   })
 })
 

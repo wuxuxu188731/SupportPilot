@@ -171,7 +171,7 @@ export interface ApiErrorShape {
 export interface ConversationListItem {
   /** 会话唯一标识（服务端生成），路由参数 conversationId 使用该值 */
   conversation_id: string
-  /** 会话标题：服务端由首条用户消息推导；空会话显示「新会话」 */
+  /** 会话标题：手动标题优先，否则由首条用户消息推导 */
   title: string
   /** 会话创建时间：UTC 文本 "%Y-%m-%d %H:%M:%S"（无时区后缀） */
   created_at: string
@@ -209,6 +209,8 @@ export interface ConversationHistoryMessage {
 export interface ConversationHistoryResponse {
   /** 会话唯一标识 */
   conversation_id: string
+  /** 当前会话标题；旧接口未返回时前端仍可使用列表标题 */
+  title?: string
   /** 会话当前附加系统提示词；未设置时为 null */
   system_prompt: string | null
   /** 会话创建时间：UTC 文本 */
@@ -229,6 +231,12 @@ export interface CreateConversationRequest {
 export interface ConversationCreated {
   /** 新会话唯一标识 */
   conversation_id: string
+}
+
+/** 重命名会话请求体；去除首尾空白后限 1–30 个字符。 */
+export interface RenameConversationRequest {
+  /** 用户指定的会话标题 */
+  title: string
 }
 
 /** 更新会话系统提示词请求体（后端 UpdateSystemPromptRequest，extra=forbid）。 */

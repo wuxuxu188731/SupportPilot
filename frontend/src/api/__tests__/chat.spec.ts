@@ -76,6 +76,20 @@ describe('历史消息与创建/更新 API', () => {
       system_prompt: '新偏好',
     })
   })
+
+  // 保护行为：重命名通过所属会话路径提交标题，并使用服务端返回的列表项。
+  it('PUT /conversations/{id}/title/ 返回更新后的列表项', async () => {
+    const updated = {
+      conversation_id: 'conv-1', title: '售后跟进',
+      created_at: '2026-09-01 08:00:00', updated_at: '2026-09-20 08:00:00',
+    }
+    vi.mocked(httpClient.put).mockResolvedValue({ data: updated })
+
+    const result = await chatApi.renameConversation('conv-1', { title: '售后跟进' })
+
+    expect(result).toEqual(updated)
+    expect(httpClient.put).toHaveBeenCalledWith('/conversations/conv-1/title/', { title: '售后跟进' })
+  })
 })
 
 describe('聊天发送 API（长超时且不自动重试）', () => {

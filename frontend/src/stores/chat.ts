@@ -140,6 +140,8 @@ export const useChatStore = defineStore('chat', () => {
   const historyLoadedConversationId = ref<string | null>(null)
   /** 当前会话的附加系统提示词；未设置或未加载为 null */
   const systemPrompt = ref<string | null>(null)
+  /** 历史接口返回的当前标题，供未出现在已加载列表中的会话展示 */
+  const historyTitle = ref<string | null>(null)
   /** 消息发送中（防止重复提交） */
   const sending = ref(false)
   /** 可展示错误：发送/系统提示词等瞬时操作的最新错误消息 */
@@ -148,10 +150,16 @@ export const useChatStore = defineStore('chat', () => {
   const creating = ref(false)
   /** 系统提示词更新进行中（防止重复提交） */
   const promptUpdating = ref(false)
+  /** 正在重命名的会话 id；同一时间只允许一次保存 */
+  const renamingConversationId = ref<string | null>(null)
   /** 一次性提示消息（如「会话不存在或已不可访问」），视图展示后清除 */
   const notice = ref<string | null>(null)
   /** 请求失效标记：企业切换/退出/切换会话时递增，旧响应据此丢弃 */
   const requestEpoch = ref(0)
+  /** 租户失效标记：重命名跨会话切换仍有效，跨企业切换必须失效 */
+  const tenantEpoch = ref(0)
+  /** 列表修订号：重命名后丢弃此前发起的旧列表响应 */
+  const listRevision = ref(0)
 
   // —— 派生状态 ——
 
@@ -161,9 +169,9 @@ export const useChatStore = defineStore('chat', () => {
       conversations.value.find((item) => item.conversation_id === currentConversationId.value) ??
       null,
   )
-  /** 当前会话标题；无列表对象时显示「会话」兜底 */
+  /** 当前会话标题；列表未加载到该会话时使用历史接口标题 */
   const currentConversationTitle = computed(
-    () => currentConversation.value?.title ?? '会话',
+    () => currentConversation.value?.title ?? historyTitle.value ?? '会话',
   )
 
   // —— 内部工具 ——
@@ -190,6 +198,7 @@ export const useChatStore = defineStore('chat', () => {
     messages.value = []
     historyLoadedConversationId.value = null
     systemPrompt.value = null
+    historyTitle.value = null
     historyError.value = null
     sending.value = false
     displayError.value = null
@@ -201,10 +210,11 @@ export const useChatStore = defineStore('chat', () => {
     const capturedOrganizationId = captureOrganizationId()
     if (!capturedOrganizationId) return
     const epoch = requestEpoch.value
+    const revision = listRevision.value
     organizationId.value = capturedOrganizationId
     try {
       const items = await chatApi.listConversations({ limit: CONVERSATION_PAGE_SIZE, offset: 0 })
-      if (!isRequestCurrent(epoch, capturedOrganizationId)) return
+      if (!isRequestCurrent(epoch, capturedOrganizationId) || revision !== listRevision.value) return
       conversations.value = items
       listHasMore.value = items.length >= CONVERSATION_PAGE_SIZE
     } catch {
@@ -217,6 +227,7 @@ export const useChatStore = defineStore('chat', () => {
   /** 切换企业/退出登录时的租户缓存清理：全部聊天状态归零并失效旧请求。 */
   function resetForTenantChange(): void {
     requestEpoch.value += 1
+    tenantEpoch.value += 1
     organizationId.value = null
     conversations.value = []
     conversationsLoaded.value = false
@@ -229,11 +240,14 @@ export const useChatStore = defineStore('chat', () => {
     historyError.value = null
     historyLoadedConversationId.value = null
     systemPrompt.value = null
+    historyTitle.value = null
     sending.value = false
     displayError.value = null
     creating.value = false
     promptUpdating.value = false
+    renamingConversationId.value = null
     notice.value = null
+    listRevision.value += 1
   }
 
   // 注册到租户重置机制：企业切换或退出登录时自动清理聊天状态
@@ -248,17 +262,18 @@ export const useChatStore = defineStore('chat', () => {
       return
     }
     const epoch = requestEpoch.value
+    const revision = listRevision.value
     organizationId.value = capturedOrganizationId
     listLoading.value = true
     listError.value = null
     try {
       const items = await chatApi.listConversations({ limit: CONVERSATION_PAGE_SIZE, offset: 0 })
-      if (!isRequestCurrent(epoch, capturedOrganizationId)) return
+      if (!isRequestCurrent(epoch, capturedOrganizationId) || revision !== listRevision.value) return
       conversations.value = items
       conversationsLoaded.value = true
       listHasMore.value = items.length >= CONVERSATION_PAGE_SIZE
     } catch (error) {
-      if (!isRequestCurrent(epoch, capturedOrganizationId)) return
+      if (!isRequestCurrent(epoch, capturedOrganizationId) || revision !== listRevision.value) return
       conversationsLoaded.value = false
       listError.value = error instanceof Error ? error.message : '会话列表加载失败'
     } finally {
@@ -274,6 +289,7 @@ export const useChatStore = defineStore('chat', () => {
     const capturedOrganizationId = captureOrganizationId()
     if (!capturedOrganizationId) return
     const epoch = requestEpoch.value
+    const revision = listRevision.value
     organizationId.value = capturedOrganizationId
     listLoading.value = true
     try {
@@ -281,14 +297,14 @@ export const useChatStore = defineStore('chat', () => {
         limit: CONVERSATION_PAGE_SIZE,
         offset: conversations.value.length,
       })
-      if (!isRequestCurrent(epoch, capturedOrganizationId)) return
+      if (!isRequestCurrent(epoch, capturedOrganizationId) || revision !== listRevision.value) return
       // 合并去重：避免极端情况下同一会话出现在两页
       const known = new Set(conversations.value.map((item) => item.conversation_id))
       const fresh = items.filter((item) => !known.has(item.conversation_id))
       conversations.value = [...conversations.value, ...fresh]
       listHasMore.value = items.length >= CONVERSATION_PAGE_SIZE
     } catch (error) {
-      if (isRequestCurrent(epoch, capturedOrganizationId)) {
+      if (isRequestCurrent(epoch, capturedOrganizationId) && revision === listRevision.value) {
         listError.value = error instanceof Error ? error.message : '加载更多会话失败'
       }
     } finally {
@@ -329,6 +345,7 @@ export const useChatStore = defineStore('chat', () => {
       historyLoadedConversationId.value = created.conversation_id
       historyError.value = null
       systemPrompt.value = prompt ? prompt : null
+      historyTitle.value = '新会话'
       // 刷新列表让新会话出现在列表（标题「新会话」，排序在顶部）
       await refreshConversationListSilently()
       return created.conversation_id
@@ -365,6 +382,7 @@ export const useChatStore = defineStore('chat', () => {
     historyError.value = null
     historyLoadedConversationId.value = null
     systemPrompt.value = null
+    historyTitle.value = null
     sending.value = false
     displayError.value = null
     historyLoading.value = true
@@ -374,6 +392,7 @@ export const useChatStore = defineStore('chat', () => {
       messages.value = historyToView(history)
       historyLoadedConversationId.value = conversationId
       systemPrompt.value = history.system_prompt
+      historyTitle.value = history.title ?? null
       return 'ok'
     } catch (error) {
       if (!isRequestCurrent(epoch, capturedOrganizationId)) return 'ok'
@@ -401,6 +420,7 @@ export const useChatStore = defineStore('chat', () => {
     historyLoadedConversationId.value = null
     historyError.value = null
     systemPrompt.value = null
+    historyTitle.value = null
     sending.value = false
     displayError.value = null
     historyLoading.value = false
@@ -536,6 +556,55 @@ export const useChatStore = defineStore('chat', () => {
     }
   }
 
+  /** 保存指定会话的手动标题，并立即更新列表与当前页标题。 */
+  async function renameConversation(conversationId: string, titleText: string): Promise<boolean> {
+    const title = titleText.trim()
+    const titleLength = Array.from(title).length
+    if (titleLength < 1 || titleLength > 30) {
+      displayError.value = '会话标题长度必须为 1–30 个字符'
+      return false
+    }
+    if (renamingConversationId.value !== null) return false
+    const capturedOrganizationId = captureOrganizationId()
+    if (!capturedOrganizationId) {
+      displayError.value = '请先选择企业'
+      return false
+    }
+    const tenantSnapshot = tenantEpoch.value
+    renamingConversationId.value = conversationId
+    displayError.value = null
+    try {
+      const updated = await chatApi.renameConversation(conversationId, { title })
+      if (tenantEpoch.value !== tenantSnapshot || captureOrganizationId() !== capturedOrganizationId) return false
+      listRevision.value += 1
+      conversations.value = conversations.value
+        .map((item) => item.conversation_id === conversationId ? updated : item)
+        .sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.conversation_id.localeCompare(a.conversation_id))
+      if (currentConversationId.value === conversationId) historyTitle.value = updated.title
+      return true
+    } catch (error) {
+      if (tenantEpoch.value === tenantSnapshot && captureOrganizationId() === capturedOrganizationId) {
+        if (isApiError(error) && error.status === 404) {
+          listRevision.value += 1
+          if (currentConversationId.value === conversationId) {
+            handleConversationGone()
+          } else {
+            conversations.value = conversations.value.filter((item) => item.conversation_id !== conversationId)
+            displayError.value = '会话不存在或已不可访问'
+          }
+          void refreshConversationListSilently()
+        } else {
+          displayError.value = error instanceof Error ? error.message : '重命名会话失败'
+        }
+      }
+      return false
+    } finally {
+      if (tenantEpoch.value === tenantSnapshot) {
+        renamingConversationId.value = null
+      }
+    }
+  }
+
   /** 视图展示完一次性提示后调用（如「会话不存在」提示条关闭）。 */
   function clearNotice(): void {
     notice.value = null
@@ -560,10 +629,12 @@ export const useChatStore = defineStore('chat', () => {
     historyError,
     historyLoadedConversationId,
     systemPrompt,
+    historyTitle,
     sending,
     displayError,
     creating,
     promptUpdating,
+    renamingConversationId,
     notice,
     // 派生
     currentConversation,
@@ -577,6 +648,7 @@ export const useChatStore = defineStore('chat', () => {
     showConversationList,
     sendMessage,
     updateSystemPrompt,
+    renameConversation,
     clearNotice,
     reset,
   }

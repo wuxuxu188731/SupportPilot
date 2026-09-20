@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel,Field,ConfigDict
+from pydantic import BaseModel,Field,ConfigDict,field_validator
 
 from app.agent.events import AgentEvent
 from app.knowledge.results import Citation, RetrievalSummary
@@ -52,14 +52,26 @@ class SystemPromptUpdated(BaseModel):
   updated : bool
 
 
+class RenameConversationRequest(BaseModel):
+  """手动标题请求；长度在去除首尾空白后校验。"""
+  model_config = ConfigDict({"extra":"forbid"})
+  title : str = Field(min_length=1, max_length=30)  # 用户指定的会话标题，限 1–30 字符
+
+  @field_validator("title", mode="before")
+  @classmethod
+  def trim_title(cls, value: object) -> object:
+    """去除首尾空白后再执行长度校验。"""
+    return value.strip() if isinstance(value, str) else value
+
+
 class ConversationListItem(BaseModel):
   """会话列表项（GET /conversations/ 响应元素）。
 
-  title 不在数据库落库，而是由会话第一条用户消息实时推导，
+  手动标题优先；未重命名时由会话第一条用户消息实时推导，
   因此本模型不包含内部消息或任何原始 payload 字段。
   """
   conversation_id : str  # 会话唯一标识（服务端生成）
-  title : str  # 会话标题：由第一条用户消息推导；空会话显示“新会话”
+  title : str  # 会话标题：优先手动标题，否则由首条用户消息推导
   created_at : str  # 会话创建时间（UTC 文本）
   updated_at : str  # 会话最近活动时间（UTC 文本）
 
@@ -86,6 +98,7 @@ class ConversationHistoryMessage(BaseModel):
 class ConversationHistoryResponse(BaseModel):
   """指定会话的安全历史消息响应（GET /conversations/{id}/messages/）。"""
   conversation_id : str  # 会话唯一标识
+  title : str  # 当前会话标题：手动标题优先，否则为自动标题
   system_prompt : str | None  # 会话当前的附加系统提示词；未设置为 null
   created_at : str  # 会话创建时间（UTC 文本）
   updated_at : str  # 会话最近活动时间（UTC 文本）

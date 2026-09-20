@@ -1066,3 +1066,37 @@ def test_citation_migration_upgrade_from_0013_keeps_existing_messages(tmp_path):
         assert connection.execute(
             "SELECT payload_json FROM messages WHERE seq = 1"
         ).fetchone() == ('{"role":"assistant","content":"答"}',)
+
+
+# 保护行为：已有会话升级后保留消息且手动标题为空，设置标题后拒绝有损降级。
+def test_custom_title_migration_preserves_existing_conversations(tmp_path):
+    database_path = tmp_path / "custom-title-from-0014.db"
+    config = alembic_config(database_path)
+    command.upgrade(config, "0014_message_citations")
+    seed_conversation_with_message(database_path)
+
+    command.upgrade(config, "0015_conversation_custom_title")
+
+    with sqlite3.connect(database_path) as connection:
+        assert connection.execute(
+            "SELECT custom_title FROM conversations LIMIT 1"
+        ).fetchone() == (None,)
+        assert connection.execute(
+            "SELECT payload_json FROM messages WHERE seq = 1"
+        ).fetchone() == ('{"role":"assistant","content":"答"}',)
+        connection.execute("UPDATE conversations SET custom_title = '售后跟进'")
+
+    with pytest.raises(RuntimeError, match="降级会丢失数据"):
+        command.downgrade(config, "0014_message_citations")
+
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("UPDATE conversations SET custom_title = NULL")
+    command.downgrade(config, "0014_message_citations")
+    with sqlite3.connect(database_path) as connection:
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(conversations)")
+        }
+        assert "custom_title" not in columns
+        assert connection.execute(
+            "SELECT payload_json FROM messages WHERE seq = 1"
+        ).fetchone() == ('{"role":"assistant","content":"答"}',)

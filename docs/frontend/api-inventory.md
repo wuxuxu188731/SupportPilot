@@ -14,7 +14,7 @@
 >   `app/api/dependencies.py` / `tests/api/*`，并在导入阶段用临时环境变量
 >   在内存中生成 OpenAPI（`app.openapi()`，未启动服务器、未修改任何配置、
 >   DB 指向临时目录）交叉核对；两种口径结果一致。
-> - 统计结果（**当前**）：**23 个路径、28 个 HTTP 操作**（不含 FastAPI 自带的
+> - 统计结果（**当前**）：**24 个路径、29 个 HTTP 操作**（不含 FastAPI 自带的
 >   `/docs`、`/openapi.json` 等）；加入演示数据接口前为 22 个路径、27 个操作。
 > - **勘误（2026-09-11 手工测试 DEF-04）**：本节此前写「23 个路径」有误，
 >   实际为 **21 个路径**。`42b83d9` 的 **23** 是**操作数**（由 git 历史核对：
@@ -46,6 +46,9 @@
 >   **23 个路径、28 个操作**。前端「生成测试数据」按钮与命令行
 >   `python -m app.demo_data.cli` 共用同一个 `DemoDataSeeder`。字段与
 >   错误码见 4.6.1，验收路径见 [`business-scenarios/manual-test-paths.md`](../business-scenarios/manual-test-paths.md)。
+> - **会话重命名增量（2026-09-20）**：新增 4.3.6
+>   `PUT /conversations/{conversation_id}/title/`，接口面变为
+>   **24 个路径、29 个操作**；手动标题落库，未重命名的旧会话仍使用自动标题。
 
 ---
 
@@ -62,7 +65,7 @@
 | --- | --- | --- | --- |
 | 认证 authentication | `/auth` | 3 | 注册、登录、查询当前用户（登录态恢复） |
 | 组织 organizations | `/organizations` | 6 | 创建企业、列出我的企业、添加成员、成员列表、修改成员角色、移除成员 |
-| 会话与聊天 conversations | `/conversations` | 5 | 会话列表/新建、单轮聊天、历史读取、更新会话系统提示词 |
+| 会话与聊天 conversations | `/conversations` | 6 | 会话列表/新建、单轮聊天、历史读取、更新系统提示词、重命名会话 |
 | 知识库 knowledge | `/knowledge` | 8 | 文档上传/新版本、列表/详情、正文读取、停用/启用、入库任务查询 |
 | 退款/补偿审批与 Run | `/approvals`、`/action-runs` | 5 | 审批列表/详情/决定、Run 状态/恢复 |
 | 演示数据 demo-data | `/demo-data` | 1 | 为当前企业生成演示业务数据（幂等，仅管理员） |
@@ -159,7 +162,8 @@
 ### 2.5 接口命名 / 结构上的注意点（影响前端的既有事实）
 
 - 会话相关路径**带末尾斜杠**（`/conversations/`、`/conversations/{id}/chat/`、
-  `/conversations/{id}/messages/`、`/conversations/{id}/system-prompt/`），
+  `/conversations/{id}/messages/`、`/conversations/{id}/system-prompt/`、
+  `/conversations/{id}/title/`），
   `/auth/login` 等则不带。FastAPI 默认
   `redirect_slashes=True`，路径写错斜杠会返回 307 跳转；前端应**精确按本文档
   路径调用**，避免多一次跳转（无 CORS 时跨域 307 更麻烦）。
@@ -208,6 +212,7 @@ A=仅 admin；✅/❌ 同理。P=公开。
 | 9 | 会话 | POST | `/conversations/{conversation_id}/chat/` | 发送问题并取整轮 Agent 回答（同步） | ✅ | ✅ | G（会话归属人） | 200 | 客服对话页发送框 |
 | 10 | 会话 | GET | `/conversations/{conversation_id}/messages/` | 会话历史读取（只含安全问答文本） | ✅ | ✅ | G（会话归属人） | 200 | 进入会话时加载历史；刷新恢复 |
 | 11 | 会话 | PUT | `/conversations/{conversation_id}/system-prompt/` | 更新会话系统提示词 | ✅ | ✅ | G（会话归属人） | 200 | 会话设置 |
+| 29 | 会话 | PUT | `/conversations/{conversation_id}/title/` | 重命名自己的会话 | ✅ | ✅ | G（会话归属人） | 200 | 会话列表 |
 | 12 | 知识库 | POST | `/knowledge/documents/` | 上传 Markdown/TXT 文档并同步入库 | ✅ | ✅ | A | 201 | 文档上传 |
 | 13 | 知识库 | GET | `/knowledge/documents/` | 文档列表（当前企业） | ✅ | ✅ | G | 200 | 知识库列表页 |
 | 14 | 知识库 | GET | `/knowledge/documents/{document_id}/` | 文档详情：版本历史 + 最近入库任务 | ✅ | ✅ | G | 200 | 知识库详情页 |
@@ -428,14 +433,14 @@ A=仅 admin；✅/❌ 同理。P=公开。
 - 建议页面：成员管理页“移除”按钮（**必须二次确认**，确认文案要说明数据保留
   与重新添加方式）。
 
-### 4.3 会话与聊天 `/conversations`（5 个）
+### 4.3 会话与聊天 `/conversations`（6 个）
 
 > 会话归属规则：会话属于「用户 + 企业」二元组——`ChatService`/`SessionStore`
 > 所有读取都带 `organization_id + user_id`。跨用户、跨企业访问一律
 > `404 {"detail": "conversation not found error"}`（会话对当前登录用户私有，
 > 企业内成员之间不可见彼此的会话）。
-> 会话标题**不落库**：`GET /conversations/` 响应的 `title` 由首条用户消息
-> 实时推导（无消息显示「新会话」），因此不存在会话重命名接口的语义基础。
+> 会话标题优先使用持久化的手动标题；没有重命名的会话仍由首条用户消息
+> 实时推导（无消息显示「新会话」）。
 
 #### 4.3.1 POST `/conversations/` — 新建会话（201）
 
@@ -468,9 +473,9 @@ A=仅 admin；✅/❌ 同理。P=公开。
 - 排序：`updated_at DESC`；同一秒（文本相同）以 `conversation_id` 倒序为
   稳定次级排序，分页顺序可复现。
 - 成功：`200`，`ConversationListItem[]`（字段见附录 A.5）：
-  `{conversation_id, title, created_at, updated_at}`。`title` 由首条用户
-  消息推导（去首尾空白 → 连续空白折叠为单空格 → 截断到 30 字符）；尚无
-  消息的空会话显示「新会话」。
+  `{conversation_id, title, created_at, updated_at}`。`title` 优先使用手动标题；
+  未重命名时由首条用户消息推导（去首尾空白 → 连续空白折叠为单空格 →
+  截断到 30 字符）；尚无消息的空会话显示「新会话」。
 - 错误：`401`；`400`（缺头）；`404`（非成员企业）；`422` 校验数组
   （limit/offset 越界、类型错误）。
 - 源码：`app/api/router.py`（`list_conversations`）、
@@ -532,7 +537,7 @@ A=仅 admin；✅/❌ 同理。P=公开。
 - 鉴权：Bearer + X-Organization-ID。
 - Path 参数：`conversation_id`（strip 后为空 → 422）。
 - 成功：`200`，`ConversationHistoryResponse`（字段见附录 A.5）：
-  `{conversation_id, system_prompt, created_at, updated_at, messages[]}`；
+  `{conversation_id, title, system_prompt, created_at, updated_at, messages[]}`；
   `messages[]` 元素
   `{sequence, role, content, created_at, citations, answer_incomplete}`，
   按原始 `seq ASC` 返回；`role ∈ {user, assistant}`（assistant 一律是无
@@ -587,6 +592,17 @@ A=仅 admin；✅/❌ 同理。P=公开。
 - 建议页面：会话设置面板。当前 system_prompt 可通过 4.3.4 历史接口的
   `system_prompt` 字段回读（最近一次 PUT 成功后的值以本地最近保存值为准，
   二者一致）；新会话的提示词可在创建时传入。
+
+#### 4.3.6 PUT `/conversations/{conversation_id}/title/` — 重命名会话（200）
+
+- 用途：为当前企业、当前用户自己的会话设置持久化的手动标题。
+- 鉴权：Bearer + X-Organization-ID；跨用户、跨企业及不存在的会话统一返回 404。
+- Content-Type：`application/json`；`RenameConversationRequest`：
+  `{title: string}`，去除首尾空白后限 1–30 个字符，额外字段被拒绝。
+- 成功：`200`，返回更新后的 `ConversationListItem`。手动标题在后续聊天与刷新后保留；
+  `updated_at` 同步更新，因此会话可能上移至列表顶部。
+- 历史接口同时返回当前 `title`，确保会话不在列表首页时仍能显示正确页头标题。
+- 错误：空白、超长标题或空白会话 id 返回 `422`。
 
 ### 4.4 知识库 `/knowledge`（8 个）
 
@@ -1086,9 +1102,8 @@ A=仅 admin；✅/❌ 同理。P=公开。
 
 > 均为“现状缺失”，不在本阶段修改后端；列出来供后续排期决策。
 
-1. **会话删除 / 重命名 / 归档**：目前会话只能创建、读取与聊天，无删除或
-   重命名接口（标题由首条消息自动推导，见 4.3）；会话列表接口本身已实现
-   （4.3.2 GET /conversations/）。
+1. **会话删除 / 归档**：目前没有会话删除或归档接口；会话列表和重命名
+   已实现（见 4.3.2、4.3.6）。
 2. **成员管理（第四阶段已补齐主要部分）**：已有「添加成员」（4.2.3）、
    「成员列表」（4.2.4）、「修改成员角色」（4.2.5）、「移除成员」（4.2.6）。
    **仍缺**：成员数汇总接口（列表长度即成员数，无需单独接口）、按用户名搜索
@@ -1212,12 +1227,12 @@ A=仅 admin；✅/❌ 同理。P=公开。
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | conversation_id | string | 会话唯一标识 |
-| title | string | 由首条用户消息推导（空白折叠、截断 30 字符）；空会话为「新会话」 |
+| title | string | 手动标题优先；否则由首条用户消息推导（空白折叠、截断 30 字符），空会话为「新会话」 |
 | created_at | string | 创建时间（UTC 文本 `%Y-%m-%d %H:%M:%S`） |
 | updated_at | string | 最近活动时间（UTC 文本，倒序排序依据） |
 
 - `ConversationHistoryResponse`（GET /conversations/{id}/messages/）：
-  `conversation_id, system_prompt: string|null, created_at, updated_at,
+  `conversation_id, title: string, system_prompt: string|null, created_at, updated_at,
   messages: ConversationHistoryMessage[]`
 - `ConversationHistoryMessage`：
 
@@ -1415,7 +1430,7 @@ versions: VersionView[], decision|null, self_approved: bool, created_at`
    自适应即可）。
 5. `AgentEvent.timestamp` 使用服务器本地时间是否为预期（建议统一 UTC，待确认）。
 6. ~~成员管理~~（第四阶段已补齐：成员列表/改角色/移除，见 4.2.4–4.2.6）；
-   会话删除/重命名等缺口接口是否会补（见 5.4），仍影响后续页面规划范围。
+   会话删除/归档等缺口接口是否会补（见 5.4），仍影响后续页面规划范围。
 7. 成员管理是否需要在移除成员时做级联/保留策略的后端确认：当前实现只回收
    企业访问权、保留其已产生的会话与审批记录，若业务要求不同需后端补充语义。
 8. 企业「退出/转让」能力（管理员自我移除被 409 禁止）是否需要后端新增接口，

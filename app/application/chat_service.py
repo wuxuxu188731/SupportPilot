@@ -143,7 +143,7 @@ class ChatService:
     limit : int,
     offset : int,
   )-> list[ConversationListItem]:
-    """列出当前企业与当前用户自己的会话，标题由首条用户消息实时推导。"""
+    """列出当前用户的会话，手动标题优先于首条用户消息。"""
     records = self._store.list_conversations(
       organization_id=context.organization_id,
       user_id=context.user_id,
@@ -153,7 +153,7 @@ class ChatService:
     return [
       ConversationListItem(
         conversation_id=record.conversation_id,
-        title=derive_conversation_title(record.first_user_content),
+        title=record.custom_title or derive_conversation_title(record.first_user_content),
         created_at=record.created_at,
         updated_at=record.updated_at,
       )
@@ -188,6 +188,7 @@ class ChatService:
     ]
     return ConversationHistoryResponse(
       conversation_id=record.conversation_id,
+      title=record.custom_title or derive_conversation_title(record.first_user_content),
       system_prompt=record.system_prompt,
       created_at=record.created_at,
       updated_at=record.updated_at,
@@ -262,6 +263,36 @@ class ChatService:
         conversation_id=conversation_id,
         system_prompt=system_prompt
       )
+
+  def rename_conversation(
+    self,
+    *,
+    context : TenantContext,
+    conversation_id : str,
+    title : str,
+  )->ConversationListItem:
+    """保存 1–30 字符的手动标题，并返回更新后的列表项。"""
+    clean_title = title.strip()
+    if not 1 <= len(clean_title) <= MAX_CONVERSATION_TITLE_LENGTH:
+      raise ValueError("会话标题长度必须为 1–30 个字符")
+    with self._locks.acquire(conversation_id=conversation_id):
+      self._store.rename_conversation(
+        organization_id=context.organization_id,
+        user_id=context.user_id,
+        conversation_id=conversation_id,
+        title=clean_title,
+      )
+      record = self._store.get_conversation_record(
+        organization_id=context.organization_id,
+        user_id=context.user_id,
+        conversation_id=conversation_id,
+      )
+    return ConversationListItem(
+      conversation_id=record.conversation_id,
+      title=clean_title,
+      created_at=record.created_at,
+      updated_at=record.updated_at,
+    )
 
   def chat(
     self,

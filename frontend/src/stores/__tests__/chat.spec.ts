@@ -16,6 +16,7 @@ vi.mock('@/api/chat', () => ({
   createConversation: vi.fn(),
   getConversationHistory: vi.fn(),
   updateSystemPrompt: vi.fn(),
+  renameConversation: vi.fn(),
   sendChatMessage: vi.fn(),
 }))
 
@@ -273,7 +274,65 @@ describe('创建会话', () => {
   })
 })
 
+describe('重命名会话', () => {
+  // 保护行为：服务端保存成功后列表与当前会话标题立即更新。
+  it('保存成功后更新列表与页头标题', async () => {
+    vi.mocked(chatApi.listConversations).mockResolvedValue([conversation('conv-1', '原标题')])
+    vi.mocked(chatApi.renameConversation).mockResolvedValue(conversation('conv-1', '售后跟进'))
+    const store = useChatStore()
+    seedOrganization()
+    await store.loadConversations()
+    store.currentConversationId = 'conv-1'
+
+    const ok = await store.renameConversation('conv-1', '  售后跟进  ')
+
+    expect(ok).toBe(true)
+    expect(chatApi.renameConversation).toHaveBeenCalledWith('conv-1', { title: '售后跟进' })
+    expect(store.conversations[0].title).toBe('售后跟进')
+    expect(store.currentConversationTitle).toBe('售后跟进')
+  })
+
+  // 边界情况：空白和超长标题在本地拦截，不产生网络请求。
+  it('拒绝不符合 1–30 字符限制的标题', async () => {
+    const store = useChatStore()
+    seedOrganization()
+
+    expect(await store.renameConversation('conv-1', '  ')).toBe(false)
+    expect(await store.renameConversation('conv-1', '长'.repeat(31))).toBe(false)
+    expect(chatApi.renameConversation).not.toHaveBeenCalled()
+  })
+
+  // 安全边界：重命名返回 404 时移除失效会话并展示错误。
+  it('目标会话已失效时从列表移除', async () => {
+    vi.mocked(chatApi.listConversations)
+      .mockResolvedValueOnce([conversation('conv-1')])
+      .mockResolvedValueOnce([])
+    vi.mocked(chatApi.renameConversation).mockRejectedValue(apiError(404))
+    const store = useChatStore()
+    seedOrganization()
+    await store.loadConversations()
+
+    expect(await store.renameConversation('conv-1', '新标题')).toBe(false)
+    expect(store.conversations).toEqual([])
+    expect(store.displayError).toBe('会话不存在或已不可访问')
+  })
+})
+
 describe('历史消息加载', () => {
+  // 保护行为：会话未出现在已加载列表中时，页头使用历史接口返回的标题。
+  it('用历史标题展示超过列表首页的会话', async () => {
+    vi.mocked(chatApi.getConversationHistory).mockResolvedValue({
+      ...emptyHistory('conv-old'),
+      title: '较早的售后会话',
+    })
+    const store = useChatStore()
+    seedOrganization()
+
+    await store.openConversation('conv-old')
+
+    expect(store.currentConversationTitle).toBe('较早的售后会话')
+  })
+
   it('加载成功：消息按角色转换，只带回答级结构化信息', async () => {
     // 保护行为：历史恢复得到安全问答文本 + 回答级信息（引用与完整性标记），
     // 但不得伪造 events/pending_approvals（structured 恒为 null，服务端不保存它们）

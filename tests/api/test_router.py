@@ -60,6 +60,7 @@ class FakeChatService:
       raise ConversationNotFoundError("conversation not found")
     return ConversationHistoryResponse(
       conversation_id=conversation_id,
+      title="标题一",
       system_prompt=None,
       created_at="2026-09-01 08:00:00",
       updated_at="2026-09-02 08:00:00",
@@ -76,6 +77,17 @@ class FakeChatService:
       self, *, context, conversation_id, system_prompt
   ):
     self.calls.append(("prompt",context.organization_id,context.user_id,conversation_id,system_prompt))
+
+  def rename_conversation(self, *, context, conversation_id, title)->ConversationListItem:
+    self.calls.append(("rename", context.organization_id, context.user_id, conversation_id, title))
+    if conversation_id == "missing":
+      raise ConversationNotFoundError("conversation not found")
+    return ConversationListItem(
+      conversation_id=conversation_id,
+      title=title,
+      created_at="2026-09-01 08:00:00",
+      updated_at="2026-09-20 08:00:00",
+    )
 
 def build_client():
   def get_current_tenant():
@@ -134,6 +146,37 @@ def test_update_system_prompt_is_conversation_scoped():
   assert response.status_code==200
   assert response.json()=={"updated": True}
   assert service.calls[0]==("prompt","organization-a","authenticated-user","conversation-1","new prompt")
+
+
+# 保护行为：重命名接口去空白后传入当前租户，并返回更新后的列表项。
+def test_rename_conversation_returns_updated_item():
+  client, service = build_client()
+  response = client.put(
+    "/conversations/conversation-1/title/",
+    json={"title": "  售后跟进  "},
+  )
+
+  assert response.status_code == 200
+  assert response.json()["title"] == "售后跟进"
+  assert service.calls == [
+    ("rename", "organization-a", "authenticated-user", "conversation-1", "售后跟进")
+  ]
+
+
+# 边界情况：标题空白、超长与多余字段均返回 422，且不调用服务层。
+def test_rename_conversation_rejects_invalid_title():
+  client, service = build_client()
+  for payload in ({"title": "   "}, {"title": "长" * 31}, {"title": "有效", "other": 1}):
+    assert client.put("/conversations/conversation-1/title/", json=payload).status_code == 422
+  assert service.calls == []
+
+
+# 安全边界：不存在或无权访问的会话统一返回 404。
+def test_rename_conversation_missing_returns_404():
+  client, _ = build_client()
+  response = client.put("/conversations/missing/title/", json={"title": "新标题"})
+  assert response.status_code == 404
+  assert response.json() == {"detail": "conversation not found error"}
 
 
 def test_blank_question_and_prompt_return_422():
@@ -196,6 +239,7 @@ def test_get_conversation_messages_returns_history():
   body = response.json()
   assert body == {
     "conversation_id": "conversation-1",
+    "title": "标题一",
     "system_prompt": None,
     "created_at": "2026-09-01 08:00:00",
     "updated_at": "2026-09-02 08:00:00",

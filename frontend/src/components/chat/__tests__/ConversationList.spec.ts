@@ -61,6 +61,18 @@ describe('ConversationList 会话列表', () => {
     expect(wrapper.emitted('select')?.[0]).toEqual(['conv-1'])
   })
 
+  // 保护行为：重命名按钮只发出目标会话 id，不触发会话切换。
+  it('点击重命名按钮只发出 rename 事件', async () => {
+    const wrapper = mount(ConversationList, {
+      props: baseProps({ conversations: [conversation('conv-1', '订单问题')] }),
+    })
+
+    await wrapper.find('[data-test="rename-conv-1"]').trigger('click')
+
+    expect(wrapper.emitted('rename')?.[0]).toEqual(['conv-1'])
+    expect(wrapper.emitted('select')).toBeUndefined()
+  })
+
   it('空列表显示空态并引导新建', async () => {
     // 保护行为：无会话时展示空态而不是空白，并给出新建入口
     const wrapper = mount(ConversationList, { props: baseProps() })
