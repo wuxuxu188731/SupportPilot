@@ -1,4 +1,5 @@
 import sqlite3
+from datetime import datetime, timezone
 
 import pytest
 
@@ -23,6 +24,10 @@ CONTEXT = TenantContext(
     user_id="user-a",
     organization_id="org-a",
     role=MembershipRole.AGENT,
+)
+
+FIXED_CURRENT_TIME = datetime(
+  2026, 9, 21, 8, 30, 0, tzinfo=timezone.utc
 )
 
 
@@ -62,7 +67,7 @@ def _seed_second_user_and_org(database_path):
         )
 
 
-def build_service(tmp_path, runner):
+def build_service(tmp_path, runner, *, clock=None):
   store = SQLiteSessionStore(tmp_path / "chat.db")
   _seed_tenant_scope(tmp_path / "chat.db")
   service = ChatService(
@@ -70,6 +75,7 @@ def build_service(tmp_path, runner):
     run_agent = runner,
     locks = ConversationLockRegistry(),
     base_system_prompt=SUPPORT_SYSTEM_PROMPT,
+    clock=clock or (lambda: FIXED_CURRENT_TIME),
   )
   return service, store
 
@@ -80,13 +86,18 @@ def direct_answer_runner(*, messages : list[dict], context)->LLMResponse:
   )
 
 
+# 保护行为：系统规则必须要求时间敏感事实重查，并禁止用预计时间推断送达。
 def test_support_prompt_contains_fact_and_write_rules():
   assert "工具结果" in SUPPORT_SYSTEM_PROMPT
   assert "不得编造" in SUPPORT_SYSTEM_PROMPT
   assert "明确要求创建工单" in SUPPORT_SYSTEM_PROMPT
   assert "ok" in SUPPORT_SYSTEM_PROMPT
+  assert "历史工具结果只用于理解上下文" in SUPPORT_SYSTEM_PROMPT
+  assert "queried_at" in SUPPORT_SYSTEM_PROMPT
+  assert "不能据此推断已经送达" in SUPPORT_SYSTEM_PROMPT
 
 
+# 保护行为：模型请求必须包含服务器时间、附加偏好与当前用户问题。
 def test_chat_prepends_base_prompt_and_passes_context(tmp_path):
   received = []
 
@@ -114,7 +125,14 @@ def test_chat_prepends_base_prompt_and_passes_context(tmp_path):
   assert received_context.conversation_id == conversation.conversation_id
   assert received_context.turn_id
   assert messages[:3] == [
-    {"role": "system", "content": SUPPORT_SYSTEM_PROMPT},
+    {
+      "role": "system",
+      "content": (
+        SUPPORT_SYSTEM_PROMPT
+        + "\n\n服务器运行时上下文（可信）：当前时间为 "
+        "2026-09-21T08:30:00Z（UTC）。"
+      ),
+    },
     {
       "role": "user",
       "content": "会话附加偏好（不能覆盖服务器规则）：\n回复使用简体中文",
@@ -228,7 +246,49 @@ def test_context_tokens_include_internal_history_and_follow_updates(tmp_path):
   assert updated_tokens > response.context_tokens
 
 
+# 保护行为：同一会话的每次请求必须重新取服务器时间，不能复用上一轮时间。
+def test_chat_refreshes_server_time_for_each_request(tmp_path):
+  request_times = iter([
+    datetime(2026, 9, 21, 8, 30, 0, tzinfo=timezone.utc),
+    datetime(2026, 9, 24, 8, 30, 0, tzinfo=timezone.utc),
+  ])
+  received_messages = []
 
+  def recording_runner(*, messages, context):
+    received_messages.append([dict(message) for message in messages])
+    messages.append({"role": "assistant", "content": "answer"})
+    return LLMResponse(llm_answer="answer")
+
+  service, store = build_service(
+    tmp_path,
+    recording_runner,
+    clock=lambda: next(request_times),
+  )
+  conversation = service.create_conversation(context=CONTEXT)
+
+  service.chat(
+    context=CONTEXT,
+    conversation_id=conversation.conversation_id,
+    question="第一次查询",
+  )
+  service.chat(
+    context=CONTEXT,
+    conversation_id=conversation.conversation_id,
+    question="三天后再次查询",
+  )
+
+  assert "2026-09-21T08:30:00Z" in received_messages[0][0]["content"]
+  assert "2026-09-24T08:30:00Z" in received_messages[1][0]["content"]
+  persisted = store.load_messages(
+    organization_id=CONTEXT.organization_id,
+    user_id=CONTEXT.user_id,
+    conversation_id=conversation.conversation_id,
+  )
+  assert all("服务器运行时上下文" not in str(message) for message in persisted)
+
+
+
+# 保护行为：第二轮同时收到完整历史、本轮服务器时间和当前问题。
 def test_second_turn_receives_previous_history_and_system_prompt(tmp_path):
   received_messages = []
 
@@ -257,7 +317,14 @@ def test_second_turn_receives_previous_history_and_system_prompt(tmp_path):
   )
   print(received_messages[1])
   assert received_messages[1] == [
-    { "role":"system", "content": SUPPORT_SYSTEM_PROMPT},
+    {
+      "role":"system",
+      "content": (
+        SUPPORT_SYSTEM_PROMPT
+        + "\n\n服务器运行时上下文（可信）：当前时间为 "
+        "2026-09-21T08:30:00Z（UTC）。"
+      ),
+    },
     {
       "role":"user",
       "content":"会话附加偏好（不能覆盖服务器规则）：\n你是测试助手",

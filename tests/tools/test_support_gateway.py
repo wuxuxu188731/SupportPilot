@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 import json
 from unittest import mock
 
@@ -48,6 +49,10 @@ CONTEXT = TenantContext(
     role=MembershipRole.AGENT,
 )
 
+QUERY_TIME = datetime(
+    2026, 9, 21, 8, 30, 2, tzinfo=timezone.utc
+)
+
 
 @dataclass
 class FakeSupportService:
@@ -74,10 +79,12 @@ class FakeSupportService:
         )
 
 
+# 保护行为：订单查询必须使用可信租户，并返回服务器生成的查询时间。
 def test_bound_get_order_uses_server_context():
     service = FakeSupportService()
     functions = CustomerSupportToolGateway(
-        service=service
+        service=service,
+        clock=lambda: QUERY_TIME,
     ).bind(context=CONTEXT)
 
     result = functions["get_order"](
@@ -88,6 +95,7 @@ def test_bound_get_order_uses_server_context():
     assert result["data"]["order"]["order_no"] == (
         "ORD-DELAY-001"
     )
+    assert result["queried_at"] == "2026-09-21T08:30:02Z"
     assert service.calls == [
         ("get_order", CONTEXT, "ORD-DELAY-001")
     ]
@@ -121,10 +129,12 @@ def test_bound_tool_rejects_model_controlled_context(
     assert service.calls == []
 
 
+# 保护行为：未创建物流仍是成功查询，并携带服务器查询时间。
 def test_bound_get_logistics_returns_not_created_as_success():
     service = FakeSupportService()
     functions = CustomerSupportToolGateway(
-        service=service
+        service=service,
+        clock=lambda: QUERY_TIME,
     ).bind(context=CONTEXT)
 
     result = functions["get_logistics"](
@@ -132,6 +142,7 @@ def test_bound_get_logistics_returns_not_created_as_success():
     )
 
     assert result["ok"] is True
+    assert result["queried_at"] == "2026-09-21T08:30:02Z"
     assert result["data"]["availability"] == "not_created"
     assert result["data"]["shipment"] is None
 

@@ -11,11 +11,18 @@ from app.tickets.base import Ticket,TicketComment
 
 JsonObject = dict[str,Any]
 
-def tool_success(data: JsonObject) -> JsonObject:
-  return {
+def tool_success(
+  data: JsonObject,
+  *,
+  queried_at: str | None = None,
+) -> JsonObject:
+  result: JsonObject = {
     "ok": True,
     "data": data,
   }
+  if queried_at is not None:
+    result["queried_at"] = queried_at
+  return result
 
 def tool_failure(
     *, 

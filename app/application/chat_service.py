@@ -1,12 +1,14 @@
 import logging
 import json
 from dataclasses import fields
+from datetime import datetime
 from typing import Callable
 from uuid import uuid4
 
 from app.agent.invocation_context import AgentInvocationContext
 from app.application.organization_service import TenantContext
 from app.concurrency.conversation_locks import ConversationLockRegistry
+from app.core.time import format_utc_timestamp, utc_now
 from app.knowledge.results import Citation
 from app.knowledge.embeddings import count_tokens
 from app.schemas.chat import (
@@ -118,17 +120,32 @@ class ChatService:
     run_agent : Callable[...,LLMResponse],
     locks : ConversationLockRegistry,
     base_system_prompt: str,
+    clock: Callable[[], datetime] = utc_now,
   ):
     self._store = store
     self._run_agent = run_agent
     self._locks = locks
     self._base_system_prompt = base_system_prompt.strip()
+    self._clock = clock
     if not self._base_system_prompt:
       raise ValueError("base_system_prompt must not be blank")
 
-  def _context_messages(self, system_prompt: str | None, history: list[dict]) -> list[dict]:
-    """构造下一轮调用模型时会携带的固定提示词和完整历史。"""
-    messages = [{"role": "system", "content": self._base_system_prompt}]
+  def _context_messages(
+    self,
+    system_prompt: str | None,
+    history: list[dict],
+    *,
+    current_time: datetime,
+  ) -> list[dict]:
+    """构造模型上下文，并把本轮可信服务器时间写入系统消息。"""
+    runtime_context = (
+      "服务器运行时上下文（可信）：当前时间为 "
+      f"{format_utc_timestamp(current_time)}（UTC）。"
+    )
+    messages = [{
+      "role": "system",
+      "content": f"{self._base_system_prompt}\n\n{runtime_context}",
+    }]
     if system_prompt:
       messages.append({
         "role": "user",
@@ -137,9 +154,19 @@ class ChatService:
     messages.extend(history)
     return messages
 
-  def estimate_context_tokens(self, system_prompt: str | None, history: list[dict]) -> int:
-    """按项目统一分词器估算下一轮请求中的消息 token 数。"""
-    messages = self._context_messages(system_prompt, history)
+  def estimate_context_tokens(
+    self,
+    system_prompt: str | None,
+    history: list[dict],
+    *,
+    current_time: datetime | None = None,
+  ) -> int:
+    """估算下一轮请求 token 数，包含届时会注入的运行时上下文。"""
+    messages = self._context_messages(
+      system_prompt,
+      history,
+      current_time=current_time or self._clock(),
+    )
     return count_tokens(json.dumps(messages, ensure_ascii=False, separators=(",", ":")))
 
   def create_conversation(
@@ -339,7 +366,12 @@ class ChatService:
         user_id=context.user_id,
         conversation_id=conversation.conversation_id,
       )
-      messages = self._context_messages(conversation.system_prompt, history)
+      request_time = self._clock()
+      messages = self._context_messages(
+        conversation.system_prompt,
+        history,
+        current_time=request_time,
+      )
       new_messages_start = len(messages)
       if question.strip():
         messages.append({"role":"user","content":question})
@@ -365,7 +397,9 @@ class ChatService:
         display=self._display_for_turn(new_messages, response),
       )
       response.context_tokens = self.estimate_context_tokens(
-        conversation.system_prompt, history + new_messages
+        conversation.system_prompt,
+        history + new_messages,
+        current_time=request_time,
       )
       return response
 

@@ -1,5 +1,6 @@
 import logging
-from typing import Any, Protocol
+from datetime import datetime
+from typing import Any, Callable, Protocol
 
 from pydantic import ValidationError
 
@@ -19,6 +20,7 @@ from app.application.customer_support_service import (
     TicketNumberGenerationError,
 )
 from app.application.organization_service import TenantContext
+from app.core.time import format_utc_timestamp, utc_now
 from app.tools.support_arguments import SUPPORT_ARGUMENT_MODELS
 from app.tools.support_definitions import (
     get_support_tool_definitions,
@@ -48,8 +50,14 @@ class CustomerSupportToolGateway:
         self,
         *,
         service: CustomerSupportService,
+        clock: Callable[[], datetime] = utc_now,
     ):
         self._service = service
+        self._clock = clock
+
+    def _query_time(self) -> str:
+        """生成由服务器控制的本次业务查询时间。"""
+        return format_utc_timestamp(self._clock())
 
     def _dispatch(
         self,
@@ -64,7 +72,8 @@ class CustomerSupportToolGateway:
                 order_no=parsed.order_no,
             )
             return tool_success(
-                serialize_order_details(details)
+                serialize_order_details(details),
+                queried_at=self._query_time(),
             )
 
         if tool_name == "get_logistics":
@@ -73,7 +82,8 @@ class CustomerSupportToolGateway:
                 order_no=parsed.order_no,
             )
             return tool_success(
-                serialize_logistics_details(details)
+                serialize_logistics_details(details),
+                queried_at=self._query_time(),
             )
 
         if tool_name == "create_ticket":
