@@ -1,86 +1,151 @@
+<div align="center">
+
 # SupportPilot
 
-SupportPilot 是一个面向电商售后客服团队的多租户工单处理 Agent。它能够理解
-客服请求，在当前企业范围内查询客户、订单和物流信息，辅助创建工单和添加内部
-备注，并根据真实工具结果生成回复。不同企业的成员、会话、业务数据和未来知识库
-互相隔离。
+**面向电商售后团队的多租户 AI 客服工作台**
 
-当前已完成：
+让 Agent 在可信企业上下文中连接业务数据、知识库与人工审批，为客服提供可追溯、可管控的处理闭环。
 
-- 用户认证、多租户和 `admin` / `agent` 最小 RBAC。
-- 企业范围的客户、订单、物流、工单和工单备注。
-- 不依赖 LLM 的确定性客服业务服务。
-- 使用可信 `TenantContext` 为每个请求重新绑定的受控 Tool Gateway。
-- “查询订单 → 查询物流 → 创建工单 → 生成回复”Agent 黄金路径。
-- 退款与优惠券补偿提案、管理员审批、修改后批准和拒绝。
-- 使用独立 SQLite checkpointer 的 LangGraph 确定性暂停/恢复工作流。
-- 版本化幂等执行、可重试失败恢复、跨租户隐藏和结构化待审批响应。
+![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688?logo=fastapi&logoColor=white)
+![Vue](https://img.shields.io/badge/Vue-3.5-42B883?logo=vuedotjs&logoColor=white)
+![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)
+![LangGraph](https://img.shields.io/badge/LangGraph-1.1-1C3C3C)
+![Qdrant](https://img.shields.io/badge/Qdrant-1.18-DC244C?logo=qdrant&logoColor=white)
 
-### 退款/补偿审批与可靠执行
+</div>
 
-- Agent 只暴露 `propose_refund`、`propose_compensation` 和只读
-  `get_action_status`；审批、恢复与执行器不会暴露给模型。
-- 提案创建不产生退款或补偿副作用，只有当前企业 `admin` 的持久化批准决定才能授权
-  执行。
-- 审批支持批准、修改后批准和拒绝；重复决定、重复恢复与节点重放由业务幂等键保护。
-- 等待审批、决定提交后恢复失败和可重试执行失败都可以使用原 Run 恢复。
-- 退款与补偿结果均为模拟业务记录，不代表真实到账或真实发券。
-- 部署、备份、状态判断和故障恢复步骤见
-  [`docs/refund-compensation-operations.md`](docs/refund-compensation-operations.md)。
+## 主界面截图
 
-知识库：
+![SupportPilot 工作台主界面](docs/assets/supportpilot-main.png)
 
-- 已完成企业范围的 Markdown/TXT 知识入库、版本管理和停用/启用。
-- 已完成 DashScope dense+sparse + Qdrant RRF 的传统 RAG Baseline。
-- 已完成 Stage B：NONE/SINGLE/MULTI 三路 Planner、多查询混合召回、最多一次补充检索、EvidenceAssessor，以及业务工具与知识工具的同回合组合。
-- Baseline 与 Agentic Search 都会对每次 embedding 召回且经 SQLite 校验的 chunk 调用同一个百炼 `qwen3-rerank`；Baseline 仍保持单原问题、单轮混合召回，Agentic Search 额外使用 Planner、查询拆解和 EvidenceAssessor。
-- `search_knowledge(question)` 由请求级可信租户上下文绑定；模型不能传租户、Top-K、轮数或超时。
-- 充分证据以服务端 C1..Cn 结构化引用返回；未知引用或完全漏引会被确定性标记为 `answer_incomplete`。
-- 阶段 A 已修正 ordinal 邻接误删互补章节的问题，并将 raw Top-K precision 与阶段 B
-  最终 citation precision 分开。历史候选的无网络回放为 20/20 黄金章节命中；真实
-  DashScope/Qdrant 重跑命令见 `docs/evals/tenant-scoped-rag-stage-a-baseline.md`。
-- Stage C 提供 48 条样例的 Baseline/Adaptive 检索级对照；本地 fake/黄金路径测试不代表真实环境质量达标。
+## 项目亮点
 
-### Stage C 检索评测
+- **端到端客服 Agent**：串联客户、订单、物流、工单与知识检索工具，覆盖“理解问题—查询事实—生成答复—持续跟进”的客服路径。
+- **可信多租户隔离**：认证、成员角色、会话、业务数据与知识库均绑定企业上下文；租户标识由服务端校验，不交给模型自由传入。
+- **Agentic RAG**：支持查询规划、多查询混合召回、RRF 融合、统一重排序与证据充分性评估，并在回答中返回可定位的结构化引用。
+- **人机协同审批**：退款与优惠券补偿先形成提案，再由管理员批准、修改后批准或拒绝；LangGraph 持久化暂停与恢复保障流程可追踪。
+- **可靠执行机制**：通过版本化幂等键、独立 Checkpointer、失败重试与原 Run 恢复，降低重复审批、节点重放和执行中断带来的风险。
+- **完整管理界面**：提供客服对话、审批中心、知识库、成员管理、企业切换及引用原文定位，兼顾管理员与客服成员的权限差异。
 
-配置 `DASHSCOPE_API_KEY`、`DEEPSEEK_API_KEY` 并启动本地 Qdrant 后，在仓库根目录运行（同一命令会从 checkpoint 续跑）：
+> 当前退款、补偿和优惠券结果均为模拟业务记录，不会触发真实支付、发券或外部 CRM 写入。
 
-重排序默认使用北京业务空间 `ws-tocwkn1wc3xhur1f` 和通用问答检索指令，Baseline 与 Agentic Search 共享相同实例，并仅对 embedding 召回且经 SQLite 校验的 chunk 正文排序。可通过 `KNOWLEDGE_RERANK_INSTRUCT=Retrieve semantically similar text.` 切换为语义相似度策略；密钥始终从 `DASHSCOPE_API_KEY` 读取。
+## 核心业务流程
 
-```text
-python scripts/run_stage_c_retrieval_eval.py --database .artifacts/stage-c-retrieval/state.db --cases evals/knowledge/stage_c/cases.jsonl --checkpoint .artifacts/stage-c-retrieval/checkpoint.json --output .artifacts/stage-c-retrieval/report.json
+```mermaid
+flowchart LR
+    A[客服发起会话] --> B[加载认证与企业上下文]
+    B --> C[Agent 理解问题并规划]
+    C --> D{选择处理能力}
+    D -->|业务事实| E[查询客户、订单、物流与工单]
+    D -->|制度知识| F[混合召回、重排序与证据评估]
+    E --> G[生成带依据的客服答复]
+    F --> G
+    C -->|退款或补偿| H[创建待审批提案]
+    H --> I{管理员审批}
+    I -->|拒绝| J[记录决定并反馈]
+    I -->|批准或修改后批准| K[恢复 LangGraph 工作流]
+    K --> L[幂等执行并回写结果]
+    L --> G
 ```
 
-运行状态、恢复记录和结果分别写入 `.artifacts/stage-c-retrieval/state.db`、`.artifacts/stage-c-retrieval/checkpoint.json` 与 `.artifacts/stage-c-retrieval/report.json`。两种策略统一按最终前 5 个 citation 评分；Adaptive 的第 6 个 citation 仅保留为诊断信息。
+## 系统架构
 
-Embedding、模型或 Qdrant 基础设施失败会写入可续跑 checkpoint 并以非零状态退出，不能按“无结果”解读。DashScope/DeepSeek 余额不足时充值后使用同一命令续跑；Qdrant 返回 503/Bad Gateway 时先排除 VPN/代理干扰，再使用同一命令续跑。
+```mermaid
+flowchart TB
+    UI[Vue 3 单页应用<br/>Naive UI · Pinia · Vue Router]
+    API[FastAPI 接口层<br/>认证 · 租户上下文 · REST API]
+    APP[应用服务层<br/>对话 · 企业 · 客服业务 · 审批]
+    AGENT[Agent 编排层<br/>DeepSeek · Composite Tool Gateway]
+    FLOW[LangGraph 动作工作流<br/>暂停 · 审批 · 恢复 · 幂等执行]
+    RAG[知识检索层<br/>Planner · Hybrid Search · Rerank · Evidence]
+    DB[(SQLite<br/>业务、会话与知识元数据)]
+    CHECK[(SQLite Checkpointer<br/>工作流状态)]
+    VECTOR[(Qdrant<br/>Dense + Sparse 向量)]
+    MODEL[外部模型服务<br/>DeepSeek · DashScope · LlamaParse]
 
-前端：
+    UI -->|HTTP / JSON| API
+    API --> APP
+    APP --> AGENT
+    APP --> FLOW
+    AGENT --> RAG
+    AGENT --> APP
+    APP --> DB
+    FLOW --> CHECK
+    RAG --> DB
+    RAG --> VECTOR
+    AGENT --> MODEL
+    RAG --> MODEL
+```
 
-- 已完成注册登录、企业创建与切换、客服对话（含引用、检索摘要、Agent 事件与待审批卡片）、
-  审批中心、知识库管理与企业成员管理。
-- 已完成知识库正文查看与引用跳转：正文按**版本**读取入库时转换好的 Markdown
-  （`GET /knowledge/documents/{id}/versions/{id}/content/`），引用卡片可跳到正文并
-  按引用偏移**高亮**对应片段，偏移缺失/越界时降级为章节或文档顶部定位。
-  桌面端为对话区右侧内嵌面板（与对话同屏并排，不是遮罩），窄屏降级为整页跳转；
-  正文缓存为“内存 + 会话内”，企业切换即清理；**不提供原文下载**（读到的是转换后的
-  Markdown，不是 PDF/Word 原件）。
-- 已完成**引用随回答持久化**：引用（含来源文档、标题路径、证据片段快照与偏移）与
-  「引用是否可能不完整」标记随回答一起落库（迁移 `0014_message_citations`），
-  刷新页面或重新进入会话后引用卡片仍在、可继续「查看原文位置」并高亮，
-  展示与刷新前完全一致；偏移按**生成时冻结的版本**解释，不会重新对齐到最新版本。
-  同一轮内多次知识检索的引用编号**全局连续**（不会互相冲突），检索摘要如实反映
-  实际检索轮数。
-- 审批中心覆盖列表筛选与分页、审批详情与版本时间线、批准 / 修改后批准 / 拒绝三种决定，
-  以及 Run 状态查看与恢复；`agent` 角色只读，决定入口仅对 `admin` 展示。
-- 企业切换或退出登录时统一清理租户相关状态，并丢弃旧企业迟到响应。
+## 技术栈
 
-当前不包含：
+| 层级 | 技术 | 用途 |
+| --- | --- | --- |
+| 前端 | Vue 3、TypeScript、Vite、Naive UI、Pinia、Vue Router、Axios | 工作台界面、状态管理与 API 通信 |
+| API | Python 3.12、FastAPI、Pydantic、Uvicorn | HTTP 接口、参数校验与依赖注入 |
+| Agent | OpenAI Python SDK、DeepSeek、LangGraph | 模型调用、工具编排与可恢复工作流 |
+| 知识库 | DashScope Embedding、Qwen3-Rerank、Qdrant、LlamaParse | 文档解析、混合检索、重排序与引用定位 |
+| 数据 | SQLite、SQLAlchemy、Alembic | 业务数据、会话、知识元数据与迁移 |
+| 质量保障 | Pytest、Vitest、Vue Test Utils、ESLint | 后端、前端、集成与评测测试 |
+| 部署 | Docker Compose、Nginx | 前后端与 Qdrant 的容器化部署 |
 
-- 真实支付退款、真实优惠券发放或外部 CRM 写入。
-- 消息通知、Worker、定时重试和多实例分布式执行租约。
-- 真实电商、物流和 CRM 集成。
-- 知识库原文下载与正文分页。
-- 处理过程（`events`）、检索摘要行（`retrieval_summary`）与待审批卡片
-  （`pending_approvals`）的持久化：刷新后只恢复问答文本与**引用**，
-  这三项仍会消失（属既定范围，见设计稿第 11 节）。
+## 快速启动
+
+### 方式一：Docker Compose（推荐）
+
+准备好 Docker 与 Docker Compose 后，在项目根目录执行：
+
+```powershell
+Copy-Item .env.production.example .env.production
+```
+
+编辑 `.env.production`，至少配置：
+
+- `DEEPSEEK_API_KEY`：对话模型密钥；
+- `DASHSCOPE_API_KEY`：Embedding 与重排序服务密钥；
+- `AUTH_SECRET_KEY`：不少于 32 个字符的随机字符串；
+- `LLAMA_CLOUD_API_KEY`：可选，仅上传 PDF/DOCX 时需要。
+
+启动完整服务：
+
+```powershell
+docker compose -f compose.production.yaml up -d --build
+```
+
+浏览器访问 [http://localhost](http://localhost)，注册账号并创建企业后即可进入工作台。首次体验可在企业选择页点击“生成测试数据”。
+
+停止服务：
+
+```powershell
+docker compose -f compose.production.yaml down
+```
+
+### 方式二：本地开发
+
+环境要求：Python 3.10+、Node.js 18+、Docker。
+
+```powershell
+# 启动向量数据库
+docker compose up -d qdrant
+
+# 安装并启动后端
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirement.txt
+Copy-Item .env.example .env
+# 完成 .env 中的必填配置后启动
+uvicorn main:app --reload --host 127.0.0.1 --port 8000
+```
+
+另开一个终端启动前端：
+
+```powershell
+Set-Location frontend
+npm ci
+npm run dev
+```
+
+访问 [http://127.0.0.1:5173](http://127.0.0.1:5173)。Vite 会把 `/api` 请求代理到 `http://127.0.0.1:8000`。
+
+历史阶段说明与已完成能力详见 [阶段成果记录](docs/阶段成果记录.md)。
