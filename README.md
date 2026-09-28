@@ -17,7 +17,21 @@
 
 ## 主界面截图
 
+### 工作台概览
+
 ![SupportPilot 工作台主界面](docs/assets/supportpilot-main.png)
+
+### 带知识引用的客服对话
+
+回答同时展示结构化知识引用、Agent 工具调用过程与检索摘要；点击“查看原文位置”后，可在右侧面板核对来源文档。
+
+![SupportPilot 客服对话、知识引用与原文定位](docs/assets/supportpilot-chat-citations.png)
+
+### 退款与补偿审批
+
+审批中心统一承载退款与补偿提案。下图以退款提案为例，管理员可核对请求版本和变更历史，并选择批准、修改后批准或拒绝。
+
+![SupportPilot 退款与补偿审批](docs/assets/supportpilot-approval.png)
 
 ## 项目亮点
 
