@@ -123,7 +123,7 @@ docker compose -f compose.production.yaml down
 
 ### 方式二：本地开发
 
-环境要求：Python 3.10+、Node.js 18+、Docker。
+环境要求：Python 3.10+（推荐 3.12）、Node.js 20+、npm 10+、Docker 与 Docker Compose。
 
 ```powershell
 # 启动向量数据库
